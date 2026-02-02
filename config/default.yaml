@@ -70,6 +70,6 @@ revision:
   stall_min_rqs_delta: 0.2
 
 llm:
-  enabled: false   # set true + configure .env to use LLM-based revision proposals
+  enabled: true   # set true + configure .env to use LLM-based revision proposals
   temperature: 0.2
   max_tokens: 800

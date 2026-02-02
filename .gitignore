@@ -51,3 +51,4 @@ target_dice_summary.csv
 
 # OS
 .DS_Store
+debug.log
