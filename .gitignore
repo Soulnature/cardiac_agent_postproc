@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Env
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Project specific
+*.pkl
+*_img.png
+*_pred.png
+*_gt.png
+*_pred_optimized.png
+*_pred_iter*.png
+agent_runs/
+runs/
+label_optimization_log.csv
+label_optimization_summary.csv
+target_dice_report.csv
+target_dice_summary.csv
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

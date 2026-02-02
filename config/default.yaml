@@ -1,0 +1,75 @@
+paths:
+  source_dir: "/data484_2/xzhao14/heart/test/all_frames_export"
+  target_dir: "/data484_2/mferrari2/results_segmentation/MnM2"
+  runs_subdir: "agent_runs"   # will create TARGET_DIR/agent_runs and SOURCE_DIR/agent_runs
+  atlas_path: "shape_atlas.pkl"
+
+solver:
+  max_outer: 10
+  topk_frac: 0.25
+  topk_min: 20
+  topk_max: 200
+  max_inner: 30
+  min_delta: 0.2
+  patience: 5
+  stop_min_rqs: 90.0
+  stop_min_rqs_delta: 0.2
+  stop_min_rqs_stagnant_rounds: 2
+
+view_inference:
+  rv_ratio_2ch_threshold: 0.02
+  rv_ratio_rv_optional_threshold: 0.005
+
+edge:
+  sobel_percentile: 85
+  overlap_target: 0.55
+
+shape_atlas:
+  target_diag: 128
+  kmeans_max: 4
+  kmeans_min: 2
+  per_view_divisor: 15
+  min_samples_for_clustering: 5
+
+reward_weights:
+  # Keep weights here so revisions can adjust without editing code
+  P_touch: 1.0
+  P_rv_2ch: 1.0
+  P_components: 1.0
+  P_islands: 1.0
+  P_valve_leak: 1.0
+  P_double_cavity: 1.0
+  P_holes: 1.0
+  P_size_drift: 1.0
+  P_edge_misalignment: 1.0
+  P_shape_prior: 1.0
+  P_boundary_roughness: 1.0
+  R_enclosure: 1.0
+  R_shape_match: 1.0
+
+ops:
+  small_component_floor: 20
+  small_component_frac: 0.002
+  island_frac: 0.02
+
+  morph_kernel3: 3
+  smooth:
+    contour_epsilon: 1.5
+    gaussian_sigma: 1.0
+    morph_r: 2
+
+revision:
+  enabled: true
+  max_revisions: 5
+  stop_min_dice: 0.90
+  stop_max_hd95: 4.0
+  stop_min_rqs: 90.0
+  stall_rounds: 2
+  stall_min_dice_delta: 0.001
+  stall_max_hd95_delta: 0.1
+  stall_min_rqs_delta: 0.2
+
+llm:
+  enabled: false   # set true + configure .env to use LLM-based revision proposals
+  temperature: 0.2
+  max_tokens: 800
