@@ -1,14 +1,14 @@
 paths:
-  source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export"
-  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs" # run script adds subdir
-  runs_subdir: "run_v29_vlm_pipeline"
+  source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/worst5_test"
+  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/worst5_outputs"
+  runs_subdir: "worst5_vlm_run"
   atlas_path: "shape_atlas.pkl"
 
 solver:
   max_outer: 10
-  topk_frac: 0.25
-  topk_min: 20
-  topk_max: 200
+  topk_frac: 1.0
+  topk_min: 5
+  topk_max: 5
   max_inner: 15
   min_delta: 0.5
   min_quality_delta: 0.01
@@ -16,17 +16,15 @@ solver:
   stop_min_rqs: 90.0
   stop_min_rqs_delta: 0.2
   stop_min_rqs_stagnant_rounds: 2
-
-  # Conditional Optimization
   skip_good_rqs_threshold: 75.0
   atlas_builder_min_rqs: 80.0
 
 triage:
   enabled: true
-  good_threshold: 0.95       # raised: only skip truly perfect cases
-  bad_threshold: 0.70        # lowered: only auto-bad truly broken cases
-  vlm_enabled: true           # ENABLED: VLM screening for borderline cases
-  vlm_accept_threshold: 70    # VLM score >= this → classify as good
+  good_threshold: 0.95
+  bad_threshold: 0.70
+  vlm_enabled: true
+  vlm_accept_threshold: 70
 
 view_inference:
   rv_ratio_2ch_threshold: 0.02
@@ -47,7 +45,6 @@ shape_atlas:
 reward_weights:
   use_surrogate: false
   surrogate_path: "surrogate_model.pkl"
-  # Kept for atlas_builder and optional logging, NOT used in optimizer decisions
   P_touch: 50.0
   P_edge_misalignment: 4.0
   P_components: 18.0
@@ -68,7 +65,6 @@ ops:
   small_component_floor: 20
   small_component_frac: 0.002
   island_frac: 0.02
-
   morph_kernel3: 3
   smooth:
     contour_epsilon: 1.5
@@ -76,8 +72,8 @@ ops:
     morph_r: 2
 
 revision:
-  enabled: false              # disabled: VLM pipeline is single-pass
-  max_revisions: 30
+  enabled: false
+  max_revisions: 0
   stop_min_dice: 0.90
   stop_max_hd95: 4.0
   stall_rounds: 5
@@ -91,7 +87,6 @@ llm:
   temperature: 0.15
   max_tokens: 8192
 
-# Visual-Language Model Guardrail
 vision_guardrail:
   enabled: true
   model: "mistralai/mistral-large-3-675b-instruct-2512"
@@ -101,14 +96,14 @@ vision_guardrail:
 quality_model:
   enabled: true
   path: "quality_model.pkl"
-  blend_mode: "hybrid"  # none | hybrid | replace
+  blend_mode: "hybrid"
   blend_alpha: 0.5
   bad_threshold: 0.8
   log_features: false
 
 diagnosis:
   enabled: true
-  vlm_enabled: true            # ENABLED: VLM spatial diagnosis
-  spatial: true                # NEW: enable spatial output format
+  vlm_enabled: true
+  spatial: true
   quality_threshold: 0.8
-  max_suggestions: 4           # reduced: focus on top issues
+  max_suggestions: 4

@@ -35,13 +35,18 @@ def read_mask(path: str) -> np.ndarray:
     # sanitize to 0..3 if needed
     uniq = set(np.unique(m).tolist())
     if not uniq.issubset(VALID_MASK_VALUES):
-        # common case: saved as 0/255 etc; try map by rounding
-        m = np.clip(m, 0, 3)
+        # Case A: 0, 85, 170, 255
+        if m.max() > 3:
+             m = (m / 85).astype(np.int32)
+             m = np.clip(m, 0, 3)
+        else:
+             m = np.clip(m, 0, 3)
     return m
 
 def write_mask(path: str, mask: np.ndarray) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    m = mask.astype(np.uint8)
+    # Map 0,1,2,3 -> 0,85,170,255 for visibility/compatibility
+    m = (mask * 85).astype(np.uint8)
     cv2.imwrite(path, m)
 
 def list_frames(folder: str) -> List[Dict[str,str]]:

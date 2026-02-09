@@ -5,11 +5,11 @@ import numpy as np
 def infer_view_type(filename: str, mask: np.ndarray, rv_ratio_threshold: float=0.02) -> tuple[str, str]:
     # returns (view_type, reason)
     low = filename.lower()
-    if "2ch" in low:
+    if "2ch" in low or "2c" in low:
         return "2ch", "filename"
-    if "3ch" in low:
+    if "3ch" in low or "3c" in low:
         return "3ch", "filename"
-    if "4ch" in low:
+    if "4ch" in low or "4c" in low:
         return "4ch", "filename"
 
     nonbg = np.count_nonzero(mask)

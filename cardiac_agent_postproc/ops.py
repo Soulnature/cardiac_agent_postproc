@@ -19,21 +19,131 @@ def _small_thr(mask: np.ndarray, cfg: dict) -> int:
     nonbg = max(1, int(np.count_nonzero(mask)))
     return max(int(cfg["ops"]["small_component_floor"]), int(cfg["ops"]["small_component_frac"] * nonbg))
 
+def safe_topology_fix(mask: np.ndarray, view_type: str, cfg: dict) -> np.ndarray:
+    """
+    Gen 2 Mutation: Class-Aware Topology Repair.
+    Ensures no class is lost. Fills holes and removes small islands.
+    """
+    out = np.zeros_like(mask)
+    labels = [1, 2, 3] # RV, Myo, LV
+    
+    for c in labels:
+        Mc = (mask == c)
+        if np.count_nonzero(Mc) == 0:
+            continue
+            
+        # 1. Fill Holes
+        Mc_filled = ndi.binary_fill_holes(Mc)
+        
+        # 2. Open (remove small connections/noise)
+        # Mc_opened = ndi.binary_opening(Mc_filled, structure=np.ones((3,3)))
+        
+        # 3. Largest Component (Keep only the main body)
+        # Identify components
+        labeled, num_features = ndi.label(Mc_filled)
+        if num_features > 1:
+            sizes = ndi.sum(Mc_filled, labeled, range(num_features + 1))
+            largest_label = np.argmax(sizes[1:]) + 1
+            Mc_final = (labeled == largest_label)
+        else:
+            Mc_final = Mc_filled
+            
+        # SURVIVAL CHECK
+        if np.count_nonzero(Mc_final) == 0:
+             # Lethal mutation avoided: Revert to input
+             Mc_final = Mc
+             
+        out[Mc_final] = c
+        
+    return out
+
+    return out
+
+def remove_islands(mask: np.ndarray) -> np.ndarray:
+    """Standalone remove small islands for all classes."""
+    out = np.zeros_like(mask)
+    labels = [1, 2, 3] 
+    for c in labels:
+        Mc = (mask == c)
+        if np.count_nonzero(Mc) == 0: continue
+        
+        # Keep largest component only
+        labeled, num = ndi.label(Mc)
+        if num > 1:
+            sizes = ndi.sum(Mc, labeled, range(num + 1))
+            largest_idx = np.argmax(sizes[1:]) + 1
+            Mc_final = (labeled == largest_idx)
+        else:
+            Mc_final = Mc
+        out[Mc_final] = c
+    return out
+
+def close_holes(mask: np.ndarray) -> np.ndarray:
+    """Standalone binary fill holes for all classes."""
+    out = np.zeros_like(mask)
+    labels = [1, 2, 3] 
+    for c in labels:
+        Mc = (mask == c)
+        if np.count_nonzero(Mc) == 0: continue
+        Mc_filled = ndi.binary_fill_holes(Mc)
+        out[Mc_filled] = c
+    return out
+
+def smooth_morph(mask: np.ndarray, kernel: int=3) -> np.ndarray:
+    """Standalone morphological smoothing."""
+    # Already exists as 'boundary_smoothing(..., method="morph")' but creating simple alias
+    labels = [1, 2, 3]
+    out = np.zeros_like(mask)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel,kernel))
+    for c in labels:
+        Mc = (mask == c).astype(np.uint8)
+        if np.count_nonzero(Mc) == 0: continue
+        # Open-Close to smooth
+        closed = cv2.morphologyEx(Mc, cv2.MORPH_CLOSE, ker)
+        opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, ker)
+        out[opened > 0] = c
+    return out
+
 def topology_cleanup(mask: np.ndarray, view_type: str, cfg: dict) -> np.ndarray:
-    thr = _small_thr(mask, cfg)
-    M1 = (mask==1)
-    M2 = (mask==2)
-    M3 = (mask==3)
-    if view_type=="2ch":
-        M1 = np.zeros_like(M1, dtype=bool)
-    else:
-        M1 = remove_small_cc(M1, thr)
-        M1 = keep_largest_cc(M1) if M1.sum()>0 else M1
-    M2 = remove_small_cc(M2, thr)
-    M3 = remove_small_cc(M3, thr)
-    if M2.sum()>0: M2 = keep_largest_cc(M2)
-    if M3.sum()>0: M3 = keep_largest_cc(M3)
-    return _merge(M1,M2,M3)
+    """
+    Revised V5: Safe Topology Cleanup with Survival Check.
+    Wraps all operations to ensure no class is completely lost.
+    """
+    out = np.zeros_like(mask)
+    labels = [1, 2, 3] # RV, Myo, LV
+    if view_type == "2ch":
+        labels = [2, 3] # No RV in 2ch
+
+    for c in labels:
+        Mc = (mask == c)
+        if np.count_nonzero(Mc) == 0:
+            continue
+            
+        # 1. Fill Holes
+        Mc_filled = ndi.binary_fill_holes(Mc)
+        
+        # 2. Open (remove small connections/noise) - Optional, skip for safety
+        
+        # 3. Largest Component
+        labeled, num_features = ndi.label(Mc_filled)
+        if num_features > 1:
+            thr = _small_thr(mask, cfg)
+            # Filter small
+            sizes = ndi.sum(Mc_filled, labeled, range(num_features + 1))
+            # If largest is too small? No, keep largest anyway ensuring existence.
+            largest_label = np.argmax(sizes[1:]) + 1
+            Mc_final = (labeled == largest_label)
+        else:
+            Mc_final = Mc_filled
+            
+        # SURVIVAL CHECK
+        if np.count_nonzero(Mc_final) == 0:
+             # Lethal Op detected: Revert to input for this class
+             Mc_final = Mc
+             
+        out[Mc_final] = c
+        
+    return out
 
 def fill_holes_ops(mask: np.ndarray, cfg: dict) -> np.ndarray:
     M1 = (mask==1)
@@ -117,9 +227,9 @@ def edge_snapping_proxy(mask: np.ndarray, edge_map: np.ndarray, cfg: dict) -> np
     M2n = (M2d>0) & keep
     return _merge(M1, M2n, M3)
 
-def atlas_guided_grow_prune(mask: np.ndarray, view_type: str, atlas: dict, cfg: dict) -> List[np.ndarray]:
+def atlas_guided_grow_prune(mask: np.ndarray, view_type: str, atlas: dict, cfg: dict, z_norm: float|None=None) -> List[np.ndarray]:
     # Spec H (1) & (2) (simplified but faithful)
-    entry, cid, score, params = match_atlas(mask, view_type, atlas)
+    entry, cid, score, params = match_atlas(mask, view_type, atlas, z_norm=z_norm)
     if entry is None:
         return []
     aligned, ap = align_mask(mask, target_diag=float(entry["align_params"]["target_diag"]))
@@ -155,9 +265,42 @@ def atlas_guided_grow_prune(mask: np.ndarray, view_type: str, atlas: dict, cfg: 
     cand.append(out2)
 
     return cand
+    
+def atlas_replace_op(mask: np.ndarray, view_type: str, atlas: dict, cfg: dict, z_norm: float|None=None) -> List[np.ndarray]:
+    """
+    Aggressively replace the current mask with the best-matching Atlas entry.
+    Useful when the current mask is structurally broken beyond repair.
+    """
+    # Note: match_atlas now includes z_norm penalty if passed via RQS, 
+    # but here we call it without z_norm? 
+    # Ops doesn't have z_norm. This is a limitation. 
+    # However, match_atlas is robust enough with overlap score usually.
+    # Ideally we should pass z_norm to generate_candidates too... 
+    # For now, let's rely on Image Overlap to find the best shape.
+    entry, cid, score, params = match_atlas(mask, view_type, atlas, z_norm=z_norm)
+    if entry is None:
+        return []
+        
+    aligned, ap = align_mask(mask, target_diag=float(entry["align_params"]["target_diag"]))
+    M = ap["M"]
+    
+    # We want to warp the ATLAS PROB MAPS back to Image Space and threshold them directly.
+    # This creates a "pure" atlas shape in the image frame.
+    Pimg = {c: apply_inverse_affine_to_prob(entry["prob_maps"][c], M) for c in [1,2,3]}
+    Pbg = 1.0 - (Pimg[1] + Pimg[2] + Pimg[3])
+    
+    out = np.zeros_like(mask)
+    h, w = mask.shape
+    
+    # Argmax reconstruction
+    # To be safe, avoiding explicit loops for speed
+    stack = np.stack([Pbg, Pimg[1], Pimg[2], Pimg[3]], axis=0) # 4, H, W
+    out = np.argmax(stack, axis=0).astype(np.int32)
+    
+    return [out]
 
-def atlas_constrained_morph(mask: np.ndarray, view_type: str, atlas: dict, cfg: dict) -> List[np.ndarray]:
-    entry, cid, score, params = match_atlas(mask, view_type, atlas)
+def atlas_constrained_morph(mask: np.ndarray, view_type: str, atlas: dict, cfg: dict, z_norm: float|None=None) -> List[np.ndarray]:
+    entry, cid, score, params = match_atlas(mask, view_type, atlas, z_norm=z_norm)
     if entry is None:
         return []
     aligned, ap = align_mask(mask, target_diag=float(entry["align_params"]["target_diag"]))
@@ -225,6 +368,95 @@ def boundary_smoothing(mask: np.ndarray, cfg: dict, method: str="contour") -> np
 
     return mask.copy()
 
+def myo_bridge(mask: np.ndarray) -> np.ndarray:
+    """
+    Targeted fix for disconnected myocardium: find the gap between the two
+    largest myo components and draw a thin (3 px) bridge of class 2 between
+    the closest pair of boundary pixels.
+
+    Returns the original mask unchanged if myo has <= 1 component.
+    """
+    M2 = (mask == 2).astype(np.uint8)
+    labeled, num = ndi.label(M2)
+    if num <= 1:
+        return mask.copy()
+
+    # Sizes of each component (index 0 = background of label map)
+    sizes = ndi.sum(M2, labeled, range(num + 1))
+    # Two largest component labels (skip index 0)
+    order = np.argsort(sizes[1:])[::-1] + 1  # descending, 1-based
+    lab_a, lab_b = int(order[0]), int(order[1])
+
+    comp_a = (labeled == lab_a)
+    comp_b = (labeled == lab_b)
+
+    # Distance transform from comp_a → find closest pixel in comp_b
+    dist_a = ndi.distance_transform_edt(~comp_a)
+    # Mask dist_a to only comp_b boundary pixels for efficiency
+    border_b = comp_b & (ndi.binary_dilation(comp_b) != comp_b)
+    if border_b.sum() == 0:
+        border_b = comp_b
+
+    # Find the pixel in comp_b closest to comp_a
+    dists_at_b = np.where(border_b, dist_a, np.inf)
+    idx_b = np.unravel_index(np.argmin(dists_at_b), dists_at_b.shape)
+
+    # Now find closest pixel in comp_a to idx_b
+    dist_b = ndi.distance_transform_edt(~comp_b)
+    border_a = comp_a & (ndi.binary_dilation(comp_a) != comp_a)
+    if border_a.sum() == 0:
+        border_a = comp_a
+    dists_at_a = np.where(border_a, dist_b, np.inf)
+    idx_a = np.unravel_index(np.argmin(dists_at_a), dists_at_a.shape)
+
+    # Draw bridge line (3 px thick) between idx_a and idx_b
+    out = mask.copy()
+    bridge = np.zeros_like(M2)
+    cv2.line(bridge, (int(idx_a[1]), int(idx_a[0])), (int(idx_b[1]), int(idx_b[0])),
+             1, thickness=3)
+    out[bridge > 0] = 2
+    return out
+
+
+def lv_bridge(mask: np.ndarray) -> np.ndarray:
+    """
+    Targeted fix for fragmented LV: bridge the two largest LV components
+    with a thin line of class 3.
+    """
+    M3 = (mask == 3).astype(np.uint8)
+    labeled, num = ndi.label(M3)
+    if num <= 1:
+        return mask.copy()
+
+    sizes = ndi.sum(M3, labeled, range(num + 1))
+    order = np.argsort(sizes[1:])[::-1] + 1
+    lab_a, lab_b = int(order[0]), int(order[1])
+
+    comp_a = (labeled == lab_a)
+    comp_b = (labeled == lab_b)
+
+    dist_a = ndi.distance_transform_edt(~comp_a)
+    border_b = comp_b & (ndi.binary_dilation(comp_b) != comp_b)
+    if border_b.sum() == 0:
+        border_b = comp_b
+    dists_at_b = np.where(border_b, dist_a, np.inf)
+    idx_b = np.unravel_index(np.argmin(dists_at_b), dists_at_b.shape)
+
+    dist_b = ndi.distance_transform_edt(~comp_b)
+    border_a = comp_a & (ndi.binary_dilation(comp_a) != comp_a)
+    if border_a.sum() == 0:
+        border_a = comp_a
+    dists_at_a = np.where(border_a, dist_b, np.inf)
+    idx_a = np.unravel_index(np.argmin(dists_at_a), dists_at_a.shape)
+
+    out = mask.copy()
+    bridge = np.zeros_like(M3)
+    cv2.line(bridge, (int(idx_a[1]), int(idx_a[0])), (int(idx_b[1]), int(idx_b[0])),
+             1, thickness=3)
+    out[bridge > 0] = 3
+    return out
+
+
 def generate_candidates(mask: np.ndarray,
                         pred0: np.ndarray,
                         img: np.ndarray,
@@ -232,7 +464,8 @@ def generate_candidates(mask: np.ndarray,
                         edge_map: np.ndarray,
                         valve_y: int|None,
                         atlas: dict|None,
-                        cfg: dict) -> List[Tuple[str,np.ndarray]]:
+                        cfg: dict,
+                        z_norm: float|None = None) -> List[Tuple[str,np.ndarray]]:
     cands: List[Tuple[str,np.ndarray]] = []
     # candidate 0: current
     cands.append(("current", mask.copy()))
@@ -269,23 +502,38 @@ def generate_candidates(mask: np.ndarray,
 
     # H shape prior guided
     if atlas is not None:
-        for i,cm in enumerate(atlas_guided_grow_prune(mask, view_type, atlas, cfg)):
+        for i,cm in enumerate(atlas_guided_grow_prune(mask, view_type, atlas, cfg, z_norm=z_norm)):
             cands.append((f"atlas_growprune_{i}", topology_cleanup(cm, view_type, cfg)))
-        for i,cm in enumerate(atlas_constrained_morph(mask, view_type, atlas, cfg)):
-            cands.append((f"atlas_morph_{i}", topology_cleanup(cm, view_type, cfg)))
+        # Atlas Morph (DISABLED: Also causes Class Dropout if Atlas incomplete)
+        # for i,cm in enumerate(atlas_constrained_morph(mask, view_type, atlas, cfg, z_norm=z_norm)):
+        #     cands.append((f"atlas_morph_{i}", topology_cleanup(cm, view_type, cfg)))
+        
+        # Aggressive Replace (DISABLED: Causes Class Dropout/Regression)
+        # for i,cm in enumerate(atlas_replace_op(mask, view_type, atlas, cfg, z_norm=z_norm)):
+        #     cands.append((f"atlas_replace_{i}", topology_cleanup(cm, view_type, cfg)))
 
-    # I boundary smoothing
+    # Gen 2 Mutation:    # F/G/H Morphological Ops (Risky in Multiclass - Disabled for Gen 4 Stability)
+    # cands.append(("2_dilate", topology_cleanup(morph_op(mask, 2, "dilate", cfg), view_type, cfg)))
+    # cands.append(("2_erode", topology_cleanup(morph_op(mask, 2, "erode", cfg), view_type, cfg)))
+    # cands.append(("3_dilate", topology_cleanup(morph_op(mask, 3, "dilate", cfg), view_type, cfg)))
+    # cands.append(("3_erode", topology_cleanup(morph_op(mask, 3, "erode", cfg), view_type, cfg)))
+    
+    # Specific anatomical fixes
+    cands.append(("safe_topology_fix", safe_topology_fix(mask, view_type, cfg)))
     cands.append(("smooth_contour", topology_cleanup(boundary_smoothing(mask, cfg, "contour"), view_type, cfg)))
     cands.append(("smooth_gaussian", topology_cleanup(boundary_smoothing(mask, cfg, "gaussian"), view_type, cfg)))
     cands.append(("smooth_morph", topology_cleanup(boundary_smoothing(mask, cfg, "morph"), view_type, cfg)))
+
+    # Targeted bridge operations for disconnected structures
+    cands.append(("myo_bridge", myo_bridge(mask)))
+    cands.append(("lv_bridge", lv_bridge(mask)))
 
     return cands
 
 def is_valid_candidate(mask: np.ndarray) -> bool:
     if mask.min() < 0 or mask.max() > 3:
         return False
-    if np.count_nonzero(mask==2) == 0:
-        return False
-    if np.count_nonzero(mask==3) == 0:
+    # Relaxed: Allow missing classes (soft penalty in RQS P_components instead)
+    if np.count_nonzero(mask > 0) == 0:
         return False
     return True

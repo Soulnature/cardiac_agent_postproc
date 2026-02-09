@@ -10,83 +10,188 @@ class OpenAICompatClient:
     base_url: str
     api_key: str
     model: str
-    timeout: float = 60.0
+    timeout: float = 180.0
 
-    def chat_json(self, system: str, user: str, temperature: float=0.2, max_tokens: int=800) -> Dict[str, Any]:
+    def chat_json(self, system: str, user: str, temperature: float=0.2, max_tokens: int=16384) -> Dict[str, Any]:
         """
-        Sends a chat request and expects a JSON response.
-        Supports 'thinking' capability if available (prints reasoning to stdout).
+        Sends a chat request and expects a JSON response via requests.
         """
-        client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=self.timeout
-        )
-
-        # Qwen/NVIDIA specific: enable thinking via extra_body
-        extra_body = {"chat_template_kwargs": {"thinking": True}}
+        import requests
+        import re
         
-        # Prepare messages
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
 
-        print(f"\n[LLM] Requesting {self.model} (stream=True)...")
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False 
+        }
+        
+        url = f"{self.base_url}/chat/completions"
+        if url.endswith("//chat/completions"):
+             url = url.replace("//chat", "/chat")
+
+        print(f"\n[LLM] Requesting {self.model} via requests...")
         
         try:
-            completion = client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                extra_body=extra_body,
-                stream=True,
-                response_format={"type": "json_object"}
-            )
-        except Exception as e:
-            # Fallback: some models/backends might not support extra_body or json_object with thinking
-            print(f"[LLM] Warning: Standard call failed ({e}). Retrying without extra_body/json constraint...")
-            completion = client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True
-            )
+            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+            resp.raise_for_status()
+            data = json.loads(resp.text, strict=False)
 
-        full_content = []
-        print("[LLM] Reasoning path: ", end="", flush=True)
-        
-        has_reasoning = False
-        
-        for chunk in completion:
-            # Handle reasoning content (DeepSeek/Qwen style)
-            if hasattr(chunk.choices[0], 'delta') and hasattr(chunk.choices[0].delta, 'reasoning_content'):
-                reasoning = chunk.choices[0].delta.reasoning_content
+            msg = data["choices"][0]["message"]
+            content = msg.get("content")
+            reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+
+            if reasoning:
+                print(f"[LLM] Reasoning: {reasoning[:200]}...")
+
+            if content is None:
                 if reasoning:
-                    if not has_reasoning:
-                        has_reasoning = True
-                    print(reasoning, end="", flush=True)
-            
-            # Handle standard content
-            if chunk.choices and chunk.choices[0].delta.content is not None:
-                content_chunk = chunk.choices[0].delta.content
-                full_content.append(content_chunk)
+                    print("[LLM] Warning: 'content' is None but 'reasoning' found. Using reasoning as content fallback.")
+                    content = reasoning
+                else:
+                    return {}
 
-        print("\n[LLM] Reasoning finished.")
-        
-        final_str = "".join(full_content)
-        
-        # Clean up potential markdown code blocks if the model wrapped the JSON
-        if "```json" in final_str:
-            final_str = final_str.split("```json")[1].split("```")[0].strip()
-        elif "```" in final_str:
-            final_str = final_str.split("```")[1].split("```")[0].strip()
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                 try:
+                     return json.loads(match.group(0), strict=False)
+                 except:
+                     pass
 
-        try:
-            return json.loads(final_str)
-        except json.JSONDecodeError:
-            print(f"[LLM] Failed to parse JSON. Raw output:\n{final_str}")
-            # simple fallback mechanism
+            # Try parsing directly
+            try:
+                return json.loads(content, strict=False)
+            except:
+                pass
+
             return {}
+                
+        except Exception as e:
+            print(f"[LLM] Request failed: {e}")
+            return {}
+
+    def chat_vision_json(self, system: str, user_text: str, image_path: str, temperature: float=0.2) -> Dict[str, Any]:
+        """
+        Sends a multimodal chat request (Text + Image) via requests.
+        Expects JSON response.
+        """
+        import requests
+        import base64
+        import re
+        
+        def encode_image(path):
+            with open(path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8')
+
+        base64_image = encode_image(image_path)
+        
+        # ... (messages setup remains)
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ]
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": 16384,
+            "temperature": temperature,
+            "stream": False
+        }
+
+        url = f"{self.base_url}/chat/completions"
+        if url.endswith("//chat/completions"):
+             url = url.replace("//chat", "/chat")
+
+        import time as _time
+
+        max_retries = 5
+        for attempt in range(max_retries):
+            print(f"\n[LLM-Vision] Requesting {self.model} via requests...")
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+                if resp.status_code == 429:
+                    wait = 5 * (attempt + 1)
+                    print(f"[LLM-Vision] Rate limited (429). Waiting {wait}s... ({attempt+1}/{max_retries})")
+                    _time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                data = json.loads(resp.text, strict=False)
+
+                msg = data["choices"][0]["message"]
+                content = msg.get("content")
+                reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+
+                if reasoning:
+                    print(f"[LLM-Vision] Reasoning: {reasoning[:200]}...")
+
+                if content is None:
+                    if reasoning:
+                        print("[LLM-Vision] Warning: 'content' is None. Fallback to reasoning.")
+                        content = reasoning
+                    else:
+                        print(f"[LLM-Vision] Warning: 'content' is None.")
+                        return {}
+
+                # Try to find JSON block — generic approach
+                # First try: find outermost {...} block
+                match = re.search(r'\{.*\}', content, re.DOTALL)
+                if match:
+                    try:
+                        return json.loads(match.group(0), strict=False)
+                    except json.JSONDecodeError:
+                        pass
+
+                # Fallback: narrower match for "score" responses
+                matches = list(re.finditer(r'\{[^{]*"score"\s*:\s*\d+[^}]*\}', content, re.DOTALL | re.IGNORECASE))
+                if matches:
+                    try:
+                        return json.loads(matches[-1].group(0), strict=False)
+                    except json.JSONDecodeError:
+                        pass
+
+                return {}
+
+            except Exception as e:
+                if "429" in str(e):
+                    wait = 5 * (attempt + 1)
+                    print(f"[LLM-Vision] Rate limited. Waiting {wait}s... ({attempt+1}/{max_retries})")
+                    _time.sleep(wait)
+                    continue
+                print(f"[LLM-Vision] Request failed: {e}")
+                if 'resp' in locals():
+                    print(f"[LLM-Vision] Response: {resp.text[:200]}")
+                return {}
+
+        print("[LLM-Vision] Max retries exhausted.")
+        return {}
+

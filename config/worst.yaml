@@ -1,0 +1,92 @@
+paths:
+  source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/sample_worst"
+  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/sample_worst_outputs"
+  runs_subdir: "sample_run"
+  atlas_path: "shape_atlas.pkl"
+
+solver:
+  max_outer: 3
+  topk_frac: 1.0
+  topk_min: 1
+  topk_max: 50
+  max_inner: 20
+  min_delta: 0.05
+  patience: 3
+  stop_min_rqs: 0.0
+  stop_min_rqs_delta: 0.1
+  stop_min_rqs_stagnant_rounds: 1
+  skip_good_rqs_threshold: 999.0
+  atlas_builder_min_rqs: 0.0
+
+view_inference:
+  rv_ratio_2ch_threshold: 0.02
+  rv_ratio_rv_optional_threshold: 0.005
+
+edge:
+  sobel_percentile: 85
+  overlap_target: 0.55
+
+shape_atlas:
+  enabled: true
+  target_diag: 128
+  kmeans_max: 4
+  kmeans_min: 2
+  per_view_divisor: 10
+  min_samples_for_clustering: 5
+
+reward_weights:
+  use_surrogate: false
+  surrogate_path: "surrogate_model.pkl"
+  P_touch: 50.0
+  P_edge_misalignment: 4.0
+  P_components: 18.0
+  P_islands: 20.0
+  P_valve_leak: 5.0
+  P_double_cavity: 30.0
+  P_holes: 10.0
+  P_size_drift: 2.0
+  P_atlas_mismatch: 20.0
+  P_atlas_lv_mismatch: 8.0
+  P_lv_shape: 8.0
+  P_shape_prior: 1.0
+  P_slice_consistency: 5.0
+  R_enclosure: 5.0
+  R_shape_match: 15.0
+
+ops:
+  small_component_floor: 20
+  small_component_frac: 0.002
+  island_frac: 0.02
+  morph_kernel3: 3
+  smooth:
+    contour_epsilon: 1.5
+    gaussian_sigma: 1.0
+    morph_r: 2
+
+revision:
+  enabled: false
+  max_revisions: 0
+
+llm:
+  enabled: false
+  model: "moonshotai/kimi-k2.5"
+  temperature: 0.2
+  max_tokens: 1024
+
+vision_guardrail:
+  enabled: false
+  model: "moonshotai/kimi-k2.5"
+  threshold: 60
+
+quality_model:
+  enabled: true
+  path: "quality_model.pkl"
+  blend_mode: "hybrid"
+  blend_alpha: 0.5
+  bad_threshold: 0.8
+  log_features: false
+
+diagnosis:
+  enabled: true
+  quality_threshold: 0.8
+  max_suggestions: 4

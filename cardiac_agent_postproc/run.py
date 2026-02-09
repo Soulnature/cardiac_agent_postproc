@@ -18,9 +18,9 @@ def main():
     last_key = sorted(results.keys(), key=lambda x: int(x[1:]) if x.startswith("v") else -1)[-1]
     print("\n=== FINAL SUMMARY ===")
     print(f"Last revision: {last_key}")
-    print(f"[SOURCE] RQS: {results[last_key]['src_rqs']}")
-    print(f"[TARGET] RQS:  {results[last_key]['tgt_rqs']}")
-    print(f"[TARGET] Eval: {results[last_key]['tgt_eval']}")
+    print(f"[SOURCE] Summary: {results[last_key]['src_summary']}")
+    print(f"[TARGET] Summary: {results[last_key]['tgt_summary']}")
+    print(f"[TARGET] Eval:    {results[last_key]['tgt_eval']}")
 
 if __name__ == "__main__":
     main()
