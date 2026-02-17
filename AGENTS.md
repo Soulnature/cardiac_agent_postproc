@@ -1,23 +1,52 @@
-# Repository Guidelines
+# Cardiac Agent Post-Processing — Developer Guide
 
-## Project Structure & Module Organization
-Core logic sits under `cardiac_agent_postproc/`: the orchestrator in `run.py` wires AtlasBuilder, Optimizer, Evaluator, and RevisionController agents, while helpers such as `io_utils.py`, `view_utils.py`, and `ops.py` provide shared utilities. Config files live in `config/` (`default.yaml` for production paths, `sample.yaml` for quick smoke tests). Raw inputs and generated artifacts are staged inside `results/` (SOURCE, TARGET, run subfolders). Root-level scripts (`optimize_labels_no_gt.py`, `train_quality_model.py`, etc.) and the `test_*.py` suite provide entrypoints for manual workflows and regression tests.
+## Project Structure
 
-## Build, Test, and Development Commands
-- `python -m venv .venv && source .venv/bin/activate`: create/enter the local environment.
-- `pip install -r requirements.txt`: install runtime and tooling dependencies.
-- `python -m cardiac_agent_postproc.run --config config/default.yaml`: run the full multi-agent pipeline.
-- `python -m cardiac_agent_postproc.run --config config/sample.yaml`: run a minimal dataset for fast iteration.
-- `pytest`: execute all tests (IO, integration, vision). Use `pytest test_io.py::TestRoundTrip` for targeted cases.
+```
+cardiac_agent_postproc/
+├── agents/                  # Multi-agent system
+│   ├── base_agent.py        # BaseAgent ABC with LLM reasoning + memory
+│   ├── message_bus.py       # AgentMessage, CaseContext, MessageBus
+│   ├── coordinator.py       # CoordinatorAgent — orchestrates the pipeline
+│   ├── triage_agent.py      # TriageAgent — fast quality classification
+│   ├── diagnosis_agent.py   # DiagnosisAgent — spatial defect ID
+│   ├── planner_agent.py     # PlannerAgent — repair operation sequencing
+│   ├── executor.py          # ExecutorAgent — applies ops, monitors RQS
+│   ├── verifier_agent.py    # VerifierAgent — quality gating
+│   └── atlas_builder.py     # AtlasBuilderAgent — shape atlas (legacy)
+├── orchestrator.py          # Pipeline entry — sets up bus + agents
+├── ops.py                   # 20+ morphological operations (tool library)
+├── rqs.py                   # Reward Quality Score
+├── vlm_guardrail.py         # VLM overlay generation + scoring
+├── quality_model.py         # Trained quality classifier
+├── api_client.py            # OpenAI-compatible LLM/VLM client
+├── settings.py              # .env config loader
+├── io_utils.py, geom.py, view_utils.py, eval_metrics.py
+└── run.py                   # CLI entry point
+```
 
-## Coding Style & Naming Conventions
-Use Black-style Python formatting (4-space indent, trailing commas when helpful), snake_case for functions/variables, PascalCase for classes, and explicit type hints on public APIs. Keep configuration keys lowercase with underscores (`paths.source_dir`). Favor deterministic, stateless helpers; pass config dicts rather than relying on module-level globals. Keep comments short and purposeful, explaining intent instead of restating code.
+## Build & Run
 
-## Testing Guidelines
-PyTest discovers every `test_*.py`. Mirror the naming pattern `test_<module>_<behavior>` and cover new agent logic with fixture-backed assertions (e.g., inspect generated CSVs or masks). For substantive changes, run `pytest` plus at least one `python -m cardiac_agent_postproc.run ...` command (default or sample config) to confirm end-to-end integration.
+```bash
+pip install -e .
+python -m cardiac_agent_postproc.run --config config/default.yaml
+```
 
-## Commit & Pull Request Guidelines
-History follows Conventional-style prefixes (`feat:`, `fix:`, etc.); keep commit subjects ≤72 chars and limit each commit to a cohesive change (code + config + docs as needed). Pull requests should include: concise summary of the change, test evidence (`pytest`, sample run command, or screenshots for plots), and links to tracking issues or experiment notes. Mention any new environment variables or data requirements so reviewers can reproduce agent behavior.
+## Architecture
 
-## Agent-Specific Instructions
-AtlasBuilder ingests SOURCE predictions/GT to refresh `shape_atlas.pkl`; avoid editing SOURCE contents mid-run. Optimizer runs twice (SOURCE + TARGET) and must never read TARGET GT—respect the `is_target` flag and rely on RQS + edges only. When enabling RevisionController, ensure `.env` exposes the correct LLM endpoint and document chosen guardrail thresholds so other contributors can mirror the setup reliably.
+Each agent inherits from `BaseAgent` and has:
+- **LLM reasoning** via `think()` / `think_json()` / `think_vision()`
+- **Memory** — rolling conversation history for statefulness
+- **MessageBus** — inter-agent communication (send/receive/broadcast)
+
+Pipeline per case: **Triage → Diagnosis → Plan → Execute → Verify**, with dynamic re-routing on rejection (up to `max_rounds_per_case` rounds).
+
+## Key Principles
+1. **No-GT optimization** — use RQS (proxy metrics) to optimize labels without ground truth
+2. **Agent autonomy** — each agent reasons independently before communicating results
+3. **Conservative gating** — VerifierAgent rejects fixes if unsure (preserves original)
+
+## Coding Style
+- Python ≥ 3.10, type hints everywhere
+- `black` + `isort` for formatting
+- All agents register with `MessageBus` and communicate via `AgentMessage`

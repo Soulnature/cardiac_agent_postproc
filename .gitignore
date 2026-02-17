@@ -33,6 +33,7 @@ venv.bak/
 
 # Project specific
 *.pkl
+*.log
 *_img.png
 *_pred.png
 *_gt.png
@@ -40,6 +41,12 @@ venv.bak/
 *_pred_iter*.png
 agent_runs/
 runs/
+results/
+batch_repair_results/
+test_results_ollama/
+verify_results/
+repair_kb/
+repair_kb.json
 label_optimization_log.csv
 label_optimization_summary.csv
 target_dice_report.csv

@@ -64,7 +64,7 @@ run.py → Orchestrator(cfg)
 - **io_utils.py**: Mask I/O with encoding (0..3 ↔ 0,85,170,255), frame listing
 - **view_utils.py**: Infers 2ch vs 4ch view type from filename or RV ratio
 - **vlm_guardrail.py**: Vision-Language Model pre-screening (Phase 5, optional)
-- **quality_model.py**: Offline-trained quality scorer with 30+ geometric/intensity features
+- **quality_model.py**: Offline-trained quality scorer with 30 geometric/intensity features. `QualityScorer` supports both regressor (`score()`) and classifier (`classify()`) modes
 
 ### Configuration
 
@@ -97,3 +97,37 @@ Each frame directory contains `*_img.png` (raw image), `*_pred.png` (predicted m
 - `target_dice_summary.csv`: Aggregate statistics
 - `*_pred_optimized.png`: Final optimized masks
 - `shape_atlas.pkl`: Cached shape atlas
+- `quality_model.pkl`: Trained quality model (regressor + classifier + threshold)
+
+## Current Progress / Known Issues
+
+### Triage Classifier Retraining (completed 2026-02-10)
+
+**Problem**: Old triage flagged 318/320 samples as `needs_fix` because `thickness_cv > 0.5` triggered for 99% of samples, VLM returned 0 for all, and quality model R²=0.22. This caused the optimizer to degrade 94 good samples.
+
+**Changes made**:
+
+| File | Change |
+|------|--------|
+| `train_quality_model.py` | Rewritten: reads `final_metrics.csv`, trains 3 classifier configs (RF, GBC) + regressor with `RepeatedStratifiedKFold(5,3)`, auto-selects best by F1, calibrates probability threshold |
+| `quality_model.py` | `QualityScorer` extended: `classifier`, `threshold`, `use_classifier` fields; `classify()` method; `has_classifier` property; backward-compatible `load()` |
+| `agents/triage_agent.py` | Fixed `_detect_issues()`: `thickness_cv > 1.0` (was 0.5), `boundary_over_area > 0.22` (was 0.18). Added `mode: "classifier"` path in `triage_folder()`. VLM default off. |
+| `config/default.yaml` | `triage.mode: "classifier"`, `triage.vlm_enabled: false`, `quality_model.blend_mode: "replace"`, `quality_model.bad_threshold: 0.93` |
+
+**Training results** (`quality_model.pkl`, RF_balanced classifier):
+- CV needs_fix: **50 / 320** (down from 318)
+- CV recall(bad, Dice<0.93): 0.64 (catches 9/14; 5 missed are borderline Dice 0.92–0.93)
+- CV precision(bad): 0.18
+- Regressor CV R² ≈ −0.03 (features lack discriminative power for exact Dice prediction)
+
+**Limitation**: The 30 geometric features cannot cleanly separate bad (Dice<0.93) from good samples — regressor CV R² is near zero. Achieving recall≥0.93 AND needs_fix≤50 simultaneously is not possible with current features. The chosen operating point prioritizes **not degrading good samples** over catching every bad sample.
+
+**Retrain command**:
+```bash
+python train_quality_model.py --data-dir results/Input_MnM2/all_frames_export --metrics-csv final_metrics.csv --output quality_model.pkl --min-recall 0.64
+```
+
+### TODO / Next Steps
+- Run full pipeline with new triage (`python -m cardiac_agent_postproc.run --config config/default.yaml`) and verify good samples are no longer degraded
+- Consider adding new features (e.g. atlas distance, RQS components) to improve classifier discrimination
+- Consider lowering `--bad-threshold` to 0.90 to focus on truly broken samples (currently 0.93)

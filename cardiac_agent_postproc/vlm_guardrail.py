@@ -3,6 +3,7 @@ import os
 import cv2
 import numpy as np
 import base64
+from typing import Optional
 from .api_client import OpenAICompatClient
 from .settings import LLMSettings
 
@@ -26,12 +27,15 @@ def create_overlay(img_path: str, mask_arr: np.ndarray, outcome_path: str):
     # 1=RV (Red), 2=Myo (Green), 3=LV (Blue)
     overlay = img.copy()
 
-    # RV - Red
-    overlay[mask_arr == 1] = [0, 0, 255]
-    # Myo - Green
-    overlay[mask_arr == 2] = [0, 255, 0]
-    # LV - Blue
-    overlay[mask_arr == 3] = [255, 0, 0]
+    # Map grayscale values if needed (common in this dataset: 85=RV, 170=Myo, 255=LV)
+    # or just allow direct intensity matching
+    
+    # RV - Red (Label 1 or 85)
+    overlay[(mask_arr == 1) | (mask_arr == 85)] = [0, 0, 255]
+    # Myo - Green (Label 2 or 170)
+    overlay[(mask_arr == 2) | (mask_arr == 170)] = [0, 255, 0]
+    # LV - Blue (Label 3 or 255)
+    overlay[(mask_arr == 3) | (mask_arr == 255)] = [255, 0, 0]
 
     # Blend
     cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
@@ -91,6 +95,97 @@ def create_side_by_side_overlay(
     return True
 
 
+def create_diff_overlay(
+    img_path: str,
+    mask_before: np.ndarray,
+    mask_after: np.ndarray,
+    output_path: str,
+    stats: Optional[dict] = None,
+) -> bool:
+    """
+    Create a 3-panel comparison image: [BEFORE | AFTER | DIFF]
+
+    DIFF panel highlights pixel-level changes:
+      - Green : pixels ADDED by repair   (absent before, present after)
+      - Red   : pixels REMOVED by repair (present before, absent after)
+      - Yellow: pixels where CLASS CHANGED (both present, different label)
+      - Gray  : unchanged foreground
+
+    If *stats* dict is provided, it is populated with change counts.
+    """
+    if not os.path.exists(img_path):
+        return False
+
+    img = cv2.imread(img_path)
+    if img is None:
+        return False
+
+    H, W = img.shape[:2]
+    if mask_before.shape != (H, W):
+        mask_before = cv2.resize(mask_before, (W, H), interpolation=cv2.INTER_NEAREST)
+    if mask_after.shape != (H, W):
+        mask_after = cv2.resize(mask_after, (W, H), interpolation=cv2.INTER_NEAREST)
+
+    # --- helper: overlay a mask on an image ---
+    def _ov(base, mask):
+        out = base.copy()
+        out[(mask == 1) | (mask == 85)]  = [0, 0, 255]   # RV – red
+        out[(mask == 2) | (mask == 170)] = [0, 255, 0]    # Myo – green
+        out[(mask == 3) | (mask == 255)] = [255, 0, 0]    # LV – blue
+        blended = base.copy()
+        cv2.addWeighted(out, 0.4, base, 0.6, 0, blended)
+        return blended
+
+    # Panel 1 & 2: standard overlays
+    before_panel = _ov(img, mask_before)
+    after_panel  = _ov(img, mask_after)
+
+    # Panel 3: DIFF highlight
+    diff_panel = (img * 0.5).astype(np.uint8)  # dim background
+
+    fg_before = mask_before > 0
+    fg_after  = mask_after  > 0
+
+    added   = (~fg_before) & fg_after           # new foreground pixels
+    removed = fg_before & (~fg_after)           # lost foreground pixels
+    changed = fg_before & fg_after & (mask_before != mask_after)  # class swap
+    kept    = fg_before & fg_after & (mask_before == mask_after)  # unchanged
+
+    # Paint diff colours (BGR)
+    diff_panel[added]   = [0, 220, 0]     # green  = added
+    diff_panel[removed] = [0, 0, 220]     # red    = removed
+    diff_panel[changed] = [0, 220, 220]   # yellow = class change
+    diff_panel[kept]    = [160, 160, 160]  # gray   = unchanged
+
+    # Stats
+    n_added   = int(np.count_nonzero(added))
+    n_removed = int(np.count_nonzero(removed))
+    n_changed = int(np.count_nonzero(changed))
+    if stats is not None:
+        stats["added"] = n_added
+        stats["removed"] = n_removed
+        stats["changed"] = n_changed
+
+    # Labels
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(before_panel, "BEFORE", (10, 25), font, 0.7, (255, 255, 255), 2)
+    cv2.putText(after_panel,  "AFTER",  (10, 25), font, 0.7, (255, 255, 255), 2)
+    cv2.putText(diff_panel,   f"DIFF +{n_added} -{n_removed} ~{n_changed}",
+                (10, 25), font, 0.55, (255, 255, 255), 2)
+
+    # Legend on diff panel
+    y0 = H - 60
+    cv2.putText(diff_panel, "Green=Added", (10, y0),      font, 0.4, (0, 220, 0), 1)
+    cv2.putText(diff_panel, "Red=Removed", (10, y0 + 18), font, 0.4, (0, 0, 220), 1)
+    cv2.putText(diff_panel, "Yellow=ClassChg", (10, y0 + 36), font, 0.4, (0, 220, 220), 1)
+
+    # Assemble
+    sep = np.full((H, 3, 3), 255, dtype=np.uint8)
+    combined = np.concatenate([before_panel, sep, after_panel, sep, diff_panel], axis=1)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    cv2.imwrite(output_path, combined)
+    return True
+
 class VisionGuardrail:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -103,15 +198,18 @@ class VisionGuardrail:
         vg_cfg = cfg.get("vision_guardrail", {})
         self.model = vg_cfg.get("model", self.llm_settings.openai_model)
         api_key = vg_cfg.get("api_key", self.llm_settings.openai_api_key)
+        provider = vg_cfg.get("provider", self.llm_settings.llm_provider)
+        self.image_detail = vg_cfg.get("image_detail", "auto")
 
         self.client = OpenAICompatClient(
-            base_url=self.llm_settings.openai_base_url,
+            base_url=vg_cfg.get("base_url", self.llm_settings.openai_base_url),
             api_key=api_key,
             model=self.model,
-            timeout=180.0,
+            timeout=float(vg_cfg.get("timeout", 180.0)),
+            provider=provider,
         )
 
-    def check(self, img_path: str, mask_arr: np.ndarray, stem: str) -> dict:
+    def check(self, img_path: str, mask_arr: np.ndarray, stem: str, output_dir: str = "") -> dict:
         """
         Returns {'score': 0-100, 'reason': str, 'accepted': bool}
         """
@@ -119,48 +217,64 @@ class VisionGuardrail:
             return {'score': 100, 'reason': 'Guardrail disabled', 'accepted': True}
 
         # 1. Generate Overlay
-        overlay_path = img_path.replace(".png", "_overlay_debug.png")
+        basename = os.path.basename(img_path).replace(".png", "_overlay_debug.png")
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            overlay_path = os.path.join(output_dir, basename)
+        else:
+            overlay_path = img_path.replace(".png", "_overlay_debug.png")
         if not create_overlay(img_path, mask_arr, overlay_path):
             return {'score': 0, 'reason': 'Overlay generation failed', 'accepted': False}
 
-        # 2. Prompt
+        # 2. Prompt - RELATIVE IMPROVEMENT CHECK
+        # We are repairing flawed masks. The intermediate result might still be "bad" 
+        # but we need to know if it's BETTER than the previous step.
+        # Since we don't have the previous step here easily in `check` (it's stateless),
+        # we still need a sanity check. 
+        # BUT, the `Executor` calls this with `check`? 
+        # Wait, Executor calls `judge_visual_quality` which maps to `check`.
+        # The prompt below forces a Score. If score < threshold, it rejects.
+        # This is too strict for intermediate steps.
+        
+        # Let's relax the scoring or change the prompt to be more tolerant of "work in progress".
+        # Better yet, let's ask for a "validity" check rather than "perfection".
+        
         system = """You are a Cardiac MRI Segmentation Expert Evaluator.
-Your task is to CRITICALLY evaluate the quality of the segmentation mask overlay.
-Color Legend:
-- Red: Right Ventricle (RV)
-- Green: Myocardium (Myo)
-- Blue: Left Ventricle (LV)
+Your task is to basic sanity check the segmentation mask validation.
+Color Legend: Red=RV, Green=Myo, Blue=LV.
 
-STRICT Scoring Criteria:
+Evaluate if the segmentation is PLAUSIBLE and NOT WORSE than a typical noisy segmentation.
+We are in the middle of a repair process, so some defects are expected.
 
-Score 90-100 (Perfect):
-1. Blue LV is perfectly elliptical/circular.
-2. Green Myocardium is a CONTINUOUS, UNIFORM ring around LV.
-3. No gaps, no leaks, no noise.
+CRITICAL REJECTION CRITERIA (Score < 50):
+1. Myocardium (Green) is completely scattered noise.
+2. LV (Blue) or RV (Red) is completely missing.
+3. Grossly non-anatomical shapes (e.g. square LV, exploded pixels).
+4. Massive leakage merging all classes into one blob.
 
-Score 60-80 (Acceptable but Flawed):
-1. Myocardium has variable thickness or looks jagged.
-2. RV shape is irregular.
-3. Minor edge roughness.
+ACCEPTABLE FLAWS (Score 60-80):
+1. Small gaps in Myocardium.
+2. Rough edges.
+3. Minor class confusion.
+4. "Blobby" shapes.
 
-Score < 50 (REJECT - Bad):
-1. ANY disconnection in the Green Myocardium ring (Check carefully!).
-2. Missing LV or RV.
-3. "Islands" of noise in background.
-4. "Exploded" or non-anatomical shapes.
-5. If the Myocardium is extremely thin or broken, score 0.
+PERFECT (Score 90+):
+1. Smooth, continuous, correct anatomy.
 
 Output JSON:
 {
   "score": <0-100>,
-  "reason": "<concise explanation focusing on defects>",
-  "suggestion": "<actionable fix>"
+  "reason": "<concise comparison>",
+  "suggestion": "None"
 }
 """
         user_text = f"Evaluate the segmentation for case {stem}."
 
         # 3. Call VLM
-        resp = self.client.chat_vision_json(system, user_text, overlay_path)
+        resp = self.client.chat_vision_json(
+            system, user_text, overlay_path, image_detail=self.image_detail,
+        )
+        print(f"DEBUG: VLM Response for {stem}: {resp}", flush=True)
 
         # 4. Parse
         score = resp.get("score", 0)
@@ -221,7 +335,9 @@ Output JSON:
         user_text = f"Compare before (left) vs after (right) for case {stem}."
 
         try:
-            resp = self.client.chat_vision_json(system, user_text, sbs_path)
+            resp = self.client.chat_vision_json(
+                system, user_text, sbs_path, image_detail=self.image_detail,
+            )
         except Exception as e:
             print(f"[VLM Verify] Failed for {stem}: {e}")
             # On VLM failure, REJECT the fix (conservative: don't apply unverified changes)

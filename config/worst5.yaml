@@ -83,14 +83,14 @@ revision:
 llm:
   enabled: true
   model: "mistralai/mistral-large-3-675b-instruct-2512"
-  api_key: "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"
+  api_key: "YOUR_API_KEY"
   temperature: 0.15
   max_tokens: 8192
 
 vision_guardrail:
   enabled: true
-  model: "mistralai/mistral-large-3-675b-instruct-2512"
-  api_key: "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"
+  model: "meta/llama-3.2-90b-vision-instruct"
+  api_key: "YOUR_API_KEY"
   threshold: 60
 
 quality_model:

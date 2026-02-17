@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 import os
+import warnings
 import joblib
 import numpy as np
 import cv2
@@ -202,17 +203,46 @@ class QualityScorer:
     model_path: str
     model: Any
     feature_names: List[str]
+    classifier: Any = None
+    threshold: float = 0.5
+    use_classifier: bool = False
 
     @classmethod
     def load(cls, path: str) -> "QualityScorer" | None:
         if not path or not os.path.exists(path):
             return None
-        payload = joblib.load(path)
+        try:
+            from sklearn.exceptions import InconsistentVersionWarning
+        except Exception:
+            InconsistentVersionWarning = Warning  # type: ignore[assignment]
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", InconsistentVersionWarning)
+                payload = joblib.load(path)
+        except Exception as e:
+            print(f"[QualityScorer] Failed to load model '{path}': {e}")
+            return None
         model = payload.get("model") if isinstance(payload, dict) else payload
         feature_names = payload.get("feature_names", QUALITY_FEATURE_NAMES) if isinstance(payload, dict) else QUALITY_FEATURE_NAMES
         if model is None:
             return None
-        return cls(model_path=path, model=model, feature_names=feature_names)
+        classifier = payload.get("classifier") if isinstance(payload, dict) else None
+        threshold = float(payload.get("threshold", 0.5)) if isinstance(payload, dict) else 0.5
+        use_classifier = bool(payload.get("use_classifier", False)) if isinstance(payload, dict) else False
+        return cls(
+            model_path=path,
+            model=model,
+            feature_names=feature_names,
+            classifier=classifier,
+            threshold=threshold,
+            use_classifier=use_classifier,
+        )
+
+    @property
+    def has_classifier(self) -> bool:
+        """Returns True if any classify() strategy is available (classifier or regressor+threshold)."""
+        return self.classifier is not None or self.model is not None
 
     def score(self, mask: np.ndarray, img: np.ndarray, view_type: str) -> Tuple[float, Dict[str, float]]:
         feats = extract_quality_features(mask, img, view_type)
@@ -220,3 +250,27 @@ class QualityScorer:
         pred = float(self.model.predict(vec)[0])
         pred = float(max(0.0, min(1.0, pred)))
         return pred, feats
+
+    def classify(self, mask: np.ndarray, img: np.ndarray, view_type: str) -> Tuple[bool, float, Dict[str, float]]:
+        """Classify a sample as bad or good.
+
+        Uses either the trained classifier (predict_proba) or regressor + dice threshold,
+        depending on what was saved during training.
+
+        Returns (is_bad, bad_probability, features_dict).
+        """
+        feats = extract_quality_features(mask, img, view_type)
+        vec = np.array([feats[name] for name in self.feature_names], dtype=np.float32).reshape(1, -1)
+
+        if self.use_classifier and self.classifier is not None:
+            # Classifier mode: use predict_proba, threshold is probability cutoff
+            prob = float(self.classifier.predict_proba(vec)[0, 1])
+            is_bad = prob >= self.threshold
+            return is_bad, prob, feats
+
+        # Regressor mode: use predicted dice, threshold is dice cutoff
+        pred_dice = float(self.model.predict(vec)[0])
+        pred_dice = float(max(0.0, min(1.0, pred_dice)))
+        is_bad = pred_dice < self.threshold
+        bad_prob = max(0.0, min(1.0, (self.threshold - pred_dice) / max(0.1, self.threshold)))
+        return is_bad, bad_prob, feats

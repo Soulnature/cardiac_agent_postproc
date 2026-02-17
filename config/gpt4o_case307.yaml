@@ -1,8 +1,12 @@
 paths:
   source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export"
   target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs" # run script adds subdir
-  runs_subdir: "run_v31_coupled_erosion"
+  runs_subdir: "run_gpt4o_307"
   atlas_path: "shape_atlas.pkl"
+
+targets: 
+  - "244_original_lax_4c_000"
+  - "201_original_lax_4c_000" # High quality control
 
 solver:
   max_outer: 10
@@ -91,20 +95,18 @@ revision:
 
 llm:
   enabled: true
-  provider: "ollama"            # "gemini" or "ollama"
-  base_url: "http://localhost:11434/v1"  # only needed for ollama
-  model: "ministral-3:14b"
-  api_key: "ollama"             # set to real key when using remote providers
+  provider: "ollama"            # "gemini" or "ollama" (base class uses 'ollama' logical provider for OpenAI compatible)
+  base_url: "https://api.openai.com/v1"  # OpenAI endpoint
+  model: "gpt-4o"
   temperature: 0.15
   max_tokens: 8192
 
-# Visual-Language Model (using Gemini multimodal)
+# Visual-Language Model (using OpenAI multimodal)
 vision_guardrail:
   enabled: true
-  provider: "ollama"            # "gemini" or "ollama"
-  base_url: "http://localhost:11434/v1"  # only needed for ollama
-  model: "ministral-3:14b"
-  api_key: "ollama"             # set to real key when using remote providers
+  provider: "ollama"            # "gemini" or "ollama" (base class uses 'ollama' logical provider for OpenAI compatible)
+  base_url: "https://api.openai.com/v1"  # OpenAI endpoint
+  model: "gpt-4o"
   threshold: 40
 
 quality_model:
@@ -143,25 +145,29 @@ executor:
 agents:
   triage:
     provider: "ollama"
-    model: "ministral-3:14b"
-    image_detail: "low"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o"
+    image_detail: "auto"
     quality_model:
       enabled: true
       path: "quality_model.pkl"
 
   diagnosis:
     provider: "ollama"
-    model: "ministral-3:14b"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o"
     image_detail: "auto"
     vlm_enabled: true
     max_suggestions: 4
 
   planner:
     provider: "ollama"
-    model: "ministral-3:14b"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o"
     chain_of_thought: true
 
   verifier:
     provider: "ollama"
-    model: "ministral-3:14b"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o"
     image_detail: "auto"

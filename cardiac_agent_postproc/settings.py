@@ -15,6 +15,7 @@ class LLMSettings:
     openai_base_url: str = "http://localhost:11434/v1"
     openai_api_key: str = "ollama"
     openai_model: str = "qwen2.5:latest"
+    llm_provider: str = "gemini"  # "gemini" or "ollama"
 
     def __init__(self):
         env_path = os.getenv("ENV_FILE", ".env")
@@ -33,3 +34,4 @@ class LLMSettings:
         self.openai_base_url = os.getenv("OPENAI_BASE_URL", self.openai_base_url)
         self.openai_api_key = os.getenv("OPENAI_API_KEY", self.openai_api_key)
         self.openai_model = os.getenv("OPENAI_MODEL", self.openai_model)
+        self.llm_provider = os.getenv("LLM_PROVIDER", self.llm_provider)

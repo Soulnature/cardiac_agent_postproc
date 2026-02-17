@@ -1,58 +1,91 @@
-# Cardiac MRI Segmentation Post-processing Agent System (No-GT Optimization + GT Evaluation)
+# Cardiac Agent Post-Processing
 
-This project implements a multi-agent pipeline for anatomy-aware post-processing of cardiac MRI segmentation masks.
+Multi-agent LLM system for cardiac MRI segmentation label repair.
 
-**Key design**:
-- Inner-loop optimization is **NO-GT**: only rule-based reward `RQS` + raw image edges + (SOURCE-learned) shape atlas.
-- TARGET ground truth is used **ONLY** for evaluation (Dice + HD95), never for optimization decisions.
-- An outer **revision loop** optionally uses TARGET evaluation to propose ONE change per revision and rerun.
+## Overview
 
-## Folder structure expected (both SOURCE_DIR and TARGET_DIR)
-For each frame:
-- `*_img.png`  : raw image (grayscale or RGB)
-- `*_pred.png` : predicted mask (values in {0,1,2,3})
-- `*_gt.png`   : ground truth mask (values in {0,1,2,3})  (TARGET evaluation only; SOURCE atlas only)
+A team of 6 LLM-powered agents work together to automatically assess, diagnose, plan,
+repair, and verify cardiac segmentation masks — without requiring ground truth labels.
 
-Class map:
-- 0 background
-- 1 RV blood pool
-- 2 LV myocardium (LM)
-- 3 LV blood pool (LV)
+```
+Triage → Diagnosis → Planning → Execution → Verification
+  ↑                                              │
+  └──────── retry with new strategy ─────────────┘
+```
+
+### Agents
+
+| Agent | Role | LLM/VLM |
+|-------|------|---------|
+| **Coordinator** | Orchestrates pipeline, manages retries | LLM |
+| **Triage** | Fast quality classification (good/needs_fix) | LLM + classifier |
+| **Diagnosis** | Spatial defect identification | LLM + VLM + rules |
+| **Planner** | Operation sequencing with conflict avoidance | LLM |
+| **Executor** | Applies morphological ops, monitors RQS | LLM |
+| **Verifier** | Quality gating, approve/reject fixes | LLM + VLM + metrics |
+
+### Key Design Principles
+
+1. **No-GT Optimization**: Uses Reward Quality Score (RQS) — a proxy metric combining topology, shape, and consistency terms — to optimize without ground truth
+2. **Agent Communication**: Structured message bus with full audit trail
+3. **Conservative Gating**: Verifier must approve fixes before saving; rejects preserve original
+4. **Dynamic Retry**: Rejected cases get re-diagnosed and re-planned (up to N rounds)
 
 ## Quickstart
 
-### 1) Install
+### 1. Install
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
-### 2) Configure
-Copy `.env.example` to `.env` and adjust paths + LLM endpoint if you want the RevisionController to use an LLM.
-Edit `config/default.yaml`:
-- `paths.source_dir`
-- `paths.target_dir`
+### 2. Configure LLM
 
-### 3) Run end-to-end
+Copy `.env.example` to `.env` and set your API credentials:
+
+```bash
+LLM_ENABLED=true
+OPENAI_BASE_URL=https://your-api-endpoint/v1
+OPENAI_API_KEY=your-key
+OPENAI_MODEL=your-model
+```
+
+### 3. Run
+
 ```bash
 python -m cardiac_agent_postproc.run --config config/default.yaml
 ```
 
-Outputs:
-- `SOURCE_DIR/shape_atlas.pkl` (cached)
-- `SOURCE_DIR/label_optimization_summary.csv`
-- `TARGET_DIR/label_optimization_summary.csv`
-- `TARGET_DIR/target_dice_report.csv`
-- `TARGET_DIR/target_dice_summary.csv`
-- Per-mask intermediates and optimized predictions in the same folder (never overwrites original *_pred.png)
+### 4. Output
 
-## Agents
-- `AtlasBuilderAgent`: builds multi-template probabilistic atlas from SOURCE GT.
-- `OptimizerAgent`: optimizes masks using RQS only; writes intermediates + logs.
-- `EvaluatorAgent`: computes Dice/HD95 on TARGET using GT (reporting only).
-- `RevisionControllerAgent`: reads reports + logs and proposes ONE parameter change per revision.
+- Optimized masks: `<target_dir>/runs/`
+- Audit trail: `<target_dir>/runs/agent_audit_trail.json`
 
-## Notes
-- The implementation follows your spec closely; parameters are externalized in YAML for safe revisioning.
-- To enforce No-GT, OptimizerAgent never loads `*_gt.png` from TARGET and will raise if such paths are provided.
+## Configuration
+
+See `config/default.yaml` for all settings. Key multi-agent parameters:
+
+```yaml
+multi_agent:
+  max_rounds_per_case: 3       # max retry cycles per case
+  fast_path_threshold: 0.95    # classifier score above this → skip optimization
+  agent_temperature: 0.15      # LLM creativity level
+  enable_negotiation: true     # agents can challenge each other
+  batch_summary: true          # cross-case analysis after batch
+```
+
+## Folder Structure
+
+```
+source_data/
+├── case001_img.png          # raw MRI image
+├── case001_pred.png         # predicted segmentation mask
+├── atlas.pkl                # probabilistic shape atlas
+└── runs/                    # outputs go here
+
+target_data/
+├── case001_img.png
+├── case001_pred.png
+├── case001_gt.png           # ground truth (optional, for evaluation)
+└── runs/
+```

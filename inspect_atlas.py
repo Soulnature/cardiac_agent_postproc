@@ -1,14 +1,14 @@
 import pickle
 import sys
-import os
 
-sys.path.append(os.getcwd())
-from cardiac_agent_postproc.atlas import load_atlas
+def inspect(path):
+    try:
+        with open(path, "rb") as f:
+            atlas = pickle.load(f)
+        print(f"Atlas loaded from {path}")
+        print(f"Keys: {list(atlas.keys())}")
+    except Exception as e:
+        print(f"Error loading atlas: {e}")
 
-try:
-    atlas = load_atlas("results/inputs/shape_atlas.pkl")
-    print("Atlas loaded. Keys:")
-    for k in atlas.keys():
-        print(f"  {k}")
-except Exception as e:
-    print(f"Error: {e}")
+if __name__ == "__main__":
+    inspect("shape_atlas.pkl")

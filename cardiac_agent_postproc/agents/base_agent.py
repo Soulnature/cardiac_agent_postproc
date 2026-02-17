@@ -1,0 +1,639 @@
+"""
+BaseAgent: Abstract base class for all LLM-powered agents.
+
+Every agent in the system inherits from BaseAgent.  It provides:
+- An identity / system prompt (role)
+- Access to the shared LLM client
+- Conversation memory for multi-turn reasoning
+- Standard think/act/respond_to interface
+- Connection to the MessageBus for inter-agent communication
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from ..api_client import OpenAICompatClient
+from ..settings import LLMSettings
+from .message_bus import AgentMessage, CaseContext, MessageBus, MessageType
+from .visual_knowledge import VisualKnowledgeBase, RepairComparisonKB
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Memory:
+    """Rolling conversation memory for an agent."""
+    messages: List[Dict[str, str]] = field(default_factory=list)
+    max_messages: int = 40  # keep last N messages to avoid context overflow
+
+    def add(self, role: str, content: str) -> None:
+        self.messages.append({"role": role, "content": content})
+        # Trim oldest (keep system prompt + recent)
+        if len(self.messages) > self.max_messages:
+            # Always keep the first message (system prompt) if it exists
+            if self.messages and self.messages[0]["role"] == "system":
+                self.messages = [self.messages[0]] + self.messages[-(self.max_messages - 1):]
+            else:
+                self.messages = self.messages[-self.max_messages:]
+
+    def to_messages(self) -> List[Dict[str, str]]:
+        return list(self.messages)
+
+    def clear(self) -> None:
+        """Clear memory, keeping only the system prompt if present."""
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages = [self.messages[0]]
+        else:
+            self.messages = []
+
+    def last_n(self, n: int) -> List[Dict[str, str]]:
+        """Get the last N messages."""
+        return self.messages[-n:]
+
+
+class BaseAgent(ABC):
+    """
+    Abstract base class for all LLM-powered agents.
+
+    Subclasses must implement:
+    - name (property): unique agent identifier
+    - system_prompt (property): the agent's persona/instructions
+    - process_case(case_ctx): main processing logic for a single case
+    """
+
+    def __init__(
+        self,
+        cfg: dict,
+        bus: MessageBus,
+        visual_kb: Optional[VisualKnowledgeBase] = None,
+        repair_kb: Optional[RepairComparisonKB] = None,
+    ):
+        self.cfg = cfg
+        self.bus = bus
+        self.memory = Memory()
+        self.visual_kb = visual_kb
+        self.repair_kb = repair_kb
+        self._llm_client: Optional[OpenAICompatClient] = None
+        self._vlm_client: Optional[OpenAICompatClient] = None
+
+        # Register with bus
+        self.bus.register_agent(self.name)
+
+        # Initialize system prompt in memory
+        self.memory.add("system", self.system_prompt)
+
+    # ---- Identity (must be implemented by subclasses) ----
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Unique agent name, e.g. 'triage', 'diagnosis'."""
+        ...
+
+    @property
+    @abstractmethod
+    def system_prompt(self) -> str:
+        """The agent's persona / system instructions."""
+        ...
+
+    @abstractmethod
+    def process_case(self, ctx: CaseContext) -> None:
+        """
+        Main entry point: process a single case.
+        Should read from ctx, update ctx, and send messages via bus.
+        """
+        ...
+
+    # ---- LLM Clients (lazy initialization) ----
+
+    def _agent_cfg(self) -> Dict[str, Any]:
+        agents_cfg = self.cfg.get("agents", {})
+        if not isinstance(agents_cfg, dict):
+            return {}
+        agent_cfg = agents_cfg.get(self.name, {})
+        return agent_cfg if isinstance(agent_cfg, dict) else {}
+
+    def _llm_cfg(self) -> Dict[str, Any]:
+        llm_cfg = dict(self.cfg.get("llm", {}))
+        agent_cfg = self._agent_cfg()
+        for k in ("provider", "base_url", "api_key", "model", "timeout", "temperature", "max_tokens"):
+            if k in agent_cfg:
+                llm_cfg[k] = agent_cfg[k]
+        return llm_cfg
+
+    def _vlm_cfg(self) -> Dict[str, Any]:
+        vg_cfg = dict(self.cfg.get("vision_guardrail", {}))
+        agent_cfg = self._agent_cfg()
+        for k in ("provider", "base_url", "api_key", "model", "timeout", "image_detail", "temperature", "max_tokens"):
+            if k in agent_cfg:
+                vg_cfg[k] = agent_cfg[k]
+        return vg_cfg
+
+    @property
+    def llm(self) -> OpenAICompatClient:
+        """Lazy-init LLM client from config."""
+        if self._llm_client is None:
+            llm_cfg = self._llm_cfg()
+            settings = LLMSettings()
+            self._llm_client = OpenAICompatClient(
+                base_url=llm_cfg.get("base_url", settings.openai_base_url),
+                api_key=llm_cfg.get("api_key", settings.openai_api_key),
+                model=llm_cfg.get("model", settings.openai_model),
+                timeout=float(llm_cfg.get("timeout", 180.0)),
+                provider=llm_cfg.get("provider", settings.llm_provider),
+            )
+        return self._llm_client
+
+    @property
+    def vlm(self) -> OpenAICompatClient:
+        """Lazy-init VLM client from config."""
+        if self._vlm_client is None:
+            vg_cfg = self._vlm_cfg()
+            settings = LLMSettings()
+            self._vlm_client = OpenAICompatClient(
+                base_url=vg_cfg.get("base_url", settings.openai_base_url),
+                api_key=vg_cfg.get("api_key", settings.openai_api_key),
+                model=vg_cfg.get("model", settings.openai_model),
+                timeout=float(vg_cfg.get("timeout", 180.0)),
+                provider=vg_cfg.get("provider", settings.llm_provider),
+            )
+        return self._vlm_client
+
+    # ---- Core Reasoning ----
+
+    def think(self, user_prompt: str, temperature: float = 0.2) -> str:
+        """
+        Core reasoning method: sends the user prompt to the LLM
+        with the agent's full memory context.
+
+        Returns the raw LLM response text.
+        Appends both the prompt and response to memory.
+        """
+        self.memory.add("user", user_prompt)
+
+        llm_cfg = self._llm_cfg()
+        temp = llm_cfg.get("temperature", temperature)
+        max_tokens = llm_cfg.get("max_tokens", 8192)
+
+        # Build messages from memory
+        messages = self.memory.to_messages()
+
+        try:
+            response = self.llm.chat_json(
+                system=messages[0]["content"] if messages and messages[0]["role"] == "system" else self.system_prompt,
+                user=user_prompt,
+                temperature=temp,
+                max_tokens=max_tokens,
+            )
+            # chat_json returns a dict; convert to string for memory
+            response_text = json.dumps(response) if isinstance(response, dict) else str(response)
+        except Exception as e:
+            print(f"[{self.name}] LLM call failed: {e}")
+            response_text = "{}"
+
+        self.memory.add("assistant", response_text)
+        return response_text
+
+    def think_json(self, user_prompt: str, temperature: float = 0.15) -> Dict[str, Any]:
+        """
+        Like think(), but returns parsed JSON.
+        Falls back to empty dict on parse failure.
+        """
+        self.memory.add("user", user_prompt)
+
+        llm_cfg = self._llm_cfg()
+        temp = llm_cfg.get("temperature", temperature)
+        max_tokens = llm_cfg.get("max_tokens", 8192)
+
+        result = self.llm.chat_json(
+            system=self.system_prompt,
+            user=user_prompt,
+            temperature=temp,
+            max_tokens=max_tokens,
+        )
+
+        self.memory.add("assistant", json.dumps(result))
+        return result
+
+    def think_vision(
+        self,
+        user_prompt: str,
+        image_path: str,
+        temperature: float = 0.15,
+    ) -> Dict[str, Any]:
+        """
+        Multimodal reasoning: send text + image to VLM.
+        Returns parsed JSON response.
+        """
+        self.memory.add("user", f"[IMAGE: {image_path}] {user_prompt}")
+
+        vg_cfg = self._vlm_cfg()
+        image_detail = vg_cfg.get("image_detail", "auto")
+
+        result = self.vlm.chat_vision_json(
+            system=self.system_prompt,
+            user_text=user_prompt,
+            image_path=image_path,
+            temperature=temperature,
+            image_detail=image_detail,
+        )
+
+        self.memory.add("assistant", json.dumps(result))
+        return result
+
+    # ---- VLM-Based Quality Judgment (replaces RQS) ----
+
+    _JUDGE_PROMPT = (
+        "You are a cardiac MRI segmentation quality judge. We are REPAIRING poor segmentations.\n"
+        "I will show you reference examples of GOOD and BAD segmentation overlays, "
+        "then a TARGET overlay for you to evaluate.\n\n"
+        "Each overlay image has 4 panels: Raw, GT, Pred, Error map.\n"
+        "Color legend: Cyan=RV, Yellow ring=Myocardium, Red-brown=LV\n\n"
+        "You must determine if the TARGET is passable (good/borderline) or completely failed (bad).\n"
+        "Relax your standards: 'borderline' is acceptable for a work-in-progress.\n\n"
+        "CRITERIA for 'bad' (REJECT): \n"
+        "- Myocardium is completely missing or just noise scattered everywhere.\n"
+        "- Massive merging of LV and RV (giant blob).\n"
+        "- Non-anatomical shapes (squares, exploded pixels).\n\n"
+        "CRITERIA for 'borderline' (ACCEPT): \n"
+        "- Small to medium gaps in myocardium (if structure is mostly there).\n"
+        "- Minor thickness variations or rough edges.\n"
+        "- Class confusion in small areas.\n"
+        "- Blobs or islands that don't destroy the main shape.\n\n"
+        "SCORE SCALE (1-10):\n"
+        "  1-2: Failed, non-anatomical garbage\n"
+        "  3-4: Bad, major structural errors (missing class, massive merging)\n"
+        "  5-6: Borderline, noticeable issues but anatomically recognizable\n"
+        "  7-8: Good, minor issues (small gaps, rough edges)\n"
+        "  9-10: Excellent, near-perfect segmentation\n\n"
+        "Evaluate the TARGET image and respond in JSON:\n"
+        '{"quality": "good"|"bad"|"borderline", '
+        '"score": 1-10, '
+        '"confidence": 0.0-1.0, '
+        '"issues": ["list of specific issues found"], '
+        '"reasoning": "brief explanation"}'
+    )
+
+
+    _COMPARE_PROMPT = (
+        "You are a cardiac MRI segmentation quality judge.\n\n"
+        "I will show you a BEFORE and AFTER overlay of the same case.\n"
+        "Determine if the repair IMPROVED the segmentation.\n\n"
+        "Each overlay has 4 panels: Raw, GT, Pred (Dice), Error map.\n"
+        "Color legend: Cyan=RV, Yellow ring=Myo, Red-brown=LV\n\n"
+        "CRITICAL: Count as IMPROVED if:\n"
+        "- A structural defect is fixed (e.g., a gap in the yellow ring is closed).\n"
+        "- A missing part is restored.\n"
+        "- Gross errors (like giant blobs) are reduced.\n\n"
+        "ACCEPTABLE TRADE-OFFS (still IMPROVED):\n"
+        "- Fixing a gap introduces slight roughness or minor noise.\n"
+        "- Restoring a missing part makes the boundary slightly incorrect.\n"
+        "- Better anatomy is worth a few incorrect pixels.\n\n"
+        "Respond in JSON:\n"
+        '{"verdict": "improved"|"same"|"worse", '
+        '"confidence": 0.0-1.0, '
+        '"before_quality": "good"|"bad"|"borderline", '
+        '"after_quality": "good"|"bad"|"borderline", '
+        '"changes_observed": ["list of changes"], '
+        '"reasoning": "brief explanation"}'
+    )
+
+    def judge_visual_quality(
+        self, overlay_path: str, n_refs: int = 2
+    ) -> Dict[str, Any]:
+        """
+        Use VLM to judge segmentation quality by comparing the target overlay
+        against few-shot good/bad reference examples.
+
+        Returns:
+            {"quality": "good"|"bad"|"borderline",
+             "confidence": float,
+             "issues": [...],
+             "reasoning": str}
+        """
+        if self.visual_kb is None or not overlay_path:
+            logger.warning("judge_visual_quality called without visual_kb or overlay_path")
+            return {"quality": "borderline", "confidence": 0.0, "issues": [], "reasoning": "no visual knowledge base"}
+
+        # Select few-shot references
+        good_refs, bad_refs = self.visual_kb.get_few_shot_set(n_refs, n_refs)
+
+        # Build image list with labels
+        image_paths = []
+        image_labels = []
+
+        for i, ex in enumerate(good_refs):
+            image_labels.append(f"[GOOD EXAMPLE {i+1}] Dice={ex.dice:.3f}")
+            image_paths.append(ex.path)
+
+        for i, ex in enumerate(bad_refs):
+            image_labels.append(f"[BAD EXAMPLE {i+1}] Dice={ex.dice:.3f}, Issue={ex.issue_type}")
+            image_paths.append(ex.path)
+
+        image_labels.append("[TARGET - EVALUATE THIS]")
+        image_paths.append(overlay_path)
+
+        # Add knowledge context to prompt
+        knowledge_text = self.visual_kb.build_knowledge_prompt()
+        full_prompt = f"{knowledge_text}\n\n{self._JUDGE_PROMPT}"
+
+        self.log(f"VLM judge: {len(good_refs)} good + {len(bad_refs)} bad refs → evaluating {overlay_path}")
+
+        vg_cfg = self._vlm_cfg()
+        image_detail = vg_cfg.get("image_detail", "auto")
+
+        result = self.vlm.chat_vision_multi_json(
+            system="You are an expert cardiac MRI segmentation quality assessor.",
+            user_text=full_prompt,
+            image_paths=image_paths,
+            image_labels=image_labels,
+            temperature=0.1,
+            image_detail=image_detail,
+        )
+        print(f"DEBUG: Raw VLM Response: {result}", flush=True)
+
+        # Normalize result
+        quality = result.get("quality", "borderline")
+        if quality not in ("good", "bad", "borderline"):
+            quality = "borderline"
+        result["quality"] = quality
+        result.setdefault("confidence", 0.5)
+        result.setdefault("issues", [])
+        result.setdefault("reasoning", "")
+
+        self.log(f"VLM verdict: {result['quality']} (conf={result['confidence']:.2f})")
+        return result
+
+    def judge_visual_comparison(
+        self, before_path: str, after_path: str
+    ) -> Dict[str, Any]:
+        """
+        Use VLM to compare before/after overlays and determine if repair improved quality.
+
+        Returns:
+            {"verdict": "improved"|"same"|"worse",
+             "confidence": float,
+             "before_quality": str, "after_quality": str,
+             "changes_observed": [...],
+             "reasoning": str}
+        """
+        image_paths = [before_path, after_path]
+        image_labels = ["[BEFORE repair]", "[AFTER repair]"]
+
+        # Optionally add a good reference for calibration
+        if self.visual_kb and self.visual_kb.good_examples:
+            good_ref = self.visual_kb.get_good_examples(1)[0]
+            image_paths.insert(0, good_ref.path)
+            image_labels.insert(0, f"[REFERENCE - good quality] Dice={good_ref.dice:.3f}")
+
+        self.log(f"VLM comparison: before={before_path} vs after={after_path}")
+
+        vg_cfg = self._vlm_cfg()
+        image_detail = vg_cfg.get("image_detail", "auto")
+
+        result = self.vlm.chat_vision_multi_json(
+            system="You are an expert cardiac MRI segmentation quality assessor.",
+            user_text=self._COMPARE_PROMPT,
+            image_paths=image_paths,
+            image_labels=image_labels,
+            temperature=0.1,
+            image_detail=image_detail,
+        )
+
+        # Normalize
+        verdict = result.get("verdict", "same")
+        if verdict not in ("improved", "same", "worse"):
+            verdict = "same"
+        result["verdict"] = verdict
+        result.setdefault("confidence", 0.5)
+        result.setdefault("changes_observed", [])
+        result.setdefault("reasoning", "")
+
+        self.log(f"VLM comparison verdict: {result['verdict']} (conf={result['confidence']:.2f})")
+        return result
+
+    # ---- Repair Comparison (diff-overlay based) ----
+
+    _REPAIR_COMPARE_PROMPT = (
+        "You are a cardiac MRI segmentation repair quality judge.\n\n"
+        "TASK: Read the pixel statistics from the image header and confirm with visual evidence.\n\n"
+        "The image has 3 panels:\n"
+        "  LEFT = BEFORE repair\n"
+        "  MIDDLE = AFTER repair\n"
+        "  RIGHT = DIFF panel showing pixel-level changes.\n\n"
+        "CRITICAL STEP 1: READ THE HEADER OF THE RIGHT (DIFF) PANEL.\n"
+        "There is text like 'DIFF +123 -45 ~67'.\n"
+        "  +N = pixels ADDED (green)\n"
+        "  -N = pixels REMOVED (red)\n"
+        "  ~N = pixels CLASS CHANGED (yellow)\n\n"
+        "CRITICAL STEP 2: VISUAL CHECK:\n"
+        "Do the green pixels look like they are filling a gap? (Good)\n"
+        "Do the red pixels look like they are removing spurious noise? (Good)\n"
+        "Or are red pixels removing correct walls? (Bad)\n\n"
+        "Respond ONLY in JSON:\n"
+        '{"diff_stats": "+... -... ~...", '
+        '"verdict": "improved"|"degraded"|"neutral", '
+        '"confidence": 0.0-1.0, '
+        '"reasoning": "stats read + visual confirmation"}'
+    )
+
+    def judge_repair_comparison(
+        self, diff_overlay_path: str, applied_ops: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Use VLM with the repair KB to judge a single diff-overlay image.
+
+        This is the improved replacement for `judge_visual_comparison` that:
+        - Uses a single 3-panel diff overlay (BEFORE | AFTER | DIFF)
+        - Provides few-shot repair examples from RepairComparisonKB
+        - Sends fewer images (max 3 total) for better VLM accuracy
+
+        Returns:
+            {"verdict": "improved"|"degraded"|"neutral",
+             "confidence": float,
+             "reasoning": str}
+        """
+        image_paths = []
+        image_labels = []
+
+        # Add few-shot repair examples from KB (if available)
+        if self.repair_kb and self.repair_kb.total > 0:
+            imp_refs, deg_refs = self.repair_kb.get_few_shot_repair(1, 1)
+            for ex in imp_refs:
+                image_labels.append(
+                    f"[EXAMPLE - IMPROVED repair, Dice delta={ex.dice_delta:+.3f}]"
+                )
+                image_paths.append(ex.path)
+            for ex in deg_refs:
+                image_labels.append(
+                    f"[EXAMPLE - DEGRADED repair, Dice delta={ex.dice_delta:+.3f}]"
+                )
+                image_paths.append(ex.path)
+
+        # Target overlay to evaluate
+        image_labels.append("[TARGET - EVALUATE THIS REPAIR]")
+        image_paths.append(diff_overlay_path)
+
+        # Build prompt with repair knowledge
+        prompt = self._REPAIR_COMPARE_PROMPT
+        if self.repair_kb and self.repair_kb.total > 0:
+            knowledge = self.repair_kb.build_repair_knowledge_prompt()
+            prompt = f"{knowledge}\n\n{prompt}"
+
+        self.log(f"VLM repair comparison: {diff_overlay_path} "
+                 f"(with {len(image_paths)-1} reference examples)")
+
+        vg_cfg = self._vlm_cfg()
+        image_detail = vg_cfg.get("image_detail", "auto")
+
+        result = self.vlm.chat_vision_multi_json(
+            system="You are a cardiac MRI segmentation repair quality judge.",
+            user_text=prompt,
+            image_paths=image_paths,
+            image_labels=image_labels,
+            temperature=0.1,
+            image_detail=image_detail,
+        )
+
+        # Normalize
+        verdict = result.get("verdict", "neutral")
+        if verdict not in ("improved", "degraded", "neutral"):
+            verdict = "neutral"
+        result["verdict"] = verdict
+        result.setdefault("confidence", 0.5)
+        result.setdefault("reasoning", "")
+        
+        if "diff_stats" in result:
+            self.log(f"VLM read stats: {result['diff_stats']}")
+            
+            # --- DETERMINISTIC LOGIC OVERRIDE ---
+            # VLM is great at OCR (reading +123 -45) but bad at applying complex logic/ratios.
+            # We parse the stats here and force the correct verdict.
+            import re
+            stats_str = result["diff_stats"]
+            match_add = re.search(r'\+(\d+)', stats_str)
+            match_rem = re.search(r'-(\d+)', stats_str)
+            match_chg = re.search(r'~(\d+)', stats_str)
+            
+            if match_add and match_rem:
+                n_add = int(match_add.group(1))
+                n_rem = int(match_rem.group(1))
+                n_chg = int(match_chg.group(1)) if match_chg else 0
+                
+                calc_verdict = "neutral"
+                
+                # Check for Class-Swapping Operations
+                is_swapper = False
+                swapper_ops = ["erode_expand_myo", "neighbor_repair", "neighbor_rv_repair", "neighbor_myo_repair", "atlas", "1_erode_expand_myo", "3_erode_expand_myo"]
+                if applied_ops:
+                    for op in applied_ops:
+                        if any(s in op for s in swapper_ops):
+                            is_swapper = True
+                            break
+                
+                # Rule 1: Degradation (Strict safety check)
+                # If removing significantly more than adding (net loss)
+                if n_rem > n_add + 50:
+                    calc_verdict = "degraded"
+                
+                # If massive class confusion
+                # RELAXATION: If known class-swapper, tolerate much higher class changes
+                limit_chg = n_add + 500 if is_swapper else n_add + 200
+                if n_chg > limit_chg:
+                    calc_verdict = "degraded"
+                
+                # Rule 2: Improvement (Massive repair)
+                # If adding way more than removing (ratio > 2), it's a fill operation
+                elif n_add > 2 * n_rem and n_add > 50:
+                    calc_verdict = "improved"
+                
+                # Rule 3: Improvement (Clean gap fill)
+                # If adding something and removing almost nothing
+                elif n_add > 0 and n_rem < 30:
+                    calc_verdict = "improved"
+                
+                # Rule 4: Neutral check
+                elif (n_add + n_rem + n_chg) < 30:
+                    calc_verdict = "neutral"
+                
+                # Apply Override
+                # We trust our Python logic more than the VLM's semantic intuition
+                if calc_verdict != result["verdict"]:
+                    self.log(f"LOGIC OVERRIDE: {result['verdict']} -> {calc_verdict} "
+                             f"(based on +{n_add} -{n_rem} ~{n_chg}, swapper={is_swapper})")
+                    result["original_verdict"] = result["verdict"]
+                    result["verdict"] = calc_verdict
+                    if not isinstance(result.get("reasoning"), str):
+                        result["reasoning"] = str(result.get("reasoning", ""))
+                    result["reasoning"] += f" [Auto-Correction: logic override based on stats]"
+            # --- END OVERRIDE ---
+
+        self.log(f"VLM repair verdict: {result['verdict']} (conf={result['confidence']:.2f})")
+        return result
+
+
+    def send_message(
+        self,
+        recipient: str,
+        msg_type: MessageType,
+        content: Dict[str, Any],
+        case_id: str = "",
+    ) -> None:
+        """Send a message to another agent via the bus."""
+        msg = AgentMessage(
+            sender=self.name,
+            recipient=recipient,
+            msg_type=msg_type,
+            content=content,
+            case_id=case_id,
+        )
+        self.bus.send(msg)
+        print(f"  {msg.summary()}", flush=True)
+
+    def receive_messages(
+        self,
+        msg_type: Optional[MessageType] = None,
+        case_id: Optional[str] = None,
+    ) -> List[AgentMessage]:
+        """Receive pending messages from the bus."""
+        return self.bus.receive(self.name, msg_type=msg_type, case_id=case_id)
+
+    def respond_to(self, msg: AgentMessage) -> Optional[AgentMessage]:
+        """
+        Respond to an incoming message from another agent.
+        Default: use LLM to generate a response.
+        Subclasses can override for custom behavior.
+        """
+        prompt = (
+            f"You received a {msg.msg_type.value} message from {msg.sender}:\n"
+            f"{json.dumps(msg.content, indent=2)}\n\n"
+            f"Provide your response as JSON."
+        )
+        response = self.think_json(prompt)
+        print(f"DEBUG: Raw VLM Response: {response}", flush=True)
+
+        reply = AgentMessage(
+            sender=self.name,
+            recipient=msg.sender,
+            msg_type=MessageType.CHALLENGE_RESPONSE,
+            content=response,
+            case_id=msg.case_id,
+        )
+        self.bus.send(reply)
+        return reply
+
+    # ---- Utilities ----
+
+    def log(self, message: str) -> None:
+        """Print a log line with agent name prefix."""
+        print(f"[{self.name}] {message}", flush=True)
+
+    def reset_memory(self) -> None:
+        """Clear conversation memory (keep system prompt)."""
+        self.memory.clear()

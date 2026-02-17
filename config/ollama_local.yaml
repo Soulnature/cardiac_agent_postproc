@@ -1,7 +1,15 @@
+# Ollama local configuration — uses ministral-3:14b (multimodal)
+# Usage: python -m cardiac_agent_postproc.run --config config/ollama_local.yaml
+#
+# Prerequisites:
+#   1. Install Ollama: https://ollama.com
+#   2. Pull the model: ollama pull ministral-3:14b
+#   3. Start Ollama server: ollama serve  (default: http://localhost:11434)
+
 paths:
   source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export"
-  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs" # run script adds subdir
-  runs_subdir: "run_v31_coupled_erosion"
+  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs"
+  runs_subdir: "run_ollama_local"
   atlas_path: "shape_atlas.pkl"
 
 solver:
@@ -12,21 +20,19 @@ solver:
   max_inner: 15
   min_delta: 0.5
   min_quality_delta: 0.01
-  patience: 10
+  patience: 5
   stop_min_rqs: 90.0
   stop_min_rqs_delta: 0.2
   stop_min_rqs_stagnant_rounds: 2
-
-  # Conditional Optimization
   skip_good_rqs_threshold: 75.0
   atlas_builder_min_rqs: 80.0
 
 triage:
   enabled: true
-  mode: "classifier"          # "classifier" (trained model) or "heuristic" (feature-based)
-  good_threshold: 0.92        # only used in heuristic mode
-  bad_threshold: 0.70         # only used in heuristic mode
-  vlm_enabled: false           # DISABLED: currently broken (returns 0)
+  mode: "classifier"
+  good_threshold: 0.95
+  bad_threshold: 0.70
+  vlm_enabled: false
   vlm_accept_threshold: 70
 
 view_inference:
@@ -48,7 +54,6 @@ shape_atlas:
 reward_weights:
   use_surrogate: false
   surrogate_path: "surrogate_model.pkl"
-  # Kept for atlas_builder and optional logging, NOT used in optimizer decisions
   P_touch: 50.0
   P_edge_misalignment: 4.0
   P_components: 18.0
@@ -69,19 +74,14 @@ ops:
   small_component_floor: 20
   small_component_frac: 0.002
   island_frac: 0.02
-
-  erosion_iterations: 1
-  dilation_iterations: 1
-  max_erosion_loss: 0.25
-
   morph_kernel3: 3
   smooth:
     contour_epsilon: 1.5
     gaussian_sigma: 1.0
-    morph_r: 1
+    morph_r: 2
 
 revision:
-  enabled: false              # disabled: VLM pipeline is single-pass
+  enabled: false
   max_revisions: 30
   stop_min_dice: 0.90
   stop_max_hd95: 4.0
@@ -89,60 +89,60 @@ revision:
   stall_min_dice_delta: 0.001
   stall_max_hd95_delta: 0.1
 
+# ── LLM — Ollama local (ministral-3:14b, multimodal) ──
 llm:
   enabled: true
-  provider: "ollama"            # "gemini" or "ollama"
-  base_url: "http://localhost:11434/v1"  # only needed for ollama
+  provider: "ollama"
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
   model: "ministral-3:14b"
-  api_key: "ollama"             # set to real key when using remote providers
   temperature: 0.15
   max_tokens: 8192
+  timeout: 300
 
-# Visual-Language Model (using Gemini multimodal)
+# ── VLM — same Ollama model (ministral-3:14b is multimodal) ──
 vision_guardrail:
   enabled: true
-  provider: "ollama"            # "gemini" or "ollama"
-  base_url: "http://localhost:11434/v1"  # only needed for ollama
+  provider: "ollama"
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
   model: "ministral-3:14b"
-  api_key: "ollama"             # set to real key when using remote providers
-  threshold: 40
+  threshold: 60
+  timeout: 600
+  image_detail: "low"
 
 quality_model:
   enabled: true
   path: "quality_model.pkl"
-  blend_mode: "replace"  # none | hybrid | replace
+  blend_mode: "replace"
   blend_alpha: 0.5
   bad_threshold: 0.93
   log_features: false
 
 diagnosis:
   enabled: true
-  vlm_enabled: true            # ENABLED: VLM spatial diagnosis
-  spatial: true                # NEW: enable spatial output format
+  vlm_enabled: true
+  spatial: true
   quality_threshold: 0.8
-  max_suggestions: 4           # reduced: focus on top issues
+  max_suggestions: 4
 
 # ── Multi-Agent System ──
 multi_agent:
-  max_rounds_per_case: 2       # max diagnosis→plan→execute→verify cycles
-  fast_path_threshold: 0.925    # cases above this skip the full pipeline
-  agent_temperature: 0.2      # LLM temperature for agent reasoning
-  enable_negotiation: true     # allow agents to challenge each other
-  batch_summary: true          # cross-case learning after each batch
+  max_rounds_per_case: 3
+  fast_path_threshold: 0.95
+  agent_temperature: 0.15
+  enable_negotiation: true
+  batch_summary: true
 
 # ── Executor Safety Gates ──
 executor:
-  max_high_impact_change_ratio: 0.08  # cap for atlas/neighbor/large/global ops
-  max_step_change_ratio: 0.10         # cap for normal per-step edits
-  same_verdict_max_change_ratio: 0.03 # if VLM says "same", only allow small low-impact edits
-  same_verdict_min_compare_confidence: 0.70
-  allow_borderline_on_same: true
+  max_high_impact_change_ratio: 0.20
+  max_step_change_ratio: 0.12
+  same_verdict_max_change_ratio: 0.01
 
-
-# ---- Agent-specific overrides ----
+# ── Agent-specific overrides (all use local Ollama) ──
 agents:
   triage:
-    provider: "ollama"
     model: "ministral-3:14b"
     image_detail: "low"
     quality_model:
@@ -150,18 +150,15 @@ agents:
       path: "quality_model.pkl"
 
   diagnosis:
-    provider: "ollama"
     model: "ministral-3:14b"
     image_detail: "auto"
     vlm_enabled: true
     max_suggestions: 4
 
   planner:
-    provider: "ollama"
     model: "ministral-3:14b"
     chain_of_thought: true
 
   verifier:
-    provider: "ollama"
     model: "ministral-3:14b"
     image_detail: "auto"

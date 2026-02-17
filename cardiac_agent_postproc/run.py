@@ -1,7 +1,16 @@
 from __future__ import annotations
-import argparse, os
+import argparse
 import yaml
 from .orchestrator import Orchestrator
+
+
+def _fallback_summary(verdicts: dict) -> dict:
+    summary = {"total": len(verdicts), "good": 0, "approved": 0, "gave_up": 0, "rejected": 0}
+    for v in verdicts.values():
+        if v in summary:
+            summary[v] += 1
+    return summary
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -16,11 +25,14 @@ def main():
 
     # print final overview
     last_key = sorted(results.keys(), key=lambda x: int(x[1:]) if x.startswith("v") else -1)[-1]
+    final = results[last_key]
+    src_summary = final.get("src_summary") or _fallback_summary(final.get("src_verdicts", {}))
+    tgt_summary = final.get("tgt_summary") or _fallback_summary(final.get("tgt_verdicts", {}))
     print("\n=== FINAL SUMMARY ===")
     print(f"Last revision: {last_key}")
-    print(f"[SOURCE] Summary: {results[last_key]['src_summary']}")
-    print(f"[TARGET] Summary: {results[last_key]['tgt_summary']}")
-    print(f"[TARGET] Eval:    {results[last_key]['tgt_eval']}")
+    print(f"[SOURCE] Summary: {src_summary}")
+    print(f"[TARGET] Summary: {tgt_summary}")
+    print(f"[TARGET] Eval:    {final.get('tgt_eval', {})}")
 
 if __name__ == "__main__":
     main()
