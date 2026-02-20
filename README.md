@@ -1,91 +1,167 @@
 # Cardiac Agent Post-Processing
 
-Multi-agent LLM system for cardiac MRI segmentation label repair.
+Multi-agent LLM system for cardiac MRI segmentation repair.
 
 ## Overview
 
-A team of 6 LLM-powered agents work together to automatically assess, diagnose, plan,
-repair, and verify cardiac segmentation masks — without requiring ground truth labels.
+This project repairs cardiac segmentation masks through a coordinated agent pipeline:
 
 ```
-Triage → Diagnosis → Planning → Execution → Verification
-  ↑                                              │
-  └──────── retry with new strategy ─────────────┘
+Triage -> Diagnosis -> Planning -> Execution -> Verification
+  ^                                              |
+  +---------------- retry loop ------------------+
 ```
 
-### Agents
+The design focuses on conservative edits, structured decision logs, and robust fallbacks.
 
-| Agent | Role | LLM/VLM |
-|-------|------|---------|
-| **Coordinator** | Orchestrates pipeline, manages retries | LLM |
-| **Triage** | Fast quality classification (good/needs_fix) | LLM + classifier |
-| **Diagnosis** | Spatial defect identification | LLM + VLM + rules |
-| **Planner** | Operation sequencing with conflict avoidance | LLM |
-| **Executor** | Applies morphological ops, monitors RQS | LLM |
-| **Verifier** | Quality gating, approve/reject fixes | LLM + VLM + metrics |
+## Core Agents
 
-### Key Design Principles
+| Agent | Responsibility |
+|---|---|
+| Coordinator | Orchestrates per-case rounds and retry policy |
+| Triage | Classifies `good` vs `needs_fix` and prioritizes cases |
+| Diagnosis | Produces spatial defect hypotheses with issue-level metadata |
+| Planner | Builds operation sequence from diagnoses |
+| Executor | Applies morphology/atlas/neighbor operations with safety gates |
+| Verifier | Approves, rejects, or requests another round |
 
-1. **No-GT Optimization**: Uses Reward Quality Score (RQS) — a proxy metric combining topology, shape, and consistency terms — to optimize without ground truth
-2. **Agent Communication**: Structured message bus with full audit trail
-3. **Conservative Gating**: Verifier must approve fixes before saving; rejects preserve original
-4. **Dynamic Retry**: Rejected cases get re-diagnosed and re-planned (up to N rounds)
+## Repository Layout
 
-## Quickstart
+```text
+cardiac_agent_postproc/
+├── cardiac_agent_postproc/      # package code (agents, ops, API client, utils)
+├── scripts/                     # experiment runners and analysis tools
+├── config/                      # runtime configs (OpenAI/Azure/Gemini/Ollama variants)
+├── prompts/                     # system and task prompts for each agent
+├── results/                     # run outputs
+└── WORKLOG.md                   # development session log
+```
 
-### 1. Install
+## Installation
 
 ```bash
 pip install -e .
 ```
 
-### 2. Configure LLM
-
-Copy `.env.example` to `.env` and set your API credentials:
+Optional:
 
 ```bash
-LLM_ENABLED=true
-OPENAI_BASE_URL=https://your-api-endpoint/v1
-OPENAI_API_KEY=your-key
-OPENAI_MODEL=your-model
+pip install -r requirements.txt
 ```
 
-### 3. Run
+## API Configuration
+
+Model/provider settings are read from YAML under `config/`.
+
+For OpenAI-compatible endpoints, set API key in environment before running:
+
+```bash
+export AZURE_OPENAI_API_KEY="your_api_key"
+```
+
+Notes:
+- Most project runners read `AZURE_OPENAI_API_KEY` by default.
+- Some helper scripts also accept `OPENAI_API_KEY`.
+
+## Quick Start
+
+Run the package entry pipeline:
 
 ```bash
 python -m cardiac_agent_postproc.run --config config/default.yaml
 ```
 
-### 4. Output
+## Main Experiment Runner (MICCAI Style)
 
-- Optimized masks: `<target_dir>/runs/`
-- Audit trail: `<target_dir>/runs/agent_audit_trail.json`
+Expected source root:
 
-## Configuration
-
-See `config/default.yaml` for all settings. Key multi-agent parameters:
-
-```yaml
-multi_agent:
-  max_rounds_per_case: 3       # max retry cycles per case
-  fast_path_threshold: 0.95    # classifier score above this → skip optimization
-  agent_temperature: 0.15      # LLM creativity level
-  enable_negotiation: true     # agents can challenge each other
-  batch_summary: true          # cross-case analysis after batch
+```text
+<source_root>/
+├── all_frames_export/   # *_img.png, *_pred.png, *_gt.png
+├── best_cases/          # curated good references
+└── worst_cases/         # curated difficult cases
 ```
 
-## Folder Structure
+Run:
 
+```bash
+python scripts/run_miccai_multiagent_experiment.py \
+  --config config/azure_openai_medrag.yaml \
+  --source_root results/Input_MnM2 \
+  --target_dir results/exp_mnm2_run \
+  --repair_subset triage_need_fix \
+  --atlas_mode local_per_sample \
+  --knowledge_mode auto_skip
 ```
-source_data/
-├── case001_img.png          # raw MRI image
-├── case001_pred.png         # predicted segmentation mask
-├── atlas.pkl                # probabilistic shape atlas
-└── runs/                    # outputs go here
 
-target_data/
-├── case001_img.png
-├── case001_pred.png
-├── case001_gt.png           # ground truth (optional, for evaluation)
-└── runs/
+### Single-case preflight
+
+```bash
+python scripts/run_miccai_multiagent_experiment.py \
+  --config config/azure_openai_medrag.yaml \
+  --source_root results/Input_MnM2 \
+  --target_dir results/exp_case335_preflight \
+  --limit 1 \
+  --case_contains 335_original_lax_4c_009 \
+  --repair_subset worst_cases \
+  --atlas_mode local_per_sample \
+  --knowledge_mode auto_skip
 ```
+
+### Background full run
+
+```bash
+mkdir -p results/exp_mnm2_allcases_bg
+setsid python scripts/run_miccai_multiagent_experiment.py \
+  --config config/azure_openai_medrag.yaml \
+  --source_root results/Input_MnM2 \
+  --target_dir results/exp_mnm2_allcases_bg \
+  --repair_subset triage_need_fix \
+  --atlas_mode local_per_sample \
+  --knowledge_mode auto_skip \
+  > results/exp_mnm2_allcases_bg/run.log 2>&1 < /dev/null &
+```
+
+## Outputs
+
+Each run writes:
+
+- `triage/`: triage CSVs and curated-label metrics
+- `repair/`: diagnosis, operation traces, repaired masks, Dice deltas
+- `figures/`: summary plots and top-improved visualizations
+- `summary/`: run-level summary JSON
+- `artifacts/`: atlas, quality model, repair KB, runtime config snapshots
+
+## Model Comparison
+
+Run multiple model configs in one command:
+
+```bash
+python scripts/run_workflow_model_compare.py \
+  --source_root results/Input_MnM2 \
+  --output_root results/exp_model_compare_mnm2 \
+  --knowledge_mode auto_skip \
+  --atlas_mode reuse_global
+```
+
+Comparison summary files:
+
+- `results/exp_model_compare_mnm2/model_comparison_summary.csv`
+- `results/exp_model_compare_mnm2/model_comparison_summary.md`
+- `results/exp_model_compare_mnm2/model_comparison_summary.json`
+
+## Useful Config Files
+
+- `config/azure_openai_medrag.yaml`
+- `config/openai.yaml`
+- `config/openai_official_gpt52_medrag.yaml`
+- `config/gemini.yaml`
+- `config/ollama_ministral_triage.yaml`
+
+## Development Notes
+
+- Python: `>=3.10`
+- Formatting: `black`, `isort`
+- Main logic entry points:
+  - `cardiac_agent_postproc/orchestrator.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
