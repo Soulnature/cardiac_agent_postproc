@@ -32,6 +32,28 @@ Visibility expectations:
 - SAX: mid-slices often show a closed Myo ring; apical/basal slices may not.
 
 ============================================================
+ANATOMICAL CONTAINMENT RULES (VIEW-AWARE)
+============================================================
+Core anatomy:
+- In SAX mid-ventricular slices, LV blood pool should be fully or near-fully enclosed by Myo.
+- Myo is LV myocardium; do NOT require Myo to surround RV.
+- RV and LV should not directly touch; there should be Myo or a clear gap between them.
+
+Important exceptions:
+- LAX views (2CH/3CH/4CH): do NOT enforce 360-degree Myo enclosure around LV.
+  Myo can appear as an open crescent, especially near basal segments.
+- Basal slices near valve plane (mitral/aortic level): LV cavity can open toward LA/LVOT;
+  strict closed-ring enforcement is incorrect.
+- Extreme apical slices: Myo can be very thin or partially visible; use conservative confidence.
+- Dataset annotation policy can differ (especially around outflow tract/valve regions).
+  Do not over-diagnose from prior alone.
+
+QA-style usage:
+- SAX mid-slice: prefer strong LV-inside-Myo and no RV-LV contact constraints.
+- LAX: prefer soft constraints such as "LV border should align with inner Myo boundary"
+  and "Myo continuity/thickness should be plausible", instead of hard ring closure.
+
+============================================================
 ANATOMY & DIRECTIONS
 ============================================================
 Class map:
@@ -58,12 +80,21 @@ Use ONLY these operation names:
 
 Boundary/size adjustment:
 - 2_dilate, 2_erode, 3_dilate, 3_erode, rv_erode
+- 2_erode_expand_lv, 2_erode_expand_rv, 3_erode_expand_myo, 1_erode_expand_myo
 
-Structural repair:
-- myo_bridge, rv_lv_barrier, lv_bridge, convex_hull_fill
+Structural repair (Adaptive Intensity):
+- rv_lv_barrier (default/strong), rv_lv_barrier_mild, rv_lv_barrier_strong
+- myo_bridge (default/strong), myo_bridge_mild, myo_bridge_strong
+- lv_bridge (default/strong), lv_bridge_mild, lv_bridge_strong
+- convex_hull_fill
 
-Cleanup/smoothing:
-- topology_cleanup, remove_islands, fill_holes, fill_holes_m2, smooth_morph, smooth_morph_k5
+Cleanup/smoothing (Adaptive Intensity):
+- topology_cleanup (default), topology_cleanup_mild, topology_cleanup_strong
+- remove_islands, fill_holes, fill_holes_m2, smooth_morph, smooth_morph_k5
+
+Intensity Selection Guide:
+- Use `_mild` for small defects (< 5px) or when unsure.
+- Use `_strong` (or default) for large gaps/contacts (> 5px) or high confidence.
 
 Leak:
 - valve_suppress
@@ -73,6 +104,9 @@ Intensity-guided expansion:
 
 Atlas-based (aggressive):
 - atlas_growprune_0
+- atlas_rv_repair, atlas_lv_repair
+- lv_split_to_rv (for clearly isolated secondary LV component relabel)
+- rv_split_to_lv (for clearly isolated secondary RV component relabel)
 
 Do NOT output any other operation names.
 
@@ -124,10 +158,32 @@ B) Myo discontinuity with LV-to-background leakage:
 - severity: high or critical
 - If Myo/LV is mostly present but C-shaped/broken as one component, prefer convex_hull_fill.
 
-C) LV split into pieces:
-- Condition: LV is disconnected into multiple components.
-- operation: lv_bridge
-- severity: high or critical
+C) LV/RV multi-component relabel policy (CRITICAL):
+- Topology prior:
+  - In one slice, LV should have ONE dominant connected component.
+  - In 3CH/4CH, RV should also have ONE dominant connected component.
+  - (2CH exception: RV may be absent.)
+- If LV has multiple disconnected components and one component is anatomically implausible for LV:
+  - issue: fragmented_lv
+  - affected_class: rv
+  - severity: critical
+  - operation: atlas_rv_repair (or lv_split_to_rv if the secondary LV blob is clearly isolated)
+  - MUST provide bbox_2d around the component to replace.
+  - description MUST state which component to KEEP as LV and which component to CONVERT to RV.
+- If RV has multiple disconnected components and one component is anatomically implausible for RV:
+  - issue: fragmented_rv
+  - affected_class: lv
+  - severity: critical
+  - operation: atlas_lv_repair
+  - MUST provide bbox_2d around the component to replace.
+  - description MUST state which component to KEEP as RV and which component to CONVERT to LV.
+- In this scenario, do NOT default to bridge; prioritize relabeling the wrong component.
+
+D) Myo Gaps / Discontinuity (CRITICAL):
+- Condition: Any visible break, gap, or hole in the Myo ring > 3px.
+- Diagnosis MUST be "broken_ring" (NOT "myo_thickness_var").
+- Operation: `myo_bridge_strong` (if gap < 10px) or `morphological_gap_close` (if gap > 10px or C-shape).
+- Severity: high
 
 2) Boundary/size mismatch (most common, directional; report only if > 5 px)
 - LV too large in one direction: 3_erode
@@ -136,9 +192,24 @@ C) LV split into pieces:
 - Myo too thick locally: 2_erode
 - RV encroaches into septal region: rv_erode
 
+Coupled option preference:
+- For LV shrink, prefer 3_erode_expand_myo when the intent is boundary correction (keeps LV-Myo coupling).
+- For Myo thinning, prefer 2_erode_expand_lv (or 2_erode_expand_rv on clear septal/RV side issues).
+
 Severity:
 - 5–10 px: medium
 - >10 px: high
+
+2b) LV-Myo boundary confusion (COMMON LOW-DICE PATTERN; CRITICAL RULE)
+- Pattern:
+  - Myo and LV are both present and connected, no clear RV-LV touching,
+  - but LV cavity looks squeezed while Myo appears locally over-thick,
+  - and the main visible error is LV-Myo boundary swap (not gross outward LV protrusion).
+- In this pattern:
+  - Prefer "lv_too_small" (3_dilate) and/or "myo_too_thick" (2_erode), directional first.
+  - Avoid diagnosing "lv_too_large" unless outward LV over-extension is clearly visible.
+  - Do NOT recommend simultaneous strong shrink of both LV and Myo in one round.
+  - Use conservative severity (medium first) when uncertain.
 
 3) Artifacts (only when obvious)
 - Holes in LV: fill_holes
@@ -157,6 +228,8 @@ Severity:
 - Use atlas_growprune_0 ONLY if a structure is nearly absent or completely missing:
   missing definition: class area < 30% expected OR class not visible at all when expected.
 - Do NOT use atlas for typical LowDice boundary mismatch or thin walls.
+- Atlas repair should target missing/problematic regions for the affected class.
+  Do NOT assume full-mask overwrite is needed for single-class defects.
 
 ============================================================
 SEVERITY GUIDE
@@ -179,7 +252,8 @@ Respond with valid JSON only:
       "severity": "critical|high|medium|low",
       "operation": "...",
       "confidence": 0.0-1.0,
-      "description": "short, concrete spatial description with approx pixels"
+      "description": "short, concrete spatial description with approx pixels",
+      "bbox_2d": [ymin, xmin, ymax, xmax]
     }
   ]
 }

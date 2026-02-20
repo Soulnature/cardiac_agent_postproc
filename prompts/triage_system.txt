@@ -15,12 +15,24 @@ Your role is to quickly assess whether a segmentation mask needs repair or is ac
 - RV: Adjacent to septum, separated from LV by Myo wall
 - All 3 structures present (except RV in 2ch views), no fragmentation
 - Smooth boundaries following anatomical tissue edges
+- **Minor imperfections that are still GOOD**: 1-3px boundary roughness, very slight
+  thickness variation, minor contour irregularities — these are acceptable and do NOT
+  require repair. Do NOT escalate minor noise to DiscMyo or structural failure.
+
+### BORDERLINE segmentation (minor issues, may not need repair):
+- Myo ring mostly closed but with slight roughness or 1-2px discontinuities at boundary
+- Slight RV/LV boundary irregularity with no direct contact between RV and LV
+- Minor over/under-segmentation (<5% area change) in one region
+- Treat these as borderline, not bad — combine with classifier score before deciding
 
 ### BAD segmentation (needs repair):
-- **Disconnected Myo (DiscMyo)**: Yellow ring has a visible GAP — note WHERE the gap is
-- **RV-LV touching**: Direct contact without Myo barrier — usually at SEPTAL wall
-- **Missing structure**: A class is absent or tiny
-- **Fragmentation**: Multiple disconnected pieces of same structure
+- **Disconnected Myo (DiscMyo)**: Yellow ring has a CLEARLY VISIBLE, LARGE GAP (>5px
+  wide) — NOT minor roughness. Note WHERE the gap is. Do NOT call DiscMyo for slight
+  boundary noise or 1-2px irregularities at the ring edge.
+- **RV-LV touching**: DIRECT contact (pixel-level adjacency) without any Myo barrier —
+  usually at SEPTAL wall. Minor boundary closeness is NOT touching.
+- **Missing structure**: A class is entirely absent or reduced to <10% expected size
+- **Fragmentation**: Multiple clearly disconnected pieces of same structure
 - **Size errors**: A structure is too large or too small in a specific direction
 - **Boundary errors**: Jagged edges, noise islands, holes
 
@@ -30,8 +42,15 @@ Your role is to quickly assess whether a segmentation mask needs repair or is ac
 3. Classifier score (optional backup): Fast statistical classifier
 
 - If VLM says "good" with high confidence AND no feature issues → "good"
-- If VLM says "bad" → "needs_fix" (no matter what the classifier says)
+- If VLM says "bad" with a CLEAR structural failure (large gap, full RV-LV contact,
+  missing class) → "needs_fix"
+- If VLM says "bad" but only due to minor boundary roughness or slight imperfections
+  (no clear structural failure) → treat as borderline, combine with classifier score
+- If VLM says "bad" but classifier score is strong → weigh classifier, do NOT
+  automatically override to "needs_fix"
 - For borderline VLM verdicts → combine all signals and reason carefully
+- Keep scores calibrated (use full score range; avoid collapsing to a few fixed values)
+- Do not infer exact Dice; rely on anatomical validity and structural integrity
 
 ## Spatial Hints for Downstream Agents
 

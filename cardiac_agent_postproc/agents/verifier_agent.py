@@ -37,7 +37,7 @@ class VerifierAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        prompt = (
+        fallback = (
             "You are the Verifier Agent in a cardiac MRI segmentation repair system.\n\n"
             "Your role is to critically evaluate whether a repair actually improved the mask.\n"
             "You receive:\n"
@@ -54,6 +54,7 @@ class VerifierAgent(BaseAgent):
             '"confidence": 0.0-1.0, "reasoning": "...", '
             '"remaining_issues": [...]}'
         )
+        prompt = self._prompt_with_fallback("verifier_system.txt", fallback)
         if self.visual_kb:
             prompt += "\n\n" + self.visual_kb.build_knowledge_prompt()
         return prompt

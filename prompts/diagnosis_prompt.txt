@@ -33,6 +33,20 @@ View-dependent visibility expectations:
 - SAX: Mid-ventricular slices usually show a Myo ring; apical/basal slices may deviate.
 
 ============================================================
+ANATOMICAL CONSTRAINTS (VIEW-AWARE)
+============================================================
+Core rule:
+- In SAX mid-ventricular slices, LV blood pool should be enclosed (or near-enclosed) by Myo.
+- Myo is LV myocardium; do NOT require Myo to surround RV.
+- RV and LV should not directly touch.
+
+Exceptions and soft handling:
+- LAX (2CH/3CH/4CH): do NOT force 360-degree ring closure of Myo around LV.
+- Basal slices near valve plane: LV may look open toward LA/LVOT.
+- Extreme apical slices: Myo can be thin/discontinuous; be conservative.
+- Annotation policy can differ around outflow/valves; avoid hard assumptions.
+
+============================================================
 DIRECTION RULES
 ============================================================
 - septal: LV wall side facing RV centroid (only if RV is present).
@@ -58,12 +72,20 @@ Boundary (directional):
 - 2_dilate
 - 2_erode
 - rv_erode
+- 3_erode_expand_myo
+- 2_erode_expand_lv
+- 2_erode_expand_rv
+- 1_erode_expand_myo
 
 Missing/undersized (only if truly missing):
 - atlas_growprune_0
+- atlas_rv_repair
+- atlas_lv_repair
 - expand_lv_intensity
 - expand_rv_intensity
 - expand_myo_intensity
+- lv_split_to_rv
+- rv_split_to_lv
 
 Artifacts/cleanup:
 - fill_holes
@@ -130,15 +152,26 @@ Output:
 - severity: "high" or "critical"
 - operation: myo_bridge
 
-3) LV split into pieces
+3) LV/RV multi-component relabel policy (critical)
 Condition:
-- LV is clearly disconnected into multiple components.
+- LV or RV has multiple disconnected components in the same slice.
+- One component is likely wrong-class blood pool (anatomically implausible location/shape).
 Output:
-- issue: "LV split"
-- affected_class: "lv"
-- direction: "global"
-- severity: "high" or "critical"
-- operation: lv_bridge
+- If extra component is labeled LV but should be RV:
+  - issue: "fragmented_lv"
+  - affected_class: "rv"
+  - severity: "critical"
+  - operation: atlas_rv_repair (or lv_split_to_rv when secondary LV blob is clearly isolated)
+  - MUST provide bbox_2d around the component to convert.
+  - description MUST explicitly say which LV component to keep and which to convert to RV.
+- If extra component is labeled RV but should be LV:
+  - issue: "fragmented_rv"
+  - affected_class: "lv"
+  - severity: "critical"
+  - operation: atlas_lv_repair
+  - MUST provide bbox_2d around the component to convert.
+  - description MUST explicitly say which RV component to keep and which to convert to LV.
+- Do NOT default to bridge in this scenario; prefer relabeling the wrong component.
 
 4) Directional boundary mismatch (most common)
 Condition:
@@ -149,9 +182,23 @@ Output:
 - Myo too thin -> 2_dilate
 - Myo too thick -> 2_erode
 - RV encroaches -> rv_erode
+Coupled preference:
+- LV shrink for boundary correction -> 3_erode_expand_myo (prefer over plain 3_erode)
+- Myo thinning with LV-side boundary confusion -> 2_erode_expand_lv
+- Myo thinning with clear RV/septal-side excess -> 2_erode_expand_rv
 Severity:
 - 5–10 px => medium
 - >10 px => high
+
+4b) LV-Myo boundary confusion (common; avoid wrong shrink)
+Condition:
+- LV and Myo are both present and connected, no clear RV-LV direct contact,
+- but LV cavity looks compressed while Myo is locally over-thick,
+- i.e., error appears to be LV-Myo class-boundary swap rather than true LV outward expansion.
+Output guidance:
+- Prefer LV too small -> 3_dilate and/or Myo too thick -> 2_erode (directional first).
+- Do NOT output LV too large -> 3_erode unless clear outward LV over-extension is visible.
+- Avoid recommending simultaneous strong shrink of both LV and Myo in one pass.
 
 5) Missing / nearly absent class (rare in your hard subset)
 Condition (any one):
@@ -164,6 +211,8 @@ Output:
 - direction: global
 - severity: critical
 - operation: atlas_growprune_0 OR expand_*_intensity (choose the safer expansion if class exists but is undersized)
+- Atlas usage should preferentially fill missing/problematic regions of the affected label,
+  not blindly overwrite the full mask for a single-class issue.
 
 6) Artifacts
 - LV holes -> fill_holes
@@ -186,7 +235,8 @@ Return valid JSON:
       "severity": "critical|high|medium|low",
       "operation": "<single best op from allowed list>",
       "confidence": 0.0-1.0,
-      "description": "<short, concrete spatial description with approx pixels>"
+      "description": "<short, concrete spatial description with approx pixels>",
+      "bbox_2d": [ymin, xmin, ymax, xmax]
     }
   ]
 }

@@ -20,11 +20,13 @@ This means you can plan LOCALIZED repairs like:
 
 1. **Atlas/reconstruction** FIRST (if critical issues exist):
    - `individual_atlas_transfer`, `atlas_growprune_0`, `atlas_growprune_1`
+   - `atlas_rv_repair`, `atlas_lv_repair`, `atlas_myo_repair`
    - These reshape the entire mask — all subsequent ops work on the reconstructed result
 
 2. **Structural fixes** second:
    - `expand_myo_intensity` (safest for broken Myo ring)
    - `myo_bridge`, `lv_bridge` (bridge disconnected components)
+   - `lv_split_to_rv`, `rv_split_to_lv` (deterministic component relabel for split blood pools)
    - `expand_rv_intensity`, `expand_lv_intensity` (grow undersized blood pools)
 
 3. **Cleanup** third:
@@ -34,6 +36,8 @@ This means you can plan LOCALIZED repairs like:
 4. **Boundary adjustment** fourth (this is where direction matters most):
    - `2_dilate` / `2_erode` — adjust Myo thickness at specific walls
    - `3_dilate` / `3_erode` — adjust LV size in specific directions
+   - `2_erode_expand_lv` / `2_erode_expand_rv` — coupled Myo thinning (vacated Myo -> blood pool)
+   - `3_erode_expand_myo` / `1_erode_expand_myo` — coupled blood-pool shrink (vacated pool -> Myo)
    - `1_dilate` / `rv_erode` — adjust RV size
    - `rv_lv_barrier` — fix RV-LV touching (usually septal)
 
@@ -54,6 +58,47 @@ This means you can plan LOCALIZED repairs like:
 - `fill_holes` MUST run BEFORE smoothing (smoothing can create new holes)
 - `close2_open3` and `open2_close3` are mutually exclusive — pick one
 - If both `3_erode` and `3_dilate` appear for the same direction, they cancel out — remove one
+- LV-Myo boundary confusion safeguard:
+  - If diagnosis suggests `lv_too_small` and/or `myo_too_thick`, avoid `3_erode` in the same round unless LV outward over-expansion is explicitly diagnosed.
+  - Do NOT schedule `3_erode` + `2_erode` together by default; this often over-shrinks both LV and Myo.
+  - Prefer one conservative correction first (`3_dilate` or directional `2_erode`), then re-diagnose.
+
+## Single-Component Policy (Critical)
+
+- In one slice, LV should have one dominant connected component.
+- In 3CH/4CH, RV should have one dominant connected component (2CH may lack RV).
+- If diagnosis indicates `fragmented_lv` / `fragmented_rv` (or `missing_lv_fragments` / `missing_rv_fragments`):
+  - Do NOT default to bridge-first.
+  - Use diagnosis-provided `bbox` to localize relabeling of the wrong component.
+  - Prefer class-specific relabel:
+    - extra LV component that should be RV -> `atlas_rv_repair`
+    - extra RV component that should be LV -> `atlas_lv_repair`
+  - Respect the LLM diagnosis statement of which component to keep vs convert.
+
+## Atlas Repair Semantics (Critical)
+
+- Atlas replacement is not a blind full-mask overwrite by default.
+- For class-specific atlas repair (`atlas_rv_repair`, `atlas_myo_repair`, `atlas_lv_repair`):
+  - Fill missing or clearly wrong regions of the affected class using atlas prior.
+  - Keep non-target classes as stable as possible.
+  - Replace problematic regions, not the entire field.
+- Use global atlas reconstruction (`atlas_growprune_0`/`atlas_growprune_1`) mainly when
+  multiple structures are severely corrupted or missing.
+
+## View-Aware Anatomy Constraints
+
+- SAX mid-ventricular:
+  - Prefer plans that restore LV enclosed by Myo.
+  - Enforce no direct RV-LV touching.
+- LAX (2CH/3CH/4CH):
+  - Do NOT enforce a strict 360-degree closed Myo ring.
+  - Prefer soft wall-continuity and reasonable-thickness repairs.
+- Basal (valve-plane) slices:
+  - Avoid forcing artificial closure near valve plane.
+- Extreme apical slices:
+  - Use conservative edits; thin/discontinuous Myo can be physiologic.
+- Always remember:
+  - Myo corresponds to LV myocardium; it should not be used to "surround RV".
 
 ## Efficiency
 

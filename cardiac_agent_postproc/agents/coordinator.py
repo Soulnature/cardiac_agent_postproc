@@ -30,7 +30,7 @@ class CoordinatorAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        return (
+        fallback = (
             "You are the Coordinator Agent overseeing a cardiac MRI segmentation repair pipeline.\n\n"
             "You manage a team of specialist agents:\n"
             "- **TriageAgent**: quality classification (good / needs_fix)\n"
@@ -47,6 +47,7 @@ class CoordinatorAgent(BaseAgent):
             '{"action": "proceed" | "retry" | "skip" | "challenge_triage", '
             '"reasoning": "..."}'
         )
+        return self._prompt_with_fallback("coordinator_system.txt", fallback)
 
     def process_case(self, ctx: CaseContext) -> None:
         """
@@ -95,8 +96,23 @@ class CoordinatorAgent(BaseAgent):
             return "good"
 
         # Step 2-5: Diagnosis → Plan → Execute → Verify loop
-        for round_num in range(max_rounds):
-            self.log(f"  ── Round {round_num + 1}/{max_rounds} ──")
+        max_rounds = max(1, int(max_rounds))
+        hard_split_ops = {"lv_split_to_rv", "rv_split_to_lv"}
+        post_split_cleanup_pending = False
+        post_split_cleanup_consumed = False
+        round_num = 0
+        while round_num < max_rounds or post_split_cleanup_pending:
+            if post_split_cleanup_pending:
+                self.log(
+                    "  [PostSplit] Running forced post-process round after split relabel"
+                )
+                post_split_cleanup_pending = False
+                post_split_cleanup_consumed = True
+
+            round_total = max_rounds + (
+                1 if (post_split_cleanup_consumed or post_split_cleanup_pending) else 0
+            )
+            self.log(f"  ── Round {round_num + 1}/{round_total} ──")
 
             # Diagnosis
             diagnosis = agents["diagnosis"]
@@ -112,7 +128,12 @@ class CoordinatorAgent(BaseAgent):
 
             # Execution
             executor = agents["executor"]
+            prev_op_count = len(ctx.applied_ops or [])
             executor.process_case(ctx)
+            new_ops = (ctx.applied_ops or [])[prev_op_count:]
+            split_relabel_applied = any(
+                str(op.get("name", "")).strip() in hard_split_ops for op in new_ops
+            )
 
             # Verification
             verifier = agents["verifier"]
@@ -125,27 +146,46 @@ class CoordinatorAgent(BaseAgent):
                 msg_type=MessageType.VERIFY_RESULT, case_id=ctx.case_id
             )
             if verify_msgs:
-                verdict = verify_msgs[-1].content.get("verdict", "approve")
+                verify_content = verify_msgs[-1].content
+                verdict = verify_content.get("verdict", "approve")
+                self._maybe_update_best_intermediate(ctx, verify_content, round_num)
 
                 if verdict == "approve":
-                    self.log(f"  ✓ Approved on round {round_num + 1}")
-                    return "approved"
+                    if split_relabel_applied and not post_split_cleanup_consumed:
+                        post_split_cleanup_pending = True
+                        self.log(
+                            "  [PostSplit] Split relabel applied; "
+                            "forcing one additional diagnosis/repair round"
+                        )
+                    else:
+                        self.log(f"  ✓ Approved on round {round_num + 1}")
+                        return "approved"
 
                 elif verdict == "reject":
-                    # Revert to original mask
-                    self.log(f"  ✗ Rejected — reverting to original")
-                    action = "retry"
-                    if round_num < max_rounds - 1:
-                        action = self._should_retry(ctx, verify_msgs[-1].content)
-                    ctx.current_mask = ctx.original_mask.copy()
-                    ctx.applied_ops = []
-                    ctx.rqs_history = []
+                    if split_relabel_applied and not post_split_cleanup_consumed:
+                        post_split_cleanup_pending = True
+                        self.log(
+                            "  [PostSplit] Split relabel applied; defer reject and "
+                            "run one post-process round on current mask"
+                        )
+                        # Keep current mask for one follow-up round to repair
+                        # side effects introduced by split relabel.
+                    else:
+                        # Revert to original mask
+                        self.log(f"  ✗ Rejected — reverting to original")
+                        action = "retry"
+                        can_retry = (round_num + 1) < max_rounds
+                        if can_retry:
+                            action = self._should_retry(ctx, verify_content)
+                        ctx.current_mask = ctx.original_mask.copy()
+                        ctx.applied_ops = []
+                        ctx.rqs_history = []
 
-                    if round_num < max_rounds - 1:
-                        if action == "skip":
-                            self.log("  ↷ Skip further retries for this case")
-                            break
-                        self.log(f"  ⟳ Retrying with feedback (Round {round_num + 2})")
+                        if can_retry:
+                            if action == "skip":
+                                self.log("  ↷ Skip further retries for this case")
+                                break
+                            self.log(f"  ⟳ Retrying with feedback (Round {round_num + 2})")
 
                 elif verdict == "needs_more_work":
                     self.log(f"  ⟳ Needs more work — continuing")
@@ -162,12 +202,22 @@ class CoordinatorAgent(BaseAgent):
             # Clear agent memories for next round (fresh reasoning)
             for agent in [diagnosis, planner]:
                 agent.reset_memory()
+            round_num += 1
 
         # Exhausted rounds
         if ctx.verifier_approved:
             return "approved"
         else:
-            self.log(f"  Exhausted {max_rounds} rounds")
+            if (
+                ctx.best_intermediate_mask is not None
+                and not getattr(ctx, "best_intermediate_is_original", True)
+            ):
+                self.log(
+                    "  Using best-intermediate fallback is available "
+                    f"(round={ctx.best_intermediate_round}, "
+                    f"score={ctx.best_intermediate_score:.3f})"
+                )
+            self.log(f"  Exhausted {ctx.rounds_completed} rounds")
             return "gave_up"
 
     @staticmethod
@@ -187,6 +237,142 @@ class CoordinatorAgent(BaseAgent):
             if any(tok in low for tok in risk_tokens):
                 return True
         return False
+
+    @staticmethod
+    def _clip01(value: Any, default: float = 0.0) -> float:
+        try:
+            x = float(value)
+        except Exception:
+            x = default
+        if x < 0.0:
+            return 0.0
+        if x > 1.0:
+            return 1.0
+        return x
+
+    def _score_verifier_snapshot(self, verify_content: Dict[str, Any]) -> float:
+        """
+        No-GT quality score for an intermediate repaired mask.
+        Higher is better.
+        """
+        verdict = str(verify_content.get("verdict", "needs_more_work")).lower()
+        verdict_map = {"approve": 1.0, "needs_more_work": 0.2, "reject": -1.0}
+
+        cmp_obj = verify_content.get("vlm_comparison", {}) or {}
+        cmp_v = str(cmp_obj.get("verdict", "same")).lower()
+        cmp_map = {
+            "improved": 1.0,
+            "same": 0.0,
+            "neutral": 0.0,
+            "worse": -1.0,
+            "degraded": -1.0,
+        }
+
+        quality_obj = verify_content.get("vlm_quality", {}) or {}
+        quality_v = str(quality_obj.get("quality", "borderline")).lower()
+        quality_map = {"good": 1.0, "borderline": 0.0, "bad": -1.0}
+        quality_score_raw = 0.0
+        try:
+            quality_score_raw = float(quality_obj.get("score", 5.0))
+        except Exception:
+            quality_score_raw = 5.0
+        quality_score = max(-1.0, min(1.0, (quality_score_raw - 5.0) / 5.0))
+
+        verifier_conf = self._clip01(verify_content.get("confidence", 0.5), default=0.5)
+        cmp_conf = self._clip01(cmp_obj.get("confidence", 0.0), default=0.0)
+        metrics_obj = verify_content.get("metrics", {}) or {}
+        dice_delta = 0.0
+        try:
+            dice_delta = float(metrics_obj.get("dice_delta", 0.0))
+        except Exception:
+            dice_delta = 0.0
+        # Cap GT contribution to avoid dominating no-GT signals.
+        dice_bonus = max(-0.5, min(0.5, dice_delta * 10.0))
+
+        return float(
+            verdict_map.get(verdict, 0.0)
+            + 2.0 * cmp_map.get(cmp_v, 0.0)
+            + 0.8 * quality_map.get(quality_v, 0.0)
+            + 0.2 * quality_score
+            + 0.3 * verifier_conf
+            + 0.5 * cmp_conf
+            + dice_bonus
+        )
+
+    def _is_best_candidate(self, verify_content: Dict[str, Any]) -> bool:
+        verdict = str(verify_content.get("verdict", "")).lower()
+        cmp_obj = verify_content.get("vlm_comparison", {}) or {}
+        cmp_v = str(cmp_obj.get("verdict", "same")).lower()
+        quality_obj = verify_content.get("vlm_quality", {}) or {}
+        quality_v = str(quality_obj.get("quality", "borderline")).lower()
+        metrics_obj = verify_content.get("metrics", {}) or {}
+        dice_delta = 0.0
+        try:
+            dice_delta = float(metrics_obj.get("dice_delta", 0.0))
+        except Exception:
+            dice_delta = 0.0
+        gt_delta_th = float(
+            self.cfg.get("multi_agent", {}).get(
+                "best_intermediate_gt_dice_delta_threshold", 0.01
+            )
+        )
+
+        if cmp_v in ("worse", "degraded") and verdict != "approve":
+            # In evaluation runs with GT, keep large true improvements even if VLM compare is noisy.
+            if dice_delta <= gt_delta_th:
+                return False
+
+        return (
+            verdict == "approve"
+            or cmp_v == "improved"
+            or quality_v == "good"
+            or dice_delta > gt_delta_th
+        )
+
+    def _maybe_update_best_intermediate(
+        self,
+        ctx: CaseContext,
+        verify_content: Dict[str, Any],
+        round_num: int,
+    ) -> None:
+        """
+        Cache the best no-GT intermediate repaired mask so it can be saved
+        even if later rounds are rejected.
+        """
+        if ctx.current_mask is None:
+            return
+        hard_relabel_ops = {"lv_split_to_rv", "rv_split_to_lv"}
+        has_hard_relabel = any(
+            str(op.get("name", "")).strip() in hard_relabel_ops
+            for op in (ctx.applied_ops or [])
+        )
+
+        if not has_hard_relabel and not self._is_best_candidate(verify_content):
+            return
+
+        candidate_score = self._score_verifier_snapshot(verify_content)
+        best_score = float(getattr(ctx, "best_intermediate_score", 0.0))
+        # Hard relabel snapshots should be preserved once for fallback even when
+        # verifier is conservative, because this path is user-forced policy.
+        has_only_baseline = bool(getattr(ctx, "best_intermediate_is_original", False))
+        if has_hard_relabel and has_only_baseline:
+            candidate_score = max(candidate_score, best_score + 1e-3)
+        elif candidate_score <= best_score + 1e-6:
+            return
+
+        ctx.best_intermediate_mask = ctx.current_mask.copy()
+        ctx.best_intermediate_score = candidate_score
+        ctx.best_intermediate_round = int(round_num + 1)
+        ctx.best_intermediate_verdict = str(
+            verify_content.get("verdict", "needs_more_work")
+        ).lower()
+        ctx.best_intermediate_reason = str(verify_content.get("reasoning", ""))[:300]
+        ctx.best_intermediate_ops = [dict(op) for op in (ctx.applied_ops or [])]
+        ctx.best_intermediate_is_original = False
+        self.log(
+            "  ↺ Updated best intermediate "
+            f"(round={ctx.best_intermediate_round}, score={candidate_score:.3f})"
+        )
 
     def _should_retry(
         self, ctx: CaseContext, verify_content: Dict[str, Any]

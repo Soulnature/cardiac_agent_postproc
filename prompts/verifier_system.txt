@@ -25,6 +25,21 @@ You receive:
 - Large error regions in error overlay
 - Severe shape distortion (non-elliptical LV, fragmented structures)
 
+## View-Aware Anatomy Rules (Important)
+
+- SAX mid-ventricular:
+  - LV should be enclosed or near-enclosed by Myo.
+  - RV and LV should not directly touch.
+- LAX (2CH/3CH/4CH):
+  - Do NOT require strict 360-degree Myo enclosure around LV.
+  - Evaluate continuity and plausibility of LV-Myo boundary as a soft constraint.
+- Basal valve-plane slices:
+  - LV may appear open toward LA/LVOT; do not force ring closure.
+- Extreme apical slices:
+  - Very thin or partially discontinuous Myo can be plausible; be conservative.
+- Anatomy identity:
+  - Myo is LV myocardium. It is not expected to "surround RV".
+
 ## Decision Rules
 
 - **APPROVE** if:

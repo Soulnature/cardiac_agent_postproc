@@ -148,6 +148,8 @@ agents:
     base_url: "https://api.openai.com/v1"
     model: "gpt-4o"
     image_detail: "auto"
+    vlm_n_refs: 2
+    vlm_ref_match_view: true
     quality_model:
       enabled: true
       path: "quality_model.pkl"

@@ -1,11 +1,8 @@
 paths:
   source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export"
-  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs" # run script adds subdir
-  runs_subdir: "run_gpt4o_307"
+  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs"
+  runs_subdir: "run_triage_ollama"
   atlas_path: "shape_atlas.pkl"
-
-targets: 
-  - "307_original_lax_4c_024"
 
 solver:
   max_outer: 10
@@ -26,10 +23,10 @@ solver:
 
 triage:
   enabled: true
-  mode: "classifier"          # "classifier" (trained model) or "heuristic" (feature-based)
-  good_threshold: 0.92        # only used in heuristic mode
-  bad_threshold: 0.70         # only used in heuristic mode
-  vlm_enabled: false           # DISABLED: currently broken (returns 0)
+  mode: "classifier"
+  good_threshold: 0.92
+  bad_threshold: 0.70
+  vlm_enabled: false
   vlm_accept_threshold: 70
 
 view_inference:
@@ -51,7 +48,6 @@ shape_atlas:
 reward_weights:
   use_surrogate: false
   surrogate_path: "surrogate_model.pkl"
-  # Kept for atlas_builder and optional logging, NOT used in optimizer decisions
   P_touch: 50.0
   P_edge_misalignment: 4.0
   P_components: 18.0
@@ -84,7 +80,7 @@ ops:
     morph_r: 1
 
 revision:
-  enabled: false              # disabled: VLM pipeline is single-pass
+  enabled: false
   max_revisions: 30
   stop_min_dice: 0.90
   stop_max_hd95: 4.0
@@ -92,83 +88,95 @@ revision:
   stall_min_dice_delta: 0.001
   stall_max_hd95_delta: 0.1
 
+# ── LLM: Local Ollama ministral-3:14b ──
 llm:
   enabled: true
-  provider: "ollama"            # "gemini" or "ollama" (base class uses 'ollama' logical provider for OpenAI compatible)
-  base_url: "https://api.openai.com/v1"  # OpenAI endpoint
-  model: "gpt-4o"
+  provider: "ollama"
+  base_url: "http://localhost:11434/v1"
+  model: "ministral-3:14b"
+  api_key: "ollama"
   temperature: 0.15
   max_tokens: 8192
 
-# Visual-Language Model (using OpenAI multimodal)
+# ── VLM: Local Ollama ministral-3:14b (multimodal) ──
 vision_guardrail:
   enabled: true
-  provider: "ollama"            # "gemini" or "ollama" (base class uses 'ollama' logical provider for OpenAI compatible)
-  base_url: "https://api.openai.com/v1"  # OpenAI endpoint
-  model: "gpt-4o"
+  provider: "ollama"
+  base_url: "http://localhost:11434/v1"
+  model: "ministral-3:14b"
+  api_key: "ollama"
   threshold: 40
+  image_detail: "auto"
 
 quality_model:
   enabled: true
   path: "quality_model.pkl"
-  blend_mode: "replace"  # none | hybrid | replace
+  blend_mode: "replace"
   blend_alpha: 0.5
   bad_threshold: 0.93
   log_features: false
 
 diagnosis:
   enabled: true
-  vlm_enabled: true            # ENABLED: VLM spatial diagnosis
-  spatial: true                # NEW: enable spatial output format
+  vlm_enabled: true
+  spatial: true
   quality_threshold: 0.8
-  max_suggestions: 4           # reduced: focus on top issues
+  max_suggestions: 4
 
 # ── Multi-Agent System ──
 multi_agent:
-  max_rounds_per_case: 2       # max diagnosis→plan→execute→verify cycles
-  fast_path_threshold: 0.925    # cases above this skip the full pipeline
-  agent_temperature: 0.2      # LLM temperature for agent reasoning
-  enable_negotiation: true     # allow agents to challenge each other
-  batch_summary: true          # cross-case learning after each batch
+  max_rounds_per_case: 2
+  fast_path_threshold: 0.925
+  agent_temperature: 0.2
+  enable_negotiation: true
+  batch_summary: true
 
 # ── Executor Safety Gates ──
 executor:
-  max_high_impact_change_ratio: 0.08  # cap for atlas/neighbor/large/global ops
-  max_step_change_ratio: 0.10         # cap for normal per-step edits
-  same_verdict_max_change_ratio: 0.03 # if VLM says "same", only allow small low-impact edits
+  max_high_impact_change_ratio: 0.08
+  max_step_change_ratio: 0.10
+  same_verdict_max_change_ratio: 0.03
   same_verdict_min_compare_confidence: 0.70
   allow_borderline_on_same: true
 
-
-# ---- Agent-specific overrides ----
+# ── Agent-specific overrides (all Ollama local) ──
 agents:
   triage:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
-    model: "gpt-4o"
+    base_url: "http://localhost:11434/v1"
+    model: "ministral-3:14b"
+    api_key: "ollama"
     image_detail: "auto"
     vlm_n_refs: 2
     vlm_ref_match_view: true
+    # Local ministral VLM is currently over-conservative; rely more on quality_model.
+    vlm_good_prob_weight: 0.0
+    qm_good_prob_weight: 1.0
+    score_good_floor: 0.70
+    score_bad_ceiling: 0.45
     quality_model:
       enabled: true
       path: "quality_model.pkl"
 
   diagnosis:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
-    model: "gpt-4o"
+    base_url: "http://localhost:11434/v1"
+    model: "ministral-3:14b"
+    api_key: "ollama"
     image_detail: "auto"
     vlm_enabled: true
     max_suggestions: 4
 
   planner:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
-    model: "gpt-4o"
+    base_url: "http://localhost:11434/v1"
+    model: "ministral-3:14b"
+    api_key: "ollama"
     chain_of_thought: true
 
   verifier:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
-    model: "gpt-4o"
+    base_url: "http://localhost:11434/v1"
+    model: "ministral-3:14b"
+    api_key: "ollama"
     image_detail: "auto"

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import re
 import time
 from abc import ABC, abstractmethod
@@ -110,6 +111,44 @@ class BaseAgent(ABC):
         """
         ...
 
+    # ---- Prompt loading ----
+
+    @staticmethod
+    def _prompt_dirs() -> List[Path]:
+        """Candidate prompt directories (cwd first, then project root)."""
+        cwd_prompts = Path.cwd() / "prompts"
+        project_prompts = Path(__file__).resolve().parents[2] / "prompts"
+        dirs: List[Path] = []
+        for p in (cwd_prompts, project_prompts):
+            if p not in dirs:
+                dirs.append(p)
+        return dirs
+
+    def _read_prompt_file(self, filename: str) -> Optional[str]:
+        """
+        Read a prompt text file from prompt directories.
+        Returns None when file is missing or unreadable.
+        """
+        for prompt_dir in self._prompt_dirs():
+            prompt_path = prompt_dir / filename
+            if not prompt_path.exists():
+                continue
+            try:
+                text = prompt_path.read_text(encoding="utf-8").strip()
+                if text:
+                    return text
+                logger.warning("[%s] Prompt file is empty: %s", self.name, prompt_path)
+                return None
+            except Exception as e:
+                logger.warning("[%s] Failed to read prompt file %s: %s", self.name, prompt_path, e)
+                return None
+        return None
+
+    def _prompt_with_fallback(self, filename: str, fallback: str) -> str:
+        """Load prompt from file, or use fallback text if file is missing."""
+        loaded = self._read_prompt_file(filename)
+        return loaded if loaded else fallback
+
     # ---- LLM Clients (lazy initialization) ----
 
     def _agent_cfg(self) -> Dict[str, Any]:
@@ -134,6 +173,18 @@ class BaseAgent(ABC):
             if k in agent_cfg:
                 vg_cfg[k] = agent_cfg[k]
         return vg_cfg
+
+    def _llm_enabled(self) -> bool:
+        llm_cfg = self._llm_cfg()
+        if "enabled" in llm_cfg:
+            return bool(llm_cfg.get("enabled"))
+        return bool(self.cfg.get("llm", {}).get("enabled", True))
+
+    def _vlm_enabled(self) -> bool:
+        vg_cfg = self._vlm_cfg()
+        if "enabled" in vg_cfg:
+            return bool(vg_cfg.get("enabled"))
+        return bool(self.cfg.get("vision_guardrail", {}).get("enabled", True))
 
     @property
     def llm(self) -> OpenAICompatClient:
@@ -177,6 +228,11 @@ class BaseAgent(ABC):
         """
         self.memory.add("user", user_prompt)
 
+        if not self._llm_enabled():
+            self.log("LLM disabled by config; skip text reasoning")
+            self.memory.add("assistant", "{}")
+            return "{}"
+
         llm_cfg = self._llm_cfg()
         temp = llm_cfg.get("temperature", temperature)
         max_tokens = llm_cfg.get("max_tokens", 8192)
@@ -207,6 +263,11 @@ class BaseAgent(ABC):
         """
         self.memory.add("user", user_prompt)
 
+        if not self._llm_enabled():
+            self.log("LLM disabled by config; skip JSON reasoning")
+            self.memory.add("assistant", "{}")
+            return {}
+
         llm_cfg = self._llm_cfg()
         temp = llm_cfg.get("temperature", temperature)
         max_tokens = llm_cfg.get("max_tokens", 8192)
@@ -233,6 +294,11 @@ class BaseAgent(ABC):
         """
         self.memory.add("user", f"[IMAGE: {image_path}] {user_prompt}")
 
+        if not self._vlm_enabled():
+            self.log("VLM disabled by config; skip vision reasoning")
+            self.memory.add("assistant", "{}")
+            return {}
+
         vg_cfg = self._vlm_cfg()
         image_detail = vg_cfg.get("image_detail", "auto")
 
@@ -250,34 +316,33 @@ class BaseAgent(ABC):
     # ---- VLM-Based Quality Judgment (replaces RQS) ----
 
     _JUDGE_PROMPT = (
-        "You are a cardiac MRI segmentation quality judge. We are REPAIRING poor segmentations.\n"
-        "I will show you reference examples of GOOD and BAD segmentation overlays, "
-        "then a TARGET overlay for you to evaluate.\n\n"
-        "Each overlay image has 4 panels: Raw, GT, Pred, Error map.\n"
-        "Color legend: Cyan=RV, Yellow ring=Myocardium, Red-brown=LV\n\n"
-        "You must determine if the TARGET is passable (good/borderline) or completely failed (bad).\n"
-        "Relax your standards: 'borderline' is acceptable for a work-in-progress.\n\n"
-        "CRITERIA for 'bad' (REJECT): \n"
-        "- Myocardium is completely missing or just noise scattered everywhere.\n"
-        "- Massive merging of LV and RV (giant blob).\n"
-        "- Non-anatomical shapes (squares, exploded pixels).\n\n"
-        "CRITERIA for 'borderline' (ACCEPT): \n"
-        "- Small to medium gaps in myocardium (if structure is mostly there).\n"
-        "- Minor thickness variations or rough edges.\n"
-        "- Class confusion in small areas.\n"
-        "- Blobs or islands that don't destroy the main shape.\n\n"
-        "SCORE SCALE (1-10):\n"
-        "  1-2: Failed, non-anatomical garbage\n"
-        "  3-4: Bad, major structural errors (missing class, massive merging)\n"
-        "  5-6: Borderline, noticeable issues but anatomically recognizable\n"
-        "  7-8: Good, minor issues (small gaps, rough edges)\n"
-        "  9-10: Excellent, near-perfect segmentation\n\n"
-        "Evaluate the TARGET image and respond in JSON:\n"
-        '{"quality": "good"|"bad"|"borderline", '
-        '"score": 1-10, '
-        '"confidence": 0.0-1.0, '
-        '"issues": ["list of specific issues found"], '
-        '"reasoning": "brief explanation"}'
+        "You are a cardiac MRI segmentation quality judge.\n"
+        "I will show GOOD and BAD reference overlays, then one TARGET overlay.\n\n"
+        "All images are SINGLE-PANEL overlays on raw MRI.\n"
+        "Color legend: RV=red/cyan, Myocardium ring=green/yellow, LV=blue/red-brown.\n\n"
+        "Task: classify TARGET as 'good', 'borderline', or 'bad'.\n"
+        "Judge by morphology only (do NOT guess exact Dice from appearance).\n\n"
+        "Scoring checklist (0-10 each):\n"
+        "- ring_integrity: Is the Myo ring complete and closed around LV?\n"
+        "- separation: Are RV and LV separated by Myo (no direct merge)?\n"
+        "- structure_presence: Are required structures present and coherent?\n"
+        "- contour_quality: Are boundaries smooth with limited holes/noise?\n\n"
+        "Overall score rules:\n"
+        "- Provide a calibrated score in [1, 10] (one decimal allowed)\n"
+        "- Use the full score range; do not collapse to only a few fixed values\n"
+        "- Minor roughness with closed ring and clean separation is still often GOOD (typically 7.0-8.5)\n"
+        "- Reserve 1-3 for severe structural/anatomical failure\n\n"
+        "Quality mapping:\n"
+        "- good: score >= 7.0 and no major structural violation\n"
+        "- borderline: 4.5 <= score < 7.0\n"
+        "- bad: score < 4.5 OR major violation (large Myo gap, RV/LV merge, missing critical structure)\n\n"
+        "Respond in JSON:\n"
+        '{"quality":"good"|"borderline"|"bad",'
+        '"score":1-10,'
+        '"confidence":0.0-1.0,'
+        '"issues":["specific issues"],'
+        '"subscores":{"ring_integrity":0-10,"separation":0-10,"structure_presence":0-10,"contour_quality":0-10},'
+        '"reasoning":"brief explanation"}'
     )
 
 
@@ -305,7 +370,12 @@ class BaseAgent(ABC):
     )
 
     def judge_visual_quality(
-        self, overlay_path: str, n_refs: int = 2
+        self,
+        overlay_path: str,
+        n_refs: int = 1,
+        view_type: Optional[str] = None,
+        seed: Optional[str] = None,
+        four_way_categories: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Use VLM to judge segmentation quality by comparing the target overlay
@@ -320,21 +390,50 @@ class BaseAgent(ABC):
         if self.visual_kb is None or not overlay_path:
             logger.warning("judge_visual_quality called without visual_kb or overlay_path")
             return {"quality": "borderline", "confidence": 0.0, "issues": [], "reasoning": "no visual knowledge base"}
-
-        # Select few-shot references
-        good_refs, bad_refs = self.visual_kb.get_few_shot_set(n_refs, n_refs)
+        if not self._vlm_enabled():
+            return {
+                "quality": "borderline",
+                "confidence": 0.0,
+                "issues": [],
+                "reasoning": "vlm disabled by config",
+            }
 
         # Build image list with labels
         image_paths = []
         image_labels = []
+        used_four_way = False
+        good_refs = []
+        bad_refs = []
 
-        for i, ex in enumerate(good_refs):
-            image_labels.append(f"[GOOD EXAMPLE {i+1}] Dice={ex.dice:.3f}")
-            image_paths.append(ex.path)
+        # Preferred mode: one reference from each configured 4-way category.
+        if four_way_categories:
+            four_way_refs = self.visual_kb.get_four_way_set(
+                categories=four_way_categories,
+                view_type=view_type,
+                seed=seed,
+            )
+            if four_way_refs:
+                used_four_way = True
+                for ex in four_way_refs:
+                    image_labels.append(
+                        f"[REF {ex.category}] Dice={ex.dice:.3f}, Issue={ex.issue_type or 'N/A'}"
+                    )
+                    image_paths.append(ex.path)
 
-        for i, ex in enumerate(bad_refs):
-            image_labels.append(f"[BAD EXAMPLE {i+1}] Dice={ex.dice:.3f}, Issue={ex.issue_type}")
-            image_paths.append(ex.path)
+        # Backward-compatible mode: balanced good/bad references.
+        if not used_four_way:
+            good_refs, bad_refs = self.visual_kb.get_few_shot_set(
+                n_refs, n_refs, view_type=view_type, seed=seed
+            )
+            for i, ex in enumerate(good_refs):
+                image_labels.append(f"[GOOD EXAMPLE {i+1}] Dice={ex.dice:.3f}")
+                image_paths.append(ex.path)
+
+            for i, ex in enumerate(bad_refs):
+                image_labels.append(
+                    f"[BAD EXAMPLE {i+1}] Dice={ex.dice:.3f}, Issue={ex.issue_type}"
+                )
+                image_paths.append(ex.path)
 
         image_labels.append("[TARGET - EVALUATE THIS]")
         image_paths.append(overlay_path)
@@ -343,7 +442,17 @@ class BaseAgent(ABC):
         knowledge_text = self.visual_kb.build_knowledge_prompt()
         full_prompt = f"{knowledge_text}\n\n{self._JUDGE_PROMPT}"
 
-        self.log(f"VLM judge: {len(good_refs)} good + {len(bad_refs)} bad refs → evaluating {overlay_path}")
+        if used_four_way:
+            self.log(
+                "VLM judge: 4-way refs "
+                f"({','.join(four_way_categories or [])}) -> {len(image_paths)-1} refs "
+                f"(view={view_type or 'any'}) -> evaluating {overlay_path}"
+            )
+        else:
+            self.log(
+                f"VLM judge: {len(good_refs)} good + {len(bad_refs)} bad refs "
+                f"(view={view_type or 'any'}) -> evaluating {overlay_path}"
+            )
 
         vg_cfg = self._vlm_cfg()
         image_detail = vg_cfg.get("image_detail", "auto")
@@ -383,6 +492,16 @@ class BaseAgent(ABC):
              "changes_observed": [...],
              "reasoning": str}
         """
+        if not self._vlm_enabled():
+            return {
+                "verdict": "same",
+                "confidence": 0.0,
+                "before_quality": "borderline",
+                "after_quality": "borderline",
+                "changes_observed": [],
+                "reasoning": "vlm disabled by config",
+            }
+
         image_paths = [before_path, after_path]
         image_labels = ["[BEFORE repair]", "[AFTER repair]"]
 
@@ -459,6 +578,13 @@ class BaseAgent(ABC):
              "confidence": float,
              "reasoning": str}
         """
+        if not self._vlm_enabled():
+            return {
+                "verdict": "neutral",
+                "confidence": 0.0,
+                "reasoning": "vlm disabled by config",
+            }
+
         image_paths = []
         image_labels = []
 

@@ -8,6 +8,7 @@ Can be challenged by other agents (e.g., Coordinator, Verifier).
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -20,7 +21,23 @@ from .message_bus import AgentMessage, CaseContext, MessageBus, MessageType
 from .visual_knowledge import VisualKnowledgeBase
 
 
-# ---- Feature-based issue detection (preserved from original) ----
+# ---- Feature-based issue detection ----
+
+# Severity weights for each issue type.
+# Critical structural defects = 1.0, minor cosmetic issues = 0.2
+ISSUE_SEVERITY: Dict[str, float] = {
+    "disconnected_myo": 1.0,
+    "fragmented_lv": 0.9,
+    "fragmented_rv": 0.7,
+    "rv_lv_touching": 0.9,
+    "holes": 0.6,
+    "valve_leak": 0.3,
+    "myo_thickness_var": 0.2,
+    "missing_myo": 1.0,
+    "missing_lv": 1.0,
+    "missing_rv": 0.8,
+}
+
 
 def _detect_issues(feats: Dict[str, float]) -> List[str]:
     """Detect anatomical issues from quality features."""
@@ -39,9 +56,9 @@ def _detect_issues(feats: Dict[str, float]) -> List[str]:
         issues.append("holes")
     if hole_lv > 0.02:
         issues.append("holes")
-    if feats.get("valve_leak_ratio", 0) > 0.03:
+    if feats.get("valve_leak_ratio", 0) > 0.10:
         issues.append("valve_leak")
-    if feats.get("thickness_cv", 0) > 0.5:
+    if feats.get("thickness_cv", 0) > 0.9:
         issues.append("myo_thickness_var")
     if feats.get("myo_missing", 0) > 0.5:
         issues.append("missing_myo")
@@ -50,6 +67,93 @@ def _detect_issues(feats: Dict[str, float]) -> List[str]:
     if feats.get("rv_missing", 0) > 0.5 and feats.get("view_is_4ch", 0) > 0.5:
         issues.append("missing_rv")
     return list(set(issues))
+
+
+def _issue_severity(issues: List[str]) -> float:
+    """Compute aggregate severity score from issue list."""
+    return sum(ISSUE_SEVERITY.get(iss, 0.5) for iss in issues)
+
+
+def _canonicalize_issue(issue: Any) -> Optional[str]:
+    """Normalize noisy VLM/LLM issue strings to canonical triage issue labels."""
+    if issue is None:
+        return None
+    text = str(issue).strip().lower()
+    if not text:
+        return None
+    text = re.sub(r"[_\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
+    direct_map = {
+        "disconnected myo": "disconnected_myo",
+        "broken ring": "disconnected_myo",
+        "discmyo": "disconnected_myo",
+        "rv lv touching": "rv_lv_touching",
+        "rv lv contact": "rv_lv_touching",
+        "rv lv merge": "rv_lv_touching",
+        "fragmented lv": "fragmented_lv",
+        "fragmented rv": "fragmented_rv",
+        "missing myo": "missing_myo",
+        "missing lv": "missing_lv",
+        "missing rv": "missing_rv",
+        "valve leak": "valve_leak",
+        "myo thickness var": "myo_thickness_var",
+    }
+    if text in direct_map:
+        return direct_map[text]
+
+    if text in ISSUE_SEVERITY:
+        return text
+
+    if "hole" in text:
+        return "holes"
+
+    if "valve" in text and ("leak" in text or "regurg" in text):
+        return "valve_leak"
+
+    if "missing" in text:
+        if "myo" in text or "myocard" in text:
+            return "missing_myo"
+        if "lv" in text:
+            return "missing_lv"
+        if "rv" in text:
+            return "missing_rv"
+
+    if "fragment" in text:
+        if "lv" in text:
+            return "fragmented_lv"
+        if "rv" in text:
+            return "fragmented_rv"
+
+    if (
+        ("touch" in text or "contact" in text or "merge" in text or "overlap" in text)
+        and "lv" in text
+        and "rv" in text
+    ):
+        return "rv_lv_touching"
+
+    if (
+        "myo" in text or "myocard" in text or "ring" in text
+    ) and (
+        "gap" in text or "break" in text or "discontinu" in text or "incomplete" in text
+    ):
+        return "disconnected_myo"
+
+    if "thickness" in text or "rough" in text or "jagged" in text:
+        if "myo" in text or "myocard" in text:
+            return "myo_thickness_var"
+
+    return None
+
+
+def _normalize_issues(issues: List[Any]) -> List[str]:
+    """Canonicalize + deduplicate + sort issues by severity."""
+    out = set()
+    for issue in issues:
+        canon = _canonicalize_issue(issue)
+        if canon:
+            out.add(canon)
+    return sorted(out, key=lambda x: (-ISSUE_SEVERITY.get(x, 0.0), x))
 
 
 class TriageAgent(BaseAgent):
@@ -95,7 +199,7 @@ class TriageAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        prompt = (
+        fallback = (
             "You are the Triage Agent in a multi-agent cardiac MRI segmentation repair system.\n\n"
             "Your role is to quickly assess whether a segmentation mask needs repair or is acceptable.\n"
             "You combine VLM visual judgment with quantitative features for robust triage.\n\n"
@@ -108,6 +212,7 @@ class TriageAgent(BaseAgent):
             '{"category": "good" | "needs_fix", "confidence": 0.0-1.0, '
             '"issues": [...], "reasoning": "..."}'
         )
+        prompt = self._prompt_with_fallback("triage_system.txt", fallback)
         # Inject knowledge from visual examples
         if self.visual_kb:
             prompt += "\n\n" + self.visual_kb.build_knowledge_prompt()
@@ -124,7 +229,21 @@ class TriageAgent(BaseAgent):
 
         # Step 1: Feature-based issue detection (always available)
         feats = extract_quality_features(ctx.mask, ctx.image, ctx.view_type)
-        issues = _detect_issues(feats)
+        issues = _normalize_issues(_detect_issues(feats))
+        agent_cfg = self._agent_cfg()
+        vlm_n_refs = max(1, int(agent_cfg.get("vlm_n_refs", 2)))
+        vlm_match_view = bool(agent_cfg.get("vlm_ref_match_view", True))
+        vlm_four_way_refs = bool(agent_cfg.get("vlm_four_way_refs", False))
+        raw_ref_categories = agent_cfg.get(
+            "vlm_ref_categories",
+            ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"],
+        )
+        vlm_ref_categories = (
+            list(raw_ref_categories)
+            if isinstance(raw_ref_categories, list)
+            else ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"]
+        )
+        vlm_ref_seed = f"triage:{ctx.stem}"
 
         # Step 2: Optional fast classifier
         classifier_score = 0.5
@@ -145,59 +264,159 @@ class TriageAgent(BaseAgent):
                 overlay_path = ctx.debug_img_path("_triage_overlay.png")
                 success = create_overlay(ctx.img_path, ctx.mask, overlay_path)
                 if success:
-                    vlm_verdict = self.judge_visual_quality(overlay_path)
+                    vlm_verdict = self.judge_visual_quality(
+                        overlay_path=overlay_path,
+                        n_refs=vlm_n_refs,
+                        view_type=ctx.view_type if vlm_match_view else None,
+                        seed=vlm_ref_seed,
+                        four_way_categories=(
+                            vlm_ref_categories if vlm_four_way_refs else None
+                        ),
+                    )
             except Exception as e:
                 self.log(f"VLM triage failed: {e}")
 
-        # Step 4: Decision logic — VLM-first, classifier-assisted
-        if vlm_verdict and vlm_verdict.get("confidence", 0) > 0.6:
-            # VLM is confident → use its verdict
-            vlm_quality = vlm_verdict.get("quality", "borderline")
-            if vlm_quality == "good" and not issues:
-                category = "good"
-                confidence = vlm_verdict["confidence"]
-                reasoning = f"VLM: {vlm_verdict.get('reasoning', 'good quality')}"
-            elif vlm_quality == "bad":
-                category = "needs_fix"
-                confidence = vlm_verdict["confidence"]
-                vlm_issues = vlm_verdict.get("issues", [])
-                issues = list(set(issues + vlm_issues))
-                reasoning = f"VLM: {vlm_verdict.get('reasoning', 'bad quality')}"
-            else:
-                # Borderline VLM + features → LLM decides
-                category, confidence, reasoning, issues = self._llm_triage(
-                    ctx, feats, issues, classifier_score, bad_prob, is_bad, vlm_verdict
-                )
-        elif issues:
-            # No VLM but issues detected → needs fix
-            category = "needs_fix"
-            confidence = max(bad_prob, 0.6)
-            reasoning = f"Feature issues detected: {issues}"
-        else:
-            # Fallback to LLM reasoning
-            category, confidence, reasoning, issues = self._llm_triage(
-                ctx, feats, issues, classifier_score, bad_prob, is_bad, vlm_verdict
-            )
+        # Step 4: Compute severity from feature issues
+        severity = _issue_severity(issues)
 
-        # Normalize triage score as "probability of being good" for fast-path gating.
-        triage_score = classifier_score
+        # Step 5: Decision logic — VLM score + severity-based gating
+        # Default from features using severity scoring
+        if severity >= 0.8:
+            category = "needs_fix"
+        elif severity < 0.5 and not is_bad:
+            category = "good"
+        else:
+            category = "needs_fix"  # conservative default for moderate severity
+        confidence = max(bad_prob, 0.6)
+        reasoning = f"Feature severity={severity:.2f}, issues={issues}"
+
         if vlm_verdict:
             vlm_quality = vlm_verdict.get("quality", "borderline")
             vlm_conf = float(vlm_verdict.get("confidence", 0.5))
-            if vlm_quality == "good":
-                triage_score = vlm_conf
+            vlm_score = float(vlm_verdict.get("score", 0))
+            # Triage thresholds are configurable per model in agents.triage.*
+            # Keeping strict defaults prevents over-accepting borderline masks.
+            good_min_score = float(agent_cfg.get("vlm_good_min_score", 9.0))
+            good_min_conf = float(agent_cfg.get("vlm_good_min_conf", 0.85))
+            borderline_auto_good_max_severity = float(
+                agent_cfg.get("borderline_auto_good_max_severity", 0.2)
+            )
+
+            # Use VLM numeric score to correct unreliable quality text
+            if vlm_score >= 7:
+                vlm_quality = "good"
+            elif vlm_score <= 4:
+                vlm_quality = "bad"
+
+            if (
+                vlm_quality == "good"
+                and vlm_conf >= good_min_conf
+                and vlm_score >= good_min_score
+                and severity < 0.5
+            ):
+                category = "good"
+                confidence = vlm_conf
+                reasoning = (f"VLM Good (score={vlm_score}, conf={vlm_conf:.2f}). "
+                             f"Feature severity={severity:.2f}, issues={issues}")
+
             elif vlm_quality == "bad":
-                triage_score = 1.0 - vlm_conf
+                category = "needs_fix"
+                confidence = vlm_conf
+                vlm_issues = vlm_verdict.get("issues", [])
+                issues = _normalize_issues(issues + list(vlm_issues))
+                reasoning = f"VLM Bad (score={vlm_score})"
+
             else:
-                triage_score = 0.5
-        triage_score = float(max(0.0, min(1.0, triage_score)))
+                # Borderline VLM → use severity-based rescue
+                if severity < borderline_auto_good_max_severity and not is_bad:
+                    category = "good"
+                    confidence = 0.6
+                    reasoning = (f"VLM borderline but low severity={severity:.2f}. "
+                                 f"Minor issues only: {issues}")
+                elif severity < 0.8:
+                    # True borderline → LLM decides
+                    category, confidence, reasoning, issues = self._llm_triage(
+                        ctx, feats, issues, classifier_score, bad_prob, is_bad, vlm_verdict
+                    )
+                # severity >= 0.8 keeps default "needs_fix"
+
+        # Final issue normalization after all signal merges.
+        issues = _normalize_issues(issues)
+        # Severity should reflect merged signals (features + VLM/LLM tags).
+        severity = max(severity, _issue_severity(issues))
+
+        # Calibrated triage score as "probability of being good" for fast-path gating.
+        # Blend VLM and quality-model signals to improve ranking stability (AUC).
+        triage_score = classifier_score
+        vlm_good_prob: Optional[float] = None
+        if vlm_verdict:
+            vlm_score = float(vlm_verdict.get("score", 0))
+            vlm_conf = float(vlm_verdict.get("confidence", 0.5))
+
+            # Normalize VLM score (1..10 -> 0..1), then shrink toward 0.5 if confidence is low.
+            score_norm = max(0.0, min(1.0, (vlm_score - 1.0) / 9.0))
+            conf_scale = max(0.0, min(1.0, 0.5 + 0.5 * vlm_conf))
+            vlm_good_prob = 0.5 + (score_norm - 0.5) * conf_scale
+            vlm_good_prob = float(max(0.0, min(1.0, vlm_good_prob)))
+
+            vlm_w = float(agent_cfg.get("vlm_good_prob_weight", 0.85))
+            qm_w = float(agent_cfg.get("qm_good_prob_weight", 0.15 if self._scorer is not None else 0.0))
+            if self._scorer is None:
+                qm_w = 0.0
+            denom = max(vlm_w + qm_w, 1e-6)
+            triage_score = (vlm_w * vlm_good_prob + qm_w * classifier_score) / denom
+
+        # Penalize high-severity anatomical defects so score is safer for fast-path gating.
+        severity_penalty = min(0.25, 0.04 * severity)
+        triage_score = float(max(0.0, min(1.0, triage_score - severity_penalty)))
+        triage_bad_prob = float(1.0 - triage_score)
+
+        # Final consistency pass: category should agree with calibrated score,
+        # while still respecting hard structural defects.
+        critical_issues = {
+            "disconnected_myo",
+            "missing_myo",
+            "missing_lv",
+            "rv_lv_touching",
+            "fragmented_lv",
+        }
+        has_critical_issue = any(iss in critical_issues for iss in issues)
+        score_good_floor = float(agent_cfg.get("score_good_floor", 0.72))
+        score_bad_ceiling = float(agent_cfg.get("score_bad_ceiling", 0.40))
+
+        if severity >= 0.8:
+            category = "needs_fix"
+        elif has_critical_issue and triage_score < 0.9:
+            category = "needs_fix"
+        elif triage_score <= score_bad_ceiling:
+            category = "needs_fix"
+        elif triage_score >= score_good_floor and not has_critical_issue:
+            category = "good"
+
+        confidence = float(max(0.0, min(1.0, confidence)))
+        if category == "good":
+            confidence = max(confidence, triage_score)
+        else:
+            confidence = max(confidence, triage_bad_prob)
 
         # Update case context
         ctx.triage_category = category
         ctx.triage_score = triage_score
         ctx.triage_issues = issues
+        ctx.vlm_verdict_data = vlm_verdict # Store full dictionary
+        ctx.vlm_quality = vlm_verdict.get("quality", "N/A") if vlm_verdict else "N/A"
+        ctx.vlm_score = float(vlm_verdict.get("score", -1.0)) if vlm_verdict else -1.0
+        ctx.vlm_confidence = float(vlm_verdict.get("confidence", 0.0)) if vlm_verdict else 0.0
+        ctx.vlm_good_prob = float(vlm_good_prob) if vlm_good_prob is not None else -1.0
+        ctx.qm_bad_prob = float(bad_prob)
+        ctx.triage_bad_prob = triage_bad_prob
+        ctx.triage_severity = float(severity)
 
-        self.log(f"  → {category} (vlm={vlm_verdict.get('quality', 'N/A')}, issues={issues})")
+
+        self.log(
+            f"  → {category} (vlm={vlm_verdict.get('quality', 'N/A')}, "
+            f"score={triage_score:.3f}, bad_prob={triage_bad_prob:.3f}, issues={issues})"
+        )
 
         # Send result to bus
         self.send_message(
@@ -206,6 +425,7 @@ class TriageAgent(BaseAgent):
             content={
                 "category": category,
                 "score": triage_score,
+                "bad_prob": triage_bad_prob,
                 "confidence": confidence,
                 "issues": issues,
                 "reasoning": reasoning,
@@ -240,7 +460,7 @@ class TriageAgent(BaseAgent):
         reasoning = result.get("reasoning", "LLM decision")
         llm_issues = result.get("issues", [])
         if llm_issues:
-            issues = list(set(issues + llm_issues))
+            issues = _normalize_issues(issues + list(llm_issues))
         return category, confidence, reasoning, issues
 
     def handle_challenge(self, msg: AgentMessage, ctx: CaseContext) -> None:
@@ -264,7 +484,7 @@ class TriageAgent(BaseAgent):
             self.log(f"  → Changed verdict: {ctx.triage_category} → {new_category}")
             ctx.triage_category = new_category
             if result.get("issues"):
-                ctx.triage_issues = list(set(ctx.triage_issues + result["issues"]))
+                ctx.triage_issues = _normalize_issues(ctx.triage_issues + list(result["issues"]))
 
         changed = new_category != original_category
 

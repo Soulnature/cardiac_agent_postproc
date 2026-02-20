@@ -106,6 +106,15 @@ class CaseContext:
     verifier_approved: bool = False
     verifier_feedback: str = ""
 
+    # Best-intermediate fallback (for conservative final save policy)
+    best_intermediate_mask: Optional[np.ndarray] = None
+    best_intermediate_score: float = 0.0
+    best_intermediate_round: int = 0
+    best_intermediate_verdict: str = "baseline_original"
+    best_intermediate_reason: str = ""
+    best_intermediate_ops: List[Dict[str, Any]] = field(default_factory=list)
+    best_intermediate_is_original: bool = True
+
     # Metrics (populated during evaluation if GT available)
     dice_macro: float = -1.0
     dice_per_class: Dict[str, float] = field(default_factory=dict)

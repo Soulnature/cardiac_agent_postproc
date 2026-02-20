@@ -1,11 +1,8 @@
 paths:
   source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export"
   target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs" # run script adds subdir
-  runs_subdir: "run_gpt4o_307"
+  runs_subdir: "run_v31_azure_openai_medrag"
   atlas_path: "shape_atlas.pkl"
-
-targets: 
-  - "307_original_lax_4c_024"
 
 solver:
   max_outer: 10
@@ -95,17 +92,19 @@ revision:
 llm:
   enabled: true
   provider: "ollama"            # "gemini" or "ollama" (base class uses 'ollama' logical provider for OpenAI compatible)
-  base_url: "https://api.openai.com/v1"  # OpenAI endpoint
+  base_url: "https://med-rag-openai.openai.azure.com/openai/v1"  # Azure OpenAI endpoint
   model: "gpt-4o"
+  # API key source: env AZURE_OPENAI_API_KEY (or set llm.api_key explicitly)
   temperature: 0.15
   max_tokens: 8192
 
-# Visual-Language Model (using OpenAI multimodal)
+# Visual-Language Model (using Azure OpenAI multimodal)
 vision_guardrail:
   enabled: true
   provider: "ollama"            # "gemini" or "ollama" (base class uses 'ollama' logical provider for OpenAI compatible)
-  base_url: "https://api.openai.com/v1"  # OpenAI endpoint
+  base_url: "https://med-rag-openai.openai.azure.com/openai/v1"  # Azure OpenAI endpoint
   model: "gpt-4o"
+  # API key source: env AZURE_OPENAI_API_KEY (or set vision_guardrail.api_key explicitly)
   threshold: 40
 
 quality_model:
@@ -144,18 +143,24 @@ executor:
 agents:
   triage:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
+    base_url: "https://med-rag-openai.openai.azure.com/openai/v1"
     model: "gpt-4o"
     image_detail: "auto"
     vlm_n_refs: 2
     vlm_ref_match_view: true
+    vlm_four_way_refs: true
+    vlm_ref_categories: ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"]
+    vlm_good_prob_weight: 0.85
+    qm_good_prob_weight: 0.15
+    score_good_floor: 0.72
+    score_bad_ceiling: 0.40
     quality_model:
       enabled: true
       path: "quality_model.pkl"
 
   diagnosis:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
+    base_url: "https://med-rag-openai.openai.azure.com/openai/v1"
     model: "gpt-4o"
     image_detail: "auto"
     vlm_enabled: true
@@ -163,12 +168,12 @@ agents:
 
   planner:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
+    base_url: "https://med-rag-openai.openai.azure.com/openai/v1"
     model: "gpt-4o"
     chain_of_thought: true
 
   verifier:
     provider: "ollama"
-    base_url: "https://api.openai.com/v1"
+    base_url: "https://med-rag-openai.openai.azure.com/openai/v1"
     model: "gpt-4o"
     image_detail: "auto"

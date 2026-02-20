@@ -165,29 +165,56 @@ class OpenAICompatClient:
     ) -> str:
         """Core call via OpenAI-compatible API (Ollama). Returns text or empty string."""
         client = self._get_openai_client()
+        # Newer OpenAI models (e.g. gpt-5 family) require max_completion_tokens.
+        use_max_completion_tokens = self.model.startswith("gpt-5")
 
         max_retries = 5
         for attempt in range(max_retries):
             print(f"\n[{tag}] Requesting {self.model} via Ollama ({self.base_url})...")
             try:
                 print(f"DEBUG: Calling Ollama API for {self.model}...", flush=True)
+                req_kwargs: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "response_format": {"type": "json_object"},
+                }
+                if use_max_completion_tokens:
+                    req_kwargs["max_completion_tokens"] = max_tokens
+                else:
+                    req_kwargs["max_tokens"] = max_tokens
                 response = client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"},
+                    **req_kwargs,
                 )
-                print(f"DEBUG: Ollama API returned. Length: {len(response.choices[0].message.content) if response.choices else 0}", flush=True)
+                content = None
+                if response.choices:
+                    msg = response.choices[0].message
+                    content = msg.content
+                    refusal = getattr(msg, 'refusal', None)
+                    if refusal:
+                        print(f"[{tag}] Model refused: {refusal}")
+                print(f"DEBUG: Ollama API returned. Length: {len(content) if content else 0}", flush=True)
 
-                if response.choices and response.choices[0].message.content:
-                    return response.choices[0].message.content
+                if content:
+                    return content
 
                 print(f"[{tag}] Warning: empty response")
                 return ""
 
             except Exception as e:
                 err_str = str(e).lower()
+                if (
+                    not use_max_completion_tokens
+                    and "unsupported parameter" in err_str
+                    and "max_tokens" in err_str
+                    and "max_completion_tokens" in err_str
+                ):
+                    print(
+                        f"[{tag}] Switching to max_completion_tokens for {self.model} "
+                        "(OpenAI compatibility)."
+                    )
+                    use_max_completion_tokens = True
+                    continue
 
                 # Categorized error handling for Ollama
                 if "connection refused" in err_str or "connect" in err_str:

@@ -24,6 +24,8 @@ from ..ops import (
     expand_myo_intensity_guided, expand_blood_pool_intensity,
     morphological_gap_close, morph_close_large, convex_hull_fill,
     erode_lv_expand_myo, erode_rv_expand_myo_conditional,
+    erode_myo_expand_lv, erode_myo_expand_rv,
+    reassign_secondary_lv_to_rv, reassign_secondary_rv_to_lv,
 )
 from ..rqs import compute_rqs, sobel_edges, valve_plane_y
 from ..slice_consistency import (
@@ -105,6 +107,8 @@ def _build_op_fn(mask, view, cfg, E, vy, atlas=None, neighbor_masks=None, neighb
         "morphological_gap_close": lambda m: morphological_gap_close(m, cfg),
         "morph_close_large": lambda m: morph_close_large(m, cfg),
         "convex_hull_fill": lambda m: convex_hull_fill(m),
+        "lv_split_to_rv": lambda m: reassign_secondary_lv_to_rv(m),
+        "rv_split_to_lv": lambda m: reassign_secondary_rv_to_lv(m),
         "2_dilate_large": lambda m: dilate_or_erode(m, cfg, 2, "dilate_large"),
         "2_erode_large": lambda m: dilate_or_erode(m, cfg, 2, "erode_large"),
         "3_dilate_large": lambda m: dilate_or_erode(m, cfg, 3, "dilate_large"),
@@ -112,6 +116,8 @@ def _build_op_fn(mask, view, cfg, E, vy, atlas=None, neighbor_masks=None, neighb
         "rv_erode_large": lambda m: dilate_or_erode(m, cfg, 1, "erode_large"),
         "3_erode_expand_myo": lambda m: erode_lv_expand_myo(m, cfg),
         "1_erode_expand_myo": lambda m: erode_rv_expand_myo_conditional(m, cfg),
+        "2_erode_expand_lv": lambda m: erode_myo_expand_lv(m, cfg),
+        "2_erode_expand_rv": lambda m: erode_myo_expand_rv(m, cfg),
     }
 
     # Inter-slice consistency ops (only available when neighbors exist)
@@ -234,7 +240,7 @@ class ExecutorAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        return (
+        fallback = (
             "You are the Executor Agent in a cardiac MRI segmentation repair system.\n\n"
             "Your role is to execute repair operations and evaluate their effects.\n"
             "After each operation, you report:\n"
@@ -245,6 +251,7 @@ class ExecutorAgent(BaseAgent):
             "If an operation fails or causes regression, you flag it.\n"
             "You ONLY execute — you don't decide what to do."
         )
+        return self._prompt_with_fallback("executor_system.txt", fallback)
 
     def process_case(self, ctx: CaseContext) -> None:
         """
@@ -348,14 +355,36 @@ class ExecutorAgent(BaseAgent):
             direction = step.get("direction", "global")
             affected_class = step.get("affected_class", "myo")
             bbox = step.get("bbox", None)
+            if not (isinstance(bbox, list) and len(bbox) == 4):
+                bbox = None
+            policy_tag = str(step.get("policy_tag", "")).strip().lower()
+            is_forced_atlas = (
+                policy_tag == "forced_atlas_class_replace"
+                and str(op_name).startswith("atlas_")
+            )
+            is_hard_split_relabel = op_name in {"lv_split_to_rv", "rv_split_to_lv"}
 
             # ── Smart Global Repair: Infer bbox from direction if missing ──
             if not bbox and direction != "global" and direction:
                 try:
                     region_mask = compute_region_mask(ctx.current_mask, affected_class, direction)
+                    focus_mask = region_mask
+
+                    # If bbox is missing, tighten localization with class-aware focus.
+                    # This keeps edits near the diagnosed structure instead of applying
+                    # to an entire half-plane.
+                    class_id_map = {"rv": 1, "myo": 2, "lv": 3}
+                    class_id = class_id_map.get(str(affected_class).strip().lower())
+                    if class_id is not None:
+                        class_mask = (ctx.current_mask == class_id)
+                        candidate = region_mask & class_mask
+                        # Use class-focused region when it has enough pixels.
+                        if int(np.count_nonzero(candidate)) >= 16:
+                            focus_mask = candidate
+
                     # Get bbox of the True regions
-                    rows = np.any(region_mask, axis=1)
-                    cols = np.any(region_mask, axis=0)
+                    rows = np.any(focus_mask, axis=1)
+                    cols = np.any(focus_mask, axis=0)
                     if np.any(rows) and np.any(cols):
                         ymin, ymax = np.where(rows)[0][[0, -1]]
                         xmin, xmax = np.where(cols)[0][[0, -1]]
@@ -379,15 +408,24 @@ class ExecutorAgent(BaseAgent):
                 continue
 
             try:
-                # Force GLOBAL application for neighbor/atlas ops (they need full mask context)
-                if op_name.startswith("neighbor_") or op_name.startswith("atlas_"):
-                     bbox = None
-
-                if bbox:
-                    result = _apply_local_op(ctx.current_mask, op_fns[op_name], bbox)
-                    self.log(f"  [{step_idx}] {op_name} (local): Applied to {bbox}")
+                if is_hard_split_relabel:
+                    if op_name == "lv_split_to_rv":
+                        result = reassign_secondary_lv_to_rv(ctx.current_mask, bbox=bbox)
+                    else:
+                        result = reassign_secondary_rv_to_lv(ctx.current_mask, bbox=bbox)
+                    if bbox is not None:
+                        self.log(f"  [{step_idx}] {op_name}: using diagnosis hint bbox {bbox}")
                 else:
-                    result = op_fns[op_name](ctx.current_mask)
+                    # Force GLOBAL application for neighbor/atlas ops (they need full mask context)
+                    apply_bbox = bbox
+                    if op_name.startswith("neighbor_") or op_name.startswith("atlas_"):
+                        apply_bbox = None
+
+                    if apply_bbox:
+                        result = _apply_local_op(ctx.current_mask, op_fns[op_name], apply_bbox)
+                        self.log(f"  [{step_idx}] {op_name} (local): Applied to {apply_bbox}")
+                    else:
+                        result = op_fns[op_name](ctx.current_mask)
             except Exception as e:
                 self.log(f"  [{step_idx}] {op_name}: FAILED ({e})")
                 ops_failed.append({"operation": op_name, "reason": str(e)})
@@ -398,11 +436,30 @@ class ExecutorAgent(BaseAgent):
                 ops_failed.append({"operation": op_name, "reason": "invalid result"})
                 continue
 
-            # Apply region mask if directional
-            if direction != "global":
-                region = compute_region_mask(ctx.current_mask, affected_class, direction)
+            # Apply diagnosis-constrained merge region:
+            # - direction mask (if provided)
+            # - bbox mask (if provided)
+            # This enables targeted correction even when current pixel labels are wrong.
+            merge_region = None
+            if not is_hard_split_relabel:
+                if direction != "global":
+                    merge_region = compute_region_mask(ctx.current_mask, affected_class, direction)
+
+                if bbox is not None:
+                    H, W = ctx.current_mask.shape
+                    ymin, xmin, ymax, xmax = [int(v) for v in bbox]
+                    ymin = max(0, min(ymin, H))
+                    xmin = max(0, min(xmin, W))
+                    ymax = max(0, min(ymax, H))
+                    xmax = max(0, min(xmax, W))
+                    if ymax > ymin and xmax > xmin:
+                        bbox_region = np.zeros_like(ctx.current_mask, dtype=bool)
+                        bbox_region[ymin:ymax, xmin:xmax] = True
+                        merge_region = bbox_region if merge_region is None else (merge_region & bbox_region)
+
+            if merge_region is not None:
                 merged = ctx.current_mask.copy()
-                merged[region] = result[region]
+                merged[merge_region] = result[merge_region]
                 if is_valid_candidate(merged):
                     result = merged
 
@@ -427,13 +484,19 @@ class ExecutorAgent(BaseAgent):
                     pass
 
             # Trust-region guard: reject oversized edits before VLM gating.
-            max_high_ratio = float(
-                self.cfg.get("executor", {}).get("max_high_impact_change_ratio", 0.20)
-            )
-            max_normal_ratio = float(
-                self.cfg.get("executor", {}).get("max_step_change_ratio", 0.12)
+            ex_cfg = self.cfg.get("executor", {})
+            max_high_ratio = float(ex_cfg.get("max_high_impact_change_ratio", 0.20))
+            max_normal_ratio = float(ex_cfg.get("max_step_change_ratio", 0.12))
+            forced_atlas_max_ratio = float(
+                ex_cfg.get("forced_atlas_max_step_change_ratio", 0.45)
             )
             limit_ratio = max_high_ratio if is_high_impact else max_normal_ratio
+            if is_forced_atlas:
+                limit_ratio = max(limit_ratio, forced_atlas_max_ratio)
+                self.log(
+                    f"  [{step_idx}] {op_name}: forced-atlas relax "
+                    f"change_ratio_limit -> {limit_ratio:.3f}"
+                )
             if change_ratio > limit_ratio:
                 reason = (
                     f"change_ratio {change_ratio:.4f} exceeds limit {limit_ratio:.4f} "
@@ -452,6 +515,15 @@ class ExecutorAgent(BaseAgent):
             is_erode = "erode" in op_lower or "prune" in op_lower or "suppress" in op_lower
             is_grow = "dilate" in op_lower or "expand" in op_lower or "grow" in op_lower
             is_repair = "repair" in op_lower or "atlas" in op_lower or "transfer" in op_lower
+            nontarget_min_ratio = float(ex_cfg.get("nontarget_min_area_ratio", 0.70))
+            nontarget_max_ratio = float(ex_cfg.get("nontarget_max_area_ratio", 1.50))
+            if is_forced_atlas:
+                nontarget_min_ratio = float(
+                    ex_cfg.get("forced_atlas_nontarget_min_area_ratio", 0.55)
+                )
+                nontarget_max_ratio = float(
+                    ex_cfg.get("forced_atlas_nontarget_max_area_ratio", 1.80)
+                )
 
             # Get neighbor areas for reference (GT-free baseline)
             nb_areas = {}
@@ -483,19 +555,30 @@ class ExecutorAgent(BaseAgent):
                 # 'neighbor' ops are radical repairs -> exempt them from strict area checks
                 is_neighbor_op = "neighbor" in op_lower
                 if not is_targeted and not is_neighbor_op:
-                    if area_ratio < 0.70:
+                    if area_ratio < nontarget_min_ratio:
                         accepted = False
-                        gate_reason = f"{cname}_area_drop={area_ratio:.2f} ({before_area}->{after_area}px)"
+                        gate_reason = (
+                            f"{cname}_area_drop={area_ratio:.2f} "
+                            f"({before_area}->{after_area}px, min={nontarget_min_ratio:.2f})"
+                        )
                         break
-                    if is_grow and area_ratio > 1.50:
+                    if is_grow and area_ratio > nontarget_max_ratio:
                         accepted = False
-                        gate_reason = f"{cname}_area_explode={area_ratio:.2f} ({before_area}->{after_area}px)"
+                        gate_reason = (
+                            f"{cname}_area_explode={area_ratio:.2f} "
+                            f"({before_area}->{after_area}px, max={nontarget_max_ratio:.2f})"
+                        )
                         break
 
                 # Gate 3: Neighbor consistency — after the op, class area should
                 # not exceed 2x the neighbor's area (prevents over-filling)
                 # Exempt 'neighbor' ops because they explicitly copy from neighbor (so area will match)
-                if nb_areas.get(cid, 0) > 0 and not is_repair and not is_neighbor_op:
+                if (
+                    nb_areas.get(cid, 0) > 0
+                    and not is_repair
+                    and not is_neighbor_op
+                    and not is_forced_atlas
+                ):
                     if after_area > nb_areas[cid] * 2.0:
                         accepted = False
                         gate_reason = (

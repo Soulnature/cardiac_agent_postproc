@@ -145,6 +145,8 @@ agents:
     provider: "ollama"
     model: "ministral-3:14b"
     image_detail: "low"
+    vlm_n_refs: 2
+    vlm_ref_match_view: true
     quality_model:
       enabled: true
       path: "quality_model.pkl"

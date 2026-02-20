@@ -32,6 +32,6 @@ class LLMSettings:
                 pass
         self.llm_enabled = _read_bool(os.getenv("LLM_ENABLED"), False)
         self.openai_base_url = os.getenv("OPENAI_BASE_URL", self.openai_base_url)
-        self.openai_api_key = os.getenv("OPENAI_API_KEY", self.openai_api_key)
+        self.openai_api_key = os.getenv("AZURE_OPENAI_API_KEY", self.openai_api_key)
         self.openai_model = os.getenv("OPENAI_MODEL", self.openai_model)
         self.llm_provider = os.getenv("LLM_PROVIDER", self.llm_provider)

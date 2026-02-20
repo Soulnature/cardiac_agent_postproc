@@ -5,8 +5,6 @@ Combines rule-based feature analysis, VLM overlay inspection, and LLM
 reasoning to produce prioritized, spatially-aware diagnoses.
 """
 from __future__ import annotations
-
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -26,15 +24,15 @@ from .message_bus import CaseContext, MessageBus, MessageType
 ISSUE_OPS_MAP: Dict[str, List[str]] = {
     # Structural breaks (high severity)
     # Prefer topology_cleanup/bridge first, convex_hull only if severe
-    "broken_ring": ["neighbor_myo_repair", "morphological_gap_close", "myo_bridge", "topology_cleanup", "convex_hull_fill"],
-    "disconnected_myo": ["neighbor_myo_repair", "morphological_gap_close", "myo_bridge", "topology_cleanup", "convex_hull_fill"],
-    "fragmented_lv": ["lv_bridge", "safe_topology_fix", "topology_cleanup"],
-    "fragmented_rv": ["safe_topology_fix", "topology_cleanup"],
-    "touching": ["neighbor_myo_repair", "myo_bridge", "rv_erode"],
-    "rv_lv_touching": ["neighbor_myo_repair", "myo_bridge", "rv_erode"],
+    "broken_ring": ["neighbor_myo_repair", "morphological_gap_close", "myo_bridge_strong", "myo_bridge", "myo_bridge_mild", "topology_cleanup", "convex_hull_fill"],
+    "disconnected_myo": ["neighbor_myo_repair", "morphological_gap_close", "myo_bridge_strong", "myo_bridge", "myo_bridge_mild", "topology_cleanup", "convex_hull_fill"],
+    "fragmented_lv": ["atlas_rv_repair", "lv_split_to_rv", "lv_bridge_strong", "lv_bridge", "lv_bridge_mild", "safe_topology_fix", "topology_cleanup"],
+    "fragmented_rv": ["atlas_lv_repair", "rv_split_to_lv", "safe_topology_fix", "topology_cleanup"],
+    "touching": ["neighbor_myo_repair", "rv_lv_barrier_strong", "rv_lv_barrier", "rv_lv_barrier_mild", "myo_bridge", "rv_erode"],
+    "rv_lv_touching": ["neighbor_myo_repair", "rv_lv_barrier_strong", "rv_lv_barrier", "rv_lv_barrier_mild", "myo_bridge", "rv_erode"],
     # Boundary position errors (directional dilate/erode)
     "myo_too_thin": ["2_dilate", "close2_open3", "expand_myo_intensity"],
-    "myo_too_thick": ["smooth_morph", "2_erode"],
+    "myo_too_thick": ["2_erode_expand_lv", "2_erode", "smooth_morph", "2_erode_expand_rv"],
     "lv_too_large": ["3_erode_expand_myo", "3_erode", "smooth_morph"],
     "lv_too_small": ["3_dilate", "expand_lv_intensity"],
     "rv_too_large": ["1_erode_expand_myo", "rv_erode"],
@@ -43,7 +41,7 @@ ISSUE_OPS_MAP: Dict[str, List[str]] = {
     "boundary_error": ["3_erode", "3_dilate", "2_dilate", "2_erode"],
     # Holes and artifacts
     "holes": ["fill_holes", "fill_holes_m2", "morph_close_large", "safe_topology_fix", "expand_myo_intensity"],
-    "noise_island": ["topology_cleanup", "safe_topology_fix", "remove_islands"],
+    "noise_island": ["topology_cleanup_strong", "topology_cleanup_mild", "topology_cleanup", "safe_topology_fix", "remove_islands"],
     "valve_leak": ["valve_suppress", "safe_topology_fix"],
     "jagged_boundary": ["smooth_morph", "smooth_morph_k5", "smooth_contour"],
     "edge_misalignment": ["edge_snap_proxy", "smooth_contour", "smooth_morph"],
@@ -61,8 +59,8 @@ ISSUE_OPS_MAP: Dict[str, List[str]] = {
     "severe_misplacement": ["neighbor_rv_repair", "neighbor_lv_repair", "individual_atlas_transfer", "atlas_growprune_0"],
     "massive_missing": ["neighbor_rv_repair", "neighbor_myo_repair", "neighbor_lv_repair", "individual_atlas_transfer", "atlas_growprune_0"],
     # Semantic overrides for severe fragmentation
-    "missing_lv_fragments": ["neighbor_lv_repair", "atlas_growprune_0"],
-    "missing_rv_fragments": ["neighbor_rv_repair", "atlas_growprune_0"],
+    "missing_lv_fragments": ["atlas_rv_repair", "lv_split_to_rv", "neighbor_lv_repair", "atlas_growprune_0"],
+    "missing_rv_fragments": ["atlas_lv_repair", "rv_split_to_lv", "neighbor_rv_repair", "atlas_growprune_0"],
 }
 
 _CLASS_LABEL = {"rv": 1, "myo": 2, "lv": 3}
@@ -82,6 +80,60 @@ class SpatialDiagnosis:
     bbox: Optional[List[int]] = None  # [ymin, xmin, ymax, xmax] in pixels
 
 
+def normalize_direction_hint(direction: str, description: str = "") -> str:
+    """
+    Normalize free-form direction hints into canonical labels supported by the
+    pipeline: septal|lateral|apical|basal|left|right|global.
+    """
+    canonical = {"septal", "lateral", "apical", "basal", "left", "right", "global"}
+    raw = str(direction or "").strip().lower()
+    if raw in canonical:
+        return raw
+
+    text = f"{raw} {str(description or '').strip().lower()}"
+    for ch in (",", ";", ":", "/", "|", "-", "_", "(", ")", "[", "]", "{", "}"):
+        text = text.replace(ch, " ")
+    tokens = [tok for tok in text.split() if tok]
+
+    token_to_direction = {
+        "septal": "septal",
+        "septum": "septal",
+        "interventricular": "septal",
+        "medial": "septal",
+        "lateral": "lateral",
+        "freewall": "lateral",
+        "outer": "lateral",
+        "apical": "apical",
+        "apex": "apical",
+        "inferior": "apical",
+        "lower": "apical",
+        "bottom": "apical",
+        "caudal": "apical",
+        "basal": "basal",
+        "base": "basal",
+        "superior": "basal",
+        "upper": "basal",
+        "top": "basal",
+        "cranial": "basal",
+        "left": "left",
+        "right": "right",
+        "global": "global",
+        "whole": "global",
+        "entire": "global",
+        "all": "global",
+    }
+
+    for idx, tok in enumerate(tokens):
+        mapped = token_to_direction.get(tok)
+        if mapped:
+            return mapped
+        # Handle phrase "free wall".
+        if tok == "free" and idx + 1 < len(tokens) and tokens[idx + 1] == "wall":
+            return "lateral"
+
+    return "global"
+
+
 def compute_region_mask(
     mask: np.ndarray,
     affected_class: str,
@@ -92,6 +144,7 @@ def compute_region_mask(
     Uses LV centroid as the anatomical reference point.
     """
     H, W = mask.shape
+    direction = normalize_direction_hint(direction)
     region = np.ones((H, W), dtype=bool)
 
     if direction == "global":
@@ -150,7 +203,8 @@ class DiagnosisAgent(BaseAgent):
     def __init__(self, cfg: dict, bus: MessageBus):
         self._diagnosis_prompt = ""
         diag_cfg = cfg.get("diagnosis", {})
-        self._vlm_enabled = bool(diag_cfg.get("vlm_enabled", False))
+        # Keep a diagnosis-specific gate without shadowing BaseAgent._vlm_enabled().
+        self._diag_vlm_enabled = bool(diag_cfg.get("vlm_enabled", False))
         self._max_suggestions = int(diag_cfg.get("max_suggestions", 4))
         super().__init__(cfg, bus)
 
@@ -160,12 +214,7 @@ class DiagnosisAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        prompt_path = os.path.join("prompts", "diagnosis_system.txt")
-        if os.path.exists(prompt_path):
-            with open(prompt_path, "r") as f:
-                return f.read()
-
-        return (
+        fallback = (
             "You are the Diagnosis Agent in a cardiac MRI segmentation repair system.\n\n"
             "Your role is to identify specific defects in segmentation masks and suggest "
             "targeted, DIRECTIONAL repair operations.\n\n"
@@ -181,6 +230,7 @@ class DiagnosisAgent(BaseAgent):
             "For minor issues (rough edges, small thickness variations), suggest 'smooth_morph' or '1_dilate'.\n\n"
             "Per-class directional ops: \n"
             "   - Standard (3px): 2_dilate, 2_erode, 3_dilate, 3_erode, 1_dilate\n"
+            "   - Coupled: 2_erode_expand_lv, 2_erode_expand_rv, 3_erode_expand_myo, 1_erode_expand_myo\n"
             "   - RV: rv_erode, rv_erode_large (Use with CAUTION - only for obvious over-segmentation)\n"
             "Structural: convex_hull_fill (best for gaps - prefer over intensity), myo_bridge, lv_bridge, rv_lv_barrier.\n"
             "Atlas: atlas_growprune_0 (best for missing parts), atlas_growprune_1, individual_atlas_transfer.\n"
@@ -201,6 +251,7 @@ class DiagnosisAgent(BaseAgent):
             ']}\n'
             "IMPORTANT: For spatial defects (broken_ring, holes, extra blobs), YOU MUST PROVIDE 'bbox_2d' [ymin, xmin, ymax, xmax] (0-1000 scale). Missing bbox will cause repair failure."
         )
+        return self._prompt_with_fallback("diagnosis_system.txt", fallback)
 
     def process_case(self, ctx: CaseContext) -> None:
         """
@@ -221,7 +272,7 @@ class DiagnosisAgent(BaseAgent):
 
         # Step 2: VLM analysis (if enabled)
         vlm_diagnoses = []
-        if self._vlm_enabled and ctx.img_path:
+        if self._diag_vlm_enabled and self._vlm_enabled() and ctx.img_path:
             vlm_diagnoses = self._diagnose_vlm(ctx)
 
         # Step 3: LLM synthesis — combine all signals
@@ -268,38 +319,63 @@ class DiagnosisAgent(BaseAgent):
         )
 
         result = self.think_json(prompt)
-        llm_diagnoses = self._parse_llm_diagnoses(result)
-
-        # Merge: prefer LLM synthesis, but FORCE critical rule diagnoses if missing
+        llm_diagnoses = self._parse_llm_diagnoses(result, source="llm", img_shape=ctx.mask.shape)
+        # Merge: prefer LLM synthesis, but append critical/high-confidence rules
+        # that are truly missing. Keep LLM items at the front to avoid losing
+        # their spatial hints due max_suggestions truncation.
         if llm_diagnoses:
             final_diagnoses = list(llm_diagnoses)
-            # Check for critical/high severity rules that LLM might have missed
             existing_issues = {(d.issue, d.affected_class) for d in final_diagnoses}
             for rd in rule_diagnoses:
-                if rd.severity in ("critical", "high") or rd.issue in ("massive_missing", "severe_misplacement", "neighbor_rv_repair", "neighbor_lv_repair"):
+                if rd.severity in ("critical", "high") or rd.issue in (
+                    "massive_missing",
+                    "severe_misplacement",
+                    "neighbor_rv_repair",
+                    "neighbor_lv_repair",
+                ):
                     if (rd.issue, rd.affected_class) not in existing_issues:
-                        # Append critical rule diagnosis
-                        final_diagnoses.insert(0, rd) # Add to front!
+                        # Keep LLM first; add missing critical rules as fallback.
+                        final_diagnoses.append(rd)
                         existing_issues.add((rd.issue, rd.affected_class))
         else:
             final_diagnoses = rule_diagnoses
 
         final_diagnoses = final_diagnoses[:self._max_suggestions]
 
-        # Update context
-        ctx.diagnoses = [
-            {
-                "issue": d.issue,
-                "affected_class": d.affected_class,
-                "direction": d.direction,
-                "severity": d.severity,
-                "operation": d.operation,
-                "description": d.description,
-                "confidence": d.confidence,
-                "source": d.source,
-            }
-            for d in final_diagnoses
-        ]
+        # Update context.
+        # Preserve diagnosis bbox when available; otherwise infer a directional bbox
+        # so downstream executor can localize high-impact ops (e.g. atlas repair).
+        ctx.diagnoses = []
+        for d in final_diagnoses:
+            bbox = d.bbox
+            if bbox is None and str(d.direction).strip().lower() != "global":
+                bbox = self._infer_directional_bbox(
+                    ctx.mask, d.affected_class, d.direction
+                )
+            if bbox is None:
+                issue_lower = str(d.issue).strip().lower()
+                if issue_lower in {
+                    "fragmented_lv",
+                    "missing_lv_fragments",
+                    "fragmented_rv",
+                    "missing_rv_fragments",
+                }:
+                    bbox = self._infer_secondary_component_bbox(
+                        ctx.mask, d.affected_class
+                    )
+            ctx.diagnoses.append(
+                {
+                    "issue": d.issue,
+                    "affected_class": d.affected_class,
+                    "direction": d.direction,
+                    "severity": d.severity,
+                    "operation": d.operation,
+                    "description": d.description,
+                    "confidence": d.confidence,
+                    "source": d.source,
+                    "bbox": bbox,
+                }
+            )
 
         self.log(f"  → {len(final_diagnoses)} diagnoses: "
                  f"{[d.issue for d in final_diagnoses]}")
@@ -311,6 +387,88 @@ class DiagnosisAgent(BaseAgent):
             content={"diagnoses": ctx.diagnoses},
             case_id=ctx.case_id,
         )
+
+    @staticmethod
+    def _region_to_bbox(region: np.ndarray, margin: int = 12) -> Optional[List[int]]:
+        if region is None or not np.any(region):
+            return None
+        H, W = region.shape
+        rows = np.any(region, axis=1)
+        cols = np.any(region, axis=0)
+        if not np.any(rows) or not np.any(cols):
+            return None
+        ymin, ymax = np.where(rows)[0][[0, -1]]
+        xmin, xmax = np.where(cols)[0][[0, -1]]
+        ymin = max(0, int(ymin) - margin)
+        xmin = max(0, int(xmin) - margin)
+        ymax = min(H, int(ymax) + 1 + margin)
+        xmax = min(W, int(xmax) + 1 + margin)
+        if ymax <= ymin or xmax <= xmin:
+            return None
+        return [ymin, xmin, ymax, xmax]
+
+    @classmethod
+    def _infer_directional_bbox(
+        cls,
+        mask: np.ndarray,
+        affected_class: str,
+        direction: str,
+    ) -> Optional[List[int]]:
+        try:
+            region = compute_region_mask(mask, affected_class, direction)
+            # Tighten to neighborhood of affected structure when that class exists.
+            class_id = _CLASS_LABEL.get(str(affected_class).strip().lower())
+            if class_id is not None:
+                class_mask = (mask == class_id)
+                if np.any(class_mask):
+                    class_band = ndi.binary_dilation(class_mask, iterations=12)
+                    focused = region & class_band
+                    if int(np.count_nonzero(focused)) >= 16:
+                        region = focused
+            return cls._region_to_bbox(region, margin=16)
+        except Exception:
+            return None
+
+    @classmethod
+    def _infer_secondary_component_bbox(
+        cls,
+        mask: np.ndarray,
+        affected_class: str,
+    ) -> Optional[List[int]]:
+        """
+        For fragmented/missing-fragment diagnoses, localize the largest
+        non-primary connected component of the affected class.
+        """
+        try:
+            class_id = _CLASS_LABEL.get(str(affected_class).strip().lower())
+            if class_id is None:
+                return None
+
+            cls_mask = (mask == class_id)
+            if int(np.count_nonzero(cls_mask)) == 0:
+                return None
+
+            labeled, n_comp = ndi.label(cls_mask.astype(np.uint8))
+            if int(n_comp) <= 1:
+                return None
+
+            comps: List[tuple[int, int]] = []
+            for comp_id in range(1, int(n_comp) + 1):
+                size = int(np.count_nonzero(labeled == comp_id))
+                if size > 0:
+                    comps.append((size, comp_id))
+            if len(comps) <= 1:
+                return None
+
+            comps.sort(reverse=True)  # primary component first
+            _, sec_id = comps[1]  # largest secondary component
+            sec_region = (labeled == sec_id)
+            if int(np.count_nonzero(sec_region)) < 8:
+                return None
+
+            return cls._region_to_bbox(sec_region, margin=16)
+        except Exception:
+            return None
 
     def _diagnose_rules(
         self,
@@ -674,11 +832,8 @@ class DiagnosisAgent(BaseAgent):
             if not create_overlay(ctx.img_path, ctx.mask, overlay_path):
                 return []
 
-            prompt_path = os.path.join("prompts", "diagnosis_prompt.txt")
-            if os.path.exists(prompt_path):
-                with open(prompt_path, "r") as f:
-                    user_text = f.read()
-            else:
+            user_text = self._read_prompt_file("diagnosis_prompt.txt")
+            if not user_text:
                 user_text = (
                     f"Analyze this cardiac segmentation overlay for case {ctx.stem} "
                     f"(view: {ctx.view_type}). Identify defects."
@@ -707,13 +862,27 @@ class DiagnosisAgent(BaseAgent):
 
         for item in items:
             issue = str(item.get("issue", "unknown"))
-            affected_class = str(item.get("affected_class", "myo"))
-            direction = str(item.get("direction", "global"))
+            affected_class = str(item.get("affected_class", "myo")).strip().lower()
+            class_alias = {
+                "left ventricle": "lv",
+                "right ventricle": "rv",
+                "myocardium": "myo",
+                "left_ventricle": "lv",
+                "right_ventricle": "rv",
+            }
+            affected_class = class_alias.get(affected_class, affected_class)
+            if affected_class not in _CLASS_LABEL:
+                affected_class = "myo"
+
+            description = str(item.get("description", ""))
+            direction = normalize_direction_hint(
+                str(item.get("direction", "global")),
+                description=description,
+            )
             severity = str(item.get("severity", "medium")).lower()
             if severity not in ("critical", "high", "medium", "low"):
                 severity = "medium"
             operation = str(item.get("operation", ""))
-            description = str(item.get("description", ""))
             confidence = float(item.get("confidence", 0.7))
 
             bbox_2d = item.get("bbox_2d", None)
@@ -748,9 +917,26 @@ class DiagnosisAgent(BaseAgent):
                 "myo_gap": "broken_ring",
                 "myo_gap_septal_wall": "broken_ring",
                 "structural_break": "broken_ring",
+                "RV-LV direct contact": "rv_lv_touching",
+                "rv_lv_contact": "rv_lv_touching",
+                "lv_split": "fragmented_lv",
+                "rv_split": "fragmented_rv",
+                "lv_multi_component": "fragmented_lv",
+                "rv_multi_component": "fragmented_rv",
             }
             if issue in issue_map:
                 issue = issue_map[issue]
+            issue_map_lower = {
+                "lv split": "fragmented_lv",
+                "rv split": "fragmented_rv",
+                "lv multi component": "fragmented_lv",
+                "rv multi component": "fragmented_rv",
+                "multiple lv components": "fragmented_lv",
+                "multiple rv components": "fragmented_rv",
+            }
+            issue_lower = issue.lower().strip()
+            if issue_lower in issue_map_lower:
+                issue = issue_map_lower[issue_lower]
             # Also handle generic "gap" or "discontinuity" in issue string
             issue_lower = issue.lower()
             if "myo" in issue_lower:
@@ -759,12 +945,16 @@ class DiagnosisAgent(BaseAgent):
 
             # Semantic Override for Severe Fragmentation -> Missing
             # This forces the Planner to use Atlas as per the new "Missing = Atlas" rule
-            if issue in ("fragmented_lv", "fragmented_rv") and severity in ("high", "critical"):
-                issue = f"missing_{affected_class}_fragments"
+            if issue == "fragmented_lv" and severity in ("high", "critical"):
+                issue = "missing_lv_fragments"
                 severity = "critical"
-                # If op is not already valid/Atlas, force it.
-                if "atlas" not in operation:
-                    operation = "atlas_growprune_0"
+                if ("atlas" not in operation) and operation != "lv_split_to_rv":
+                    operation = "atlas_rv_repair"
+            elif issue == "fragmented_rv" and severity in ("high", "critical"):
+                issue = "missing_rv_fragments"
+                severity = "critical"
+                if ("atlas" not in operation) and operation != "rv_split_to_lv":
+                    operation = "atlas_lv_repair"
 
             # Validate operation is known
             if operation not in all_known_ops:

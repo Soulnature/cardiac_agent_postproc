@@ -145,6 +145,12 @@ agents:
   triage:
     model: "ministral-3:14b"
     image_detail: "low"
+    vlm_n_refs: 2
+    vlm_ref_match_view: true
+    vlm_good_prob_weight: 0.6
+    qm_good_prob_weight: 0.4
+    score_good_floor: 0.70
+    score_bad_ceiling: 0.45
     quality_model:
       enabled: true
       path: "quality_model.pkl"

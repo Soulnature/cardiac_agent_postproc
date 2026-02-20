@@ -6,11 +6,14 @@ few-shot references and text summaries for VLM-based quality judgment.
 """
 from __future__ import annotations
 
+import csv
 import os
 import re
 import random
+import hashlib
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -45,6 +48,7 @@ class VisualKnowledgeBase:
     """
     good_examples: List[VisualExample] = field(default_factory=list)
     bad_examples: List[VisualExample] = field(default_factory=list)
+    four_way_examples: Dict[str, List[VisualExample]] = field(default_factory=dict)
 
     # Index by issue type for targeted lookups
     _by_issue: Dict[str, List[VisualExample]] = field(
@@ -80,13 +84,165 @@ class VisualKnowledgeBase:
                         kb._by_issue[issue] = []
                     kb._by_issue[issue].append(ex)
 
+        # Normalize reference format for VLM triage:
+        # generate single-panel overlays (same style as runtime target overlay)
+        # from all_frames_export/{stem}_img.png + {stem}_pred.png when available.
+        kb._materialize_single_panel_references(results_dir)
+        kb._load_four_way_collections(results_dir)
+
         logger.info(
-            "VisualKnowledgeBase loaded: %d good, %d bad (%s)",
+            "VisualKnowledgeBase loaded: %d good, %d bad (%s); 4-way refs: %s",
             len(kb.good_examples),
             len(kb.bad_examples),
             ", ".join(f"{k}={len(v)}" for k, v in kb._by_issue.items()),
+            ", ".join(f"{k}={len(v)}" for k, v in sorted(kb.four_way_examples.items())) or "none",
         )
         return kb
+
+    @staticmethod
+    def _resolve_existing_path(path_value: str, results_dir: str) -> str:
+        """
+        Resolve a manifest path that may be absolute or workspace-relative.
+        Returns the first existing path candidate; otherwise returns cwd-relative.
+        """
+        raw = Path(path_value)
+        if raw.is_absolute():
+            return str(raw)
+
+        candidates = [
+            (Path.cwd() / raw),
+            (Path(results_dir) / raw),
+            (Path(results_dir).parent / raw),
+        ]
+        for cand in candidates:
+            if cand.exists():
+                return str(cand.resolve())
+        return str((Path.cwd() / raw).resolve())
+
+    def _load_four_way_collections(self, results_dir: str) -> None:
+        """
+        Load four-category reference pools from triage_4way_collections_gold manifest.
+
+        Expected manifest:
+          {results_dir}/triage_4way_collections_gold/triage_4way_manifest.csv
+        """
+        manifest_path = os.path.join(
+            results_dir, "triage_4way_collections_gold", "triage_4way_manifest.csv"
+        )
+        if not os.path.exists(manifest_path):
+            logger.info("VisualKnowledgeBase 4-way manifest missing: %s", manifest_path)
+            return
+
+        loaded = 0
+        seen = set()
+        try:
+            with open(manifest_path, "r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    category = (row.get("category") or "").strip()
+                    stem = (row.get("stem") or "").strip()
+                    overlay_rel = (
+                        (row.get("category_overlay_path") or "")
+                        or (row.get("overlay_path") or "")
+                    ).strip()
+                    if not category or not stem or not overlay_rel:
+                        continue
+
+                    overlay_path = self._resolve_existing_path(overlay_rel, results_dir)
+                    if not os.path.exists(overlay_path):
+                        continue
+
+                    dedup_key = (category, stem, overlay_path)
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+
+                    try:
+                        dice = float((row.get("mean_dice") or "0").strip())
+                    except ValueError:
+                        dice = 0.0
+
+                    ex = VisualExample(
+                        path=overlay_path,
+                        dice=dice,
+                        view=(row.get("view") or "").strip(),
+                        issue_type=(row.get("issue_type") or "").strip(),
+                        stem=stem,
+                        category=category,
+                    )
+                    self.four_way_examples.setdefault(category, []).append(ex)
+                    loaded += 1
+        except Exception as e:
+            logger.warning("Failed loading 4-way references from %s: %s", manifest_path, e)
+            return
+
+        for examples in self.four_way_examples.values():
+            examples.sort(key=lambda ex: ex.stem)
+        logger.info(
+            "VisualKnowledgeBase 4-way refs loaded: %d examples across %d categories",
+            loaded,
+            len(self.four_way_examples),
+        )
+
+    def _materialize_single_panel_references(self, results_dir: str) -> None:
+        """
+        Best-effort conversion of KB examples to single-panel overlays.
+
+        Source assumptions:
+          results_dir/
+            all_frames_export/{stem}_img.png
+            all_frames_export/{stem}_pred.png
+
+        If conversion fails for an example, keep the original path unchanged.
+        """
+        source_dir = os.path.join(results_dir, "all_frames_export")
+        if not os.path.isdir(source_dir):
+            logger.warning(
+                "VisualKnowledgeBase: source directory missing for single-panel refs: %s",
+                source_dir,
+            )
+            return
+
+        cache_dir = os.path.join(results_dir, "single_panel_refs")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # Local imports to avoid circular import issues at module load time.
+        import cv2
+        from ..vlm_guardrail import create_overlay
+
+        converted = 0
+        total = 0
+        for ex in self.good_examples + self.bad_examples:
+            total += 1
+            out_path = os.path.join(cache_dir, f"{ex.stem}_overlay.png")
+            if os.path.exists(out_path):
+                ex.path = out_path
+                converted += 1
+                continue
+
+            img_path = os.path.join(source_dir, f"{ex.stem}_img.png")
+            pred_path = os.path.join(source_dir, f"{ex.stem}_pred.png")
+            if not (os.path.exists(img_path) and os.path.exists(pred_path)):
+                continue
+
+            pred_mask = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
+            if pred_mask is None:
+                continue
+
+            try:
+                ok = create_overlay(img_path, pred_mask, out_path)
+            except Exception:
+                ok = False
+            if ok:
+                ex.path = out_path
+                converted += 1
+
+        logger.info(
+            "VisualKnowledgeBase single-panel refs: %d/%d ready (cache=%s)",
+            converted,
+            total,
+            cache_dir,
+        )
 
     @staticmethod
     def _parse_filename(
@@ -110,28 +266,163 @@ class VisualKnowledgeBase:
 
     def get_good_examples(self, n: int = 2) -> List[VisualExample]:
         """Return n representative good examples (random subset)."""
-        if len(self.good_examples) <= n:
-            return list(self.good_examples)
-        return random.sample(self.good_examples, n)
+        return self.get_good_examples_for_view(n=n)
+
+    @staticmethod
+    def _normalize_view(view: Optional[str]) -> str:
+        """Normalize raw view tags (e.g. 4c, 4ch, 4CH) to a canonical token."""
+        if not view:
+            return ""
+        token = re.sub(r"[^a-z0-9]", "", str(view).strip().lower())
+        if token in {"2c", "2ch"}:
+            return "2CH"
+        if token in {"3c", "3ch"}:
+            return "3CH"
+        if token in {"4c", "4ch"}:
+            return "4CH"
+        if "sax" in token:
+            return "SAX"
+        return token.upper()
+
+    @staticmethod
+    def _select_examples(
+        pool: List[VisualExample],
+        n: int,
+        seed: Optional[str],
+        salt: str,
+    ) -> List[VisualExample]:
+        """Sample examples. Deterministic when seed is provided."""
+        if len(pool) <= n:
+            return list(pool)
+        if seed is None:
+            return random.sample(pool, n)
+
+        ranked = sorted(
+            pool,
+            key=lambda ex: hashlib.sha256(
+                f"{seed}|{salt}|{ex.stem}|{ex.path}".encode("utf-8")
+            ).hexdigest(),
+        )
+        return ranked[:n]
+
+    def get_good_examples_for_view(
+        self,
+        n: int = 2,
+        view_type: Optional[str] = None,
+        seed: Optional[str] = None,
+    ) -> List[VisualExample]:
+        """Return n good examples; prefer same-view examples when available."""
+        pool = list(self.good_examples)
+        if view_type:
+            wanted = self._normalize_view(view_type)
+            same_view = [
+                ex for ex in pool if self._normalize_view(ex.view) == wanted
+            ]
+            if same_view:
+                primary = self._select_examples(
+                    same_view,
+                    min(n, len(same_view)),
+                    seed,
+                    salt=f"good:primary:{wanted}",
+                )
+                if len(primary) >= n:
+                    return primary[:n]
+
+                seen = {ex.path for ex in primary}
+                fallback_pool = [ex for ex in pool if ex.path not in seen]
+                fallback = self._select_examples(
+                    fallback_pool,
+                    n - len(primary),
+                    seed,
+                    salt=f"good:fallback:{wanted}",
+                )
+                return primary + fallback
+        return self._select_examples(pool, n, seed, salt=f"good:{view_type or ''}")
 
     def get_bad_examples(
-        self, n: int = 2, issue_type: Optional[str] = None
+        self,
+        n: int = 2,
+        issue_type: Optional[str] = None,
+        view_type: Optional[str] = None,
+        seed: Optional[str] = None,
     ) -> List[VisualExample]:
-        """Return n bad examples, optionally filtered by issue type."""
+        """Return n bad examples, optionally filtered by issue type/view."""
         pool = (
             self._by_issue.get(issue_type, self.bad_examples)
             if issue_type
             else self.bad_examples
         )
-        if len(pool) <= n:
-            return list(pool)
-        return random.sample(pool, n)
+        pool = list(pool)
+        if view_type:
+            wanted = self._normalize_view(view_type)
+            same_view = [
+                ex for ex in pool if self._normalize_view(ex.view) == wanted
+            ]
+            if same_view:
+                primary = self._select_examples(
+                    same_view,
+                    min(n, len(same_view)),
+                    seed,
+                    salt=f"bad:primary:{issue_type or ''}:{wanted}",
+                )
+                if len(primary) >= n:
+                    return primary[:n]
+
+                seen = {ex.path for ex in primary}
+                fallback_pool = [ex for ex in pool if ex.path not in seen]
+                fallback = self._select_examples(
+                    fallback_pool,
+                    n - len(primary),
+                    seed,
+                    salt=f"bad:fallback:{issue_type or ''}:{wanted}",
+                )
+                return primary + fallback
+        return self._select_examples(pool, n, seed, salt=f"bad:{issue_type or ''}:{view_type or ''}")
 
     def get_few_shot_set(
-        self, n_good: int = 2, n_bad: int = 2
+        self,
+        n_good: int = 2,
+        n_bad: int = 2,
+        view_type: Optional[str] = None,
+        seed: Optional[str] = None,
     ) -> Tuple[List[VisualExample], List[VisualExample]]:
         """Return a balanced set of good and bad examples for VLM few-shot."""
-        return self.get_good_examples(n_good), self.get_bad_examples(n_bad)
+        return (
+            self.get_good_examples_for_view(n=n_good, view_type=view_type, seed=seed),
+            self.get_bad_examples(n=n_bad, view_type=view_type, seed=seed),
+        )
+
+    def get_four_way_set(
+        self,
+        categories: List[str],
+        view_type: Optional[str] = None,
+        seed: Optional[str] = None,
+    ) -> List[VisualExample]:
+        """
+        Return exactly one reference per requested category when possible.
+        If view_type is set, prefer same-view references; otherwise fallback to any.
+        """
+        refs: List[VisualExample] = []
+        wanted = self._normalize_view(view_type) if view_type else ""
+        for category in categories:
+            pool = list(self.four_way_examples.get(category, []))
+            if not pool:
+                continue
+
+            selected_pool = pool
+            salt = f"four_way:{category}:any"
+            if wanted:
+                same_view = [
+                    ex for ex in pool if self._normalize_view(ex.view) == wanted
+                ]
+                if same_view:
+                    selected_pool = same_view
+                    salt = f"four_way:{category}:primary:{wanted}"
+                else:
+                    salt = f"four_way:{category}:fallback:{wanted}"
+
+            refs.extend(self._select_examples(selected_pool, 1, seed, salt=salt))
+        return refs
 
     @property
     def issue_types(self) -> List[str]:
@@ -162,6 +453,7 @@ class VisualKnowledgeBase:
             f"(Dice {good_range}) and "
             f"{len(self.bad_examples)} bad cases "
             f"(Dice {bad_range}).",
+            "Reference format: single-panel segmentation overlays (no GT/error-map panels at inference time).",
             "",
             "### Good Segmentation Characteristics",
             "- Myocardium (green/yellow): forms a COMPLETE, CLOSED ring around LV",
@@ -169,26 +461,24 @@ class VisualKnowledgeBase:
             "- RV (red/cyan): located adjacent to septum, separated from LV by Myo",
             "- All three structures present, no fragmentation",
             "- Boundaries are smooth and follow anatomical contours",
-            "- Error overlay shows minimal colored regions",
             "",
             "### Bad: Disconnected Myocardium (DiscMyo)",
             "- Myo ring has a visible GAP — usually at the septal or lateral wall",
             "- RV and LV may directly touch through the gap",
-            "- Error map shows class confusion (yellow) and false negatives (blue) at gap",
             f"- {len(self._by_issue.get('DiscMyo', []))} examples, "
             f"Dice range: {self._dice_range('DiscMyo')}",
             "",
             "### Bad: Low Overall Dice (LowDice)",
             "- Structures poorly positioned, wrong shape, or missing regions",
             "- May have fragmented components or entirely wrong boundaries",
-            "- Large red (false positive) and blue (false negative) error regions",
             f"- {len(self._by_issue.get('LowDice', []))} examples, "
             f"Dice range: {self._dice_range('LowDice')}",
             "",
             "### Decision Boundary",
-            "- Good: Dice ≥ 0.95, complete Myo ring, all structures present",
-            "- Bad: Dice < 0.90, OR broken Myo ring, OR missing structure",
-            "- Borderline (0.90–0.95): needs careful visual inspection",
+            "- Morphology-first judgment (do not infer exact Dice value from appearance).",
+            "- Good: complete/closed Myo ring, RV-LV separation, required structures present; minor roughness allowed.",
+            "- Bad: obvious Myo gap, RV-LV merge, missing structure, or severe fragmentation.",
+            "- Borderline: localized moderate defects without gross anatomical collapse.",
         ]
         return "\n".join(lines)
 
@@ -319,4 +609,3 @@ class RepairComparisonKB:
             "- NEUTRAL: very small or meaningless changes",
         ]
         return "\n".join(lines)
-

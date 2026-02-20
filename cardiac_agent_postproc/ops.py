@@ -356,6 +356,92 @@ def erode_rv_expand_myo_conditional(mask: np.ndarray, cfg: dict) -> np.ndarray:
     M3 = (mask == 3)
     return _merge(M1n, M2n, M3)
 
+
+def erode_myo_expand_lv(mask: np.ndarray, cfg: dict) -> np.ndarray:
+    """
+    Erode Myocardium (class 2), and reassign vacated pixels to LV (class 3)
+    if they are adjacent to LV. This preserves LV-Myo coupling and avoids
+    turning boundary-adjustment pixels into background by default.
+    """
+    M2 = (mask == 2).astype(np.uint8)
+    if np.count_nonzero(M2) == 0:
+        return mask.copy()
+
+    M3 = (mask == 3).astype(np.uint8)
+    if np.count_nonzero(M3) == 0:
+        # Coupling target absent; fallback to standard myo erosion.
+        return dilate_or_erode(mask, cfg, 2, "erode")
+
+    k = 3
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    global_iters = int(cfg["ops"].get("erosion_iterations", 1))
+    iters = max(2, global_iters)
+
+    pre_count = np.count_nonzero(M2)
+    M2n = cv2.erode(M2, ker, iterations=iters) > 0
+    post_count = np.count_nonzero(M2n)
+
+    loss_ratio = (pre_count - post_count) / max(1, pre_count)
+    max_loss = float(cfg["ops"].get("max_erosion_loss", 0.3))
+    if loss_ratio > max_loss:
+        if iters > 1:
+            M2n = cv2.erode(M2, ker, iterations=1) > 0
+            post_count = np.count_nonzero(M2n)
+            loss_ratio = (pre_count - post_count) / max(1, pre_count)
+        if loss_ratio > max_loss:
+            return mask.copy()
+
+    vacated = (M2 > 0) & (~M2n)
+    M3_neighbor = cv2.dilate(M3, ker, iterations=1) > 0
+    new_lv_pixels = vacated & M3_neighbor
+
+    M1 = (mask == 1)
+    M3n = (M3 > 0) | new_lv_pixels
+    return _merge(M1, M2n, M3n)
+
+
+def erode_myo_expand_rv(mask: np.ndarray, cfg: dict) -> np.ndarray:
+    """
+    Erode Myocardium (class 2), and reassign vacated pixels to RV (class 1)
+    if they are adjacent to RV. Useful for septal-side thick-Myocardium cases.
+    """
+    M2 = (mask == 2).astype(np.uint8)
+    if np.count_nonzero(M2) == 0:
+        return mask.copy()
+
+    M1 = (mask == 1).astype(np.uint8)
+    if np.count_nonzero(M1) == 0:
+        # Coupling target absent; fallback to standard myo erosion.
+        return dilate_or_erode(mask, cfg, 2, "erode")
+
+    k = 3
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    global_iters = int(cfg["ops"].get("erosion_iterations", 1))
+    iters = max(2, global_iters)
+
+    pre_count = np.count_nonzero(M2)
+    M2n = cv2.erode(M2, ker, iterations=iters) > 0
+    post_count = np.count_nonzero(M2n)
+
+    loss_ratio = (pre_count - post_count) / max(1, pre_count)
+    max_loss = float(cfg["ops"].get("max_erosion_loss", 0.3))
+    if loss_ratio > max_loss:
+        if iters > 1:
+            M2n = cv2.erode(M2, ker, iterations=1) > 0
+            post_count = np.count_nonzero(M2n)
+            loss_ratio = (pre_count - post_count) / max(1, pre_count)
+        if loss_ratio > max_loss:
+            return mask.copy()
+
+    vacated = (M2 > 0) & (~M2n)
+    M1_neighbor = cv2.dilate(M1, ker, iterations=1) > 0
+    new_rv_pixels = vacated & M1_neighbor
+
+    M3 = (mask == 3)
+    M1n = (M1 > 0) | new_rv_pixels
+    return _merge(M1n, M2n, M3)
+
+
 def valve_suppress(mask: np.ndarray, valve_y: int|None, cfg: dict) -> np.ndarray:
     if valve_y is None:
         return mask.copy()
@@ -483,37 +569,88 @@ def atlas_class_repair(mask: np.ndarray, view_type: str, atlas: dict,
             for c in [1, 2, 3]}
 
     Ptarget = Pimg[target_class]
+    Pbg = np.clip(1.0 - (Pimg[1] + Pimg[2] + Pimg[3]), 0.0, 1.0)
     out = mask.copy()
 
-    # --- Phase 1: Grow target_class into background or low-confidence regions ---
-    # Where Atlas says target_class should be with high confidence
-    grow_region = Ptarget > 0.5
-    # Only modify pixels that are currently background (0) or a class with
-    # LOWER Atlas probability than target_class
-    yy, xx = np.nonzero(grow_region)
-    for y, x in zip(yy, xx):
-        cur = int(out[y, x])
-        if cur == target_class:
-            continue  # already correct
-        # Current pixel's atlas probability
-        if cur == 0:
-            cur_prob = 0.0
-        else:
-            cur_prob = float(Pimg[cur][y, x])
-        # Only replace if target has significantly higher probability
-        if float(Ptarget[y, x]) > cur_prob + 0.15:
-            out[y, x] = target_class
+    # RV-specific anatomical policy:
+    # 1) Repair problematic RV regions using atlas RV,
+    # 2) Preserve septal Myo (between RV and LV),
+    # 3) Class-only replacement: only update RV label decisions.
+    if target_class == 1:
+        rv0 = (mask == 1)
+        lv0 = (mask == 3)
+        myo0 = (mask == 2)
 
-    # --- Phase 2: Prune target_class from impossible regions ---
-    # Where current mask has target_class but Atlas says it shouldn't be there
-    prune_region = (out == target_class) & (Ptarget < 0.05)
-    if np.any(prune_region):
-        Pbg = 1.0 - (Pimg[1] + Pimg[2] + Pimg[3])
-        yy, xx = np.nonzero(prune_region)
+        # Septal Myo keep-zone: Myo close to both RV and LV.
+        if np.any(rv0) and np.any(lv0):
+            d_rv = ndi.distance_transform_edt(~rv0)
+            d_lv = ndi.distance_transform_edt(~lv0)
+            septal_keep = myo0 & (d_rv <= 4.0) & (d_lv <= 4.0)
+            septal_keep = ndi.binary_dilation(septal_keep, iterations=1) & myo0
+        else:
+            septal_keep = np.zeros_like(myo0, dtype=bool)
+
+        atlas_core = Ptarget > 0.65
+        atlas_support = Ptarget > 0.50
+
+        # "Problematic RV region" = atlas-supported RV zone + neighborhood of current RV.
+        if np.any(rv0):
+            rv_band = ndi.binary_dilation(rv0, iterations=3)
+            candidate_region = atlas_support | rv_band
+        else:
+            candidate_region = atlas_support
+
+        yy, xx = np.nonzero(candidate_region)
         for y, x in zip(yy, xx):
-            probs = [float(Pbg[y, x]), float(Pimg[1][y, x]),
-                     float(Pimg[2][y, x]), float(Pimg[3][y, x])]
-            out[y, x] = int(np.argmax(probs))
+            cur = int(out[y, x])
+            if cur == 3:
+                # Allow RV↔LV relabeling only when atlas RV evidence is clearly higher.
+                # This is needed for diagnosis-guided local correction where pixels may
+                # currently be mislabeled as LV in the target repair zone.
+                p_rv = float(Ptarget[y, x])
+                p_lv = float(Pimg[3][y, x])
+                if p_rv <= p_lv + 0.22:
+                    continue
+            if cur == 2 and septal_keep[y, x]:
+                # Keep Myo only where it separates RV and LV.
+                continue
+            if not atlas_support[y, x]:
+                continue
+
+            cur_prob = 0.0 if cur == 0 else float(Pimg[cur][y, x])
+            margin = 0.10 if cur == 0 else 0.18
+            if atlas_core[y, x]:
+                margin = max(0.05, margin - 0.05)
+            if float(Ptarget[y, x]) > cur_prob + margin:
+                out[y, x] = 1
+
+        # Class-only prune: only revert newly-added RV pixels with very low support.
+        # Do not relabel other classes by argmax here.
+        new_rv = (out == 1) & (mask != 1)
+        prune_region = new_rv & (Ptarget < 0.06)
+        if np.any(prune_region):
+            yy, xx = np.nonzero(prune_region)
+            for y, x in zip(yy, xx):
+                out[y, x] = int(mask[y, x])
+    else:
+        # Generic class-specific atlas repair for Myo/LV.
+        grow_region = Ptarget > 0.5
+        yy, xx = np.nonzero(grow_region)
+        for y, x in zip(yy, xx):
+            cur = int(out[y, x])
+            if cur == target_class:
+                continue
+            cur_prob = 0.0 if cur == 0 else float(Pimg[cur][y, x])
+            if float(Ptarget[y, x]) > cur_prob + 0.15:
+                out[y, x] = target_class
+
+        prune_region = (out == target_class) & (Ptarget < 0.05)
+        if np.any(prune_region):
+            yy, xx = np.nonzero(prune_region)
+            for y, x in zip(yy, xx):
+                probs = [float(Pbg[y, x]), float(Pimg[1][y, x]),
+                         float(Pimg[2][y, x]), float(Pimg[3][y, x])]
+                out[y, x] = int(np.argmax(probs))
 
     changed = int(np.sum(out != mask))
     if changed == 0:
@@ -776,6 +913,126 @@ def lv_bridge(mask: np.ndarray) -> np.ndarray:
     return out
 
 
+def _normalize_bbox(
+    bbox: List[int] | Tuple[int, int, int, int] | None,
+    h: int,
+    w: int,
+) -> List[int] | None:
+    if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+        return None
+    try:
+        ymin, xmin, ymax, xmax = [int(v) for v in bbox]
+    except Exception:
+        return None
+    ymin = max(0, min(ymin, h))
+    xmin = max(0, min(xmin, w))
+    ymax = max(0, min(ymax, h))
+    xmax = max(0, min(xmax, w))
+    if ymax <= ymin or xmax <= xmin:
+        return None
+    return [ymin, xmin, ymax, xmax]
+
+
+def _reassign_secondary_components(
+    mask: np.ndarray,
+    source_class: int,
+    target_class: int,
+    bbox: List[int] | Tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """
+    Deterministic relabel rule:
+    - if bbox hint is provided, relabel the source-class component selected by bbox;
+    - otherwise, relabel all non-primary (secondary) source-class components.
+    """
+    src = (mask == source_class).astype(np.uint8)
+    labeled, num = ndi.label(src)
+    if num <= 1:
+        return mask.copy()
+
+    sizes = ndi.sum(src, labeled, range(num + 1))
+    keep_lab = int(np.argmax(sizes[1:]) + 1)
+
+    h, w = mask.shape
+    bbox_norm = _normalize_bbox(bbox, h, w)
+    target_lab: int | None = None
+    if bbox_norm is not None:
+        ymin, xmin, ymax, xmax = bbox_norm
+
+        # Prefer component with maximal overlap to hint bbox.
+        best_overlap = 0
+        for lab_id in range(1, num + 1):
+            comp = (labeled == lab_id)
+            overlap = int(np.count_nonzero(comp[ymin:ymax, xmin:xmax]))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                target_lab = int(lab_id)
+
+        # Fallback: nearest component centroid to hint bbox center.
+        if target_lab is None:
+            cy = 0.5 * (ymin + ymax - 1)
+            cx = 0.5 * (xmin + xmax - 1)
+            best_key = None
+            for lab_id in range(1, num + 1):
+                ys, xs = np.where(labeled == lab_id)
+                if ys.size == 0:
+                    continue
+                dy = float(np.mean(ys)) - cy
+                dx = float(np.mean(xs)) - cx
+                dist2 = dy * dy + dx * dx
+                # Tie-break by larger component to stabilize behavior.
+                key = (dist2, -float(sizes[lab_id]), int(lab_id))
+                if best_key is None or key < best_key:
+                    best_key = key
+            if best_key is not None:
+                target_lab = int(best_key[2])
+
+    out = mask.copy()
+    if target_lab is not None:
+        selected = (labeled == target_lab)
+        if np.any(selected):
+            out[selected] = int(target_class)
+        return out
+
+    secondary = (labeled > 0) & (labeled != keep_lab)
+    if np.any(secondary):
+        out[secondary] = int(target_class)
+    return out
+
+
+def reassign_secondary_lv_to_rv(
+    mask: np.ndarray,
+    bbox: List[int] | Tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """
+    Hard rule: relabel LV component to RV.
+    If bbox is provided, select component by bbox hint; otherwise relabel all
+    non-primary LV components.
+    """
+    return _reassign_secondary_components(
+        mask,
+        source_class=3,
+        target_class=1,
+        bbox=bbox,
+    )
+
+
+def reassign_secondary_rv_to_lv(
+    mask: np.ndarray,
+    bbox: List[int] | Tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """
+    Hard rule: relabel RV component to LV.
+    If bbox is provided, select component by bbox hint; otherwise relabel all
+    non-primary RV components.
+    """
+    return _reassign_secondary_components(
+        mask,
+        source_class=1,
+        target_class=3,
+        bbox=bbox,
+    )
+
+
 def generate_candidates(mask: np.ndarray,
                         pred0: np.ndarray,
                         img: np.ndarray,
@@ -859,6 +1116,8 @@ def generate_candidates(mask: np.ndarray,
     # Targeted bridge operations for disconnected structures
     cands.append(("myo_bridge", myo_bridge(mask)))
     cands.append(("lv_bridge", lv_bridge(mask)))
+    cands.append(("lv_split_to_rv", reassign_secondary_lv_to_rv(mask)))
+    cands.append(("rv_split_to_lv", reassign_secondary_rv_to_lv(mask)))
     cands.append(("convex_hull_fill", convex_hull_fill(mask)))
 
     return cands
