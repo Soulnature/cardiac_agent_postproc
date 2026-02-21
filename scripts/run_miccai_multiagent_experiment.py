@@ -1379,6 +1379,12 @@ def _reset_case_for_repair(ctx: Any, repair_debug_dir: Path) -> None:
     ctx.verified = False
     ctx.verifier_approved = False
     ctx.verifier_feedback = ""
+    ctx.last_verify_result = {}
+    ctx.executor_high_risk_unlock = False
+    ctx.executor_high_risk_unlock_reason = ""
+    ctx.executor_candidate_search_used = False
+    ctx.executor_candidate_search_pick = ""
+    ctx.executor_candidate_search_score = 0.0
     baseline = ctx.original_mask if ctx.original_mask is not None else ctx.mask
     ctx.best_intermediate_mask = baseline.copy() if baseline is not None else None
     ctx.best_intermediate_score = 0.0
@@ -1507,6 +1513,9 @@ def _run_repair_stage(
             ),
         }
 
+        last_verify = getattr(ctx, "last_verify_result", {}) or {}
+        last_cmp = last_verify.get("vlm_comparison", {}) or {}
+        last_proxy = last_verify.get("proxy_consensus", {}) or {}
         row = {
             "Stem": ctx.stem,
             "FinalVerdict": verdict,
@@ -1541,6 +1550,30 @@ def _run_repair_stage(
             "OpsCount": len(ctx.applied_ops),
             "AppliedOps": json.dumps([op.get("name", "") for op in ctx.applied_ops], ensure_ascii=False),
             "RoundsCompleted": int(getattr(ctx, "rounds_completed", 0)),
+            "VerifyVerdict_Raw": str(last_verify.get("verdict", "")),
+            "VerifyConfidence_Raw": _safe_float(last_verify.get("confidence", float("nan"))),
+            "VerifyCompareVerdict": str(last_cmp.get("verdict", "")),
+            "VerifyCompareConfidence": _safe_float(last_cmp.get("confidence", float("nan"))),
+            "VerifyCompareReference": str(last_verify.get("comparison_reference", "")),
+            "VerifyProxyVerdict": str(last_proxy.get("proxy_verdict", "")),
+            "VerifyProxyScore": _safe_float(last_proxy.get("proxy_score", float("nan"))),
+            "VerifyProxyConfidence": _safe_float(last_proxy.get("proxy_confidence", float("nan"))),
+            "VerifyConsensusScore": _safe_float(last_proxy.get("consensus_score", float("nan"))),
+            "VerifyConsensusVerdict": str(last_proxy.get("consensus_verdict", "")),
+            "VerifyUnlockApplied": bool(last_proxy.get("unlock_applied", False)),
+            "ExecHighRiskUnlock": bool(getattr(ctx, "executor_high_risk_unlock", False)),
+            "ExecHighRiskUnlockReason": str(
+                getattr(ctx, "executor_high_risk_unlock_reason", "")
+            ),
+            "ExecCandidateSearchUsed": bool(
+                getattr(ctx, "executor_candidate_search_used", False)
+            ),
+            "ExecCandidateSearchPick": str(
+                getattr(ctx, "executor_candidate_search_pick", "")
+            ),
+            "ExecCandidateSearchScore": _safe_float(
+                getattr(ctx, "executor_candidate_search_score", float("nan"))
+            ),
             "PreDice_Mean": pre["Dice_Mean"],
             "PreDice_RV": pre["Dice_RV"],
             "PreDice_Myo": pre["Dice_Myo"],

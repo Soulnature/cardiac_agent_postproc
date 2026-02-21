@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -32,7 +32,7 @@ from ..rqs import compute_rqs, sobel_edges, valve_plane_y
 from ..slice_consistency import (
     neighbor_centroid_align, neighbor_shape_prior, neighbor_area_consistency,
 )
-from ..vlm_guardrail import create_overlay
+from ..vlm_guardrail import create_overlay, create_diff_overlay
 from .base_agent import BaseAgent
 from .message_bus import CaseContext, MessageBus, MessageType
 from .diagnosis_agent import compute_region_mask, normalize_direction_hint
@@ -56,6 +56,16 @@ HIGH_IMPACT_OPS = {
     "atlas_myo_repair",
     "atlas_lv_repair",
 }
+HIGH_RISK_ISSUE_TOKENS = (
+    "missing",
+    "massive",
+    "severe",
+    "fragment",
+    "disconnect",
+    "broken",
+    "touch",
+    "leak",
+)
 
 
 def _is_high_impact_op(op_name: str) -> bool:
@@ -370,6 +380,184 @@ class ExecutorAgent(BaseAgent):
         )
         return self._prompt_with_fallback("executor_system.txt", fallback)
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _is_high_risk_case(self, ctx: CaseContext, ex_cfg: Dict[str, Any]) -> tuple[bool, str]:
+        triage_score = self._safe_float(getattr(ctx, "triage_score", 0.0), 0.0)
+        triage_bad_prob = self._safe_float(
+            getattr(ctx, "triage_bad_prob", 1.0 - triage_score),
+            1.0 - triage_score,
+        )
+        score_th = float(ex_cfg.get("high_risk_unlock_score_threshold", 0.62))
+        bad_prob_th = float(ex_cfg.get("high_risk_unlock_bad_prob_threshold", 0.80))
+        issue_hit = any(
+            any(tok in str(issue).lower() for tok in HIGH_RISK_ISSUE_TOKENS)
+            for issue in (ctx.triage_issues or [])
+        )
+        if triage_score <= score_th:
+            return True, f"triage_score={triage_score:.3f}<=th={score_th:.3f}"
+        if triage_bad_prob >= bad_prob_th:
+            return True, f"triage_bad_prob={triage_bad_prob:.3f}>=th={bad_prob_th:.3f}"
+        if issue_hit:
+            return True, "triage_issues_high_risk_token_hit"
+        return False, ""
+
+    @staticmethod
+    def _diff_proxy_stats(before_mask: np.ndarray, after_mask: np.ndarray) -> Dict[str, int]:
+        fg_before = before_mask > 0
+        fg_after = after_mask > 0
+        added = int(np.count_nonzero((~fg_before) & fg_after))
+        removed = int(np.count_nonzero(fg_before & (~fg_after)))
+        changed = int(np.count_nonzero(fg_before & fg_after & (before_mask != after_mask)))
+        return {"added": added, "removed": removed, "changed": changed}
+
+    def _score_candidate_proxy(
+        self,
+        before_mask: np.ndarray,
+        after_mask: np.ndarray,
+        max_change_ratio: float,
+    ) -> float:
+        stats = self._diff_proxy_stats(before_mask, after_mask)
+        total = max(1, stats["added"] + stats["removed"] + stats["changed"])
+        net = stats["added"] - stats["removed"]
+        change_ratio = float(np.count_nonzero(after_mask != before_mask)) / float(
+            max(1, before_mask.size)
+        )
+        net_ratio = float(net) / float(total)
+        churn_ratio = float(stats["changed"]) / float(total)
+        overshoot_penalty = max(0.0, change_ratio - max_change_ratio) * 3.0
+        return float(net_ratio - 0.25 * churn_ratio - overshoot_penalty)
+
+    def _select_candidate_fallback(
+        self,
+        ctx: CaseContext,
+        before_mask: np.ndarray,
+        op_fns: Dict[str, Any],
+        ex_cfg: Dict[str, Any],
+        edge_map: np.ndarray,
+        valve_y: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        if ctx.image is None:
+            return None
+        max_candidates = int(ex_cfg.get("candidate_search_max_candidates", 12))
+        topk_vlm = int(ex_cfg.get("candidate_search_topk_vlm", 3))
+        max_change_ratio = float(ex_cfg.get("candidate_search_max_change_ratio", 0.14))
+        accept_score = float(ex_cfg.get("candidate_search_accept_score", 0.10))
+        proxy_weight = float(ex_cfg.get("candidate_search_proxy_weight", 0.65))
+        vlm_weight = float(ex_cfg.get("candidate_search_vlm_weight", 1.00))
+
+        z_norm = None
+        try:
+            z_raw = float(getattr(ctx, "slice_index", -1))
+            if z_raw >= 0:
+                z_norm = max(0.0, min(1.0, z_raw / 64.0))
+        except Exception:
+            z_norm = None
+
+        try:
+            raw_candidates = generate_candidates(
+                before_mask,
+                ctx.original_mask if ctx.original_mask is not None else before_mask,
+                ctx.image,
+                ctx.view_type,
+                edge_map,
+                valve_y,
+                self._atlas,
+                self.cfg,
+                z_norm=z_norm,
+            )
+        except Exception as e:
+            self.log(f"  [CandidateSearch] generate_candidates failed: {e}")
+            return None
+
+        if not raw_candidates:
+            return None
+
+        affected_class = "myo"
+        direction = "global"
+        if ctx.diagnoses:
+            affected_class = str(ctx.diagnoses[0].get("affected_class", "myo"))
+            direction = normalize_direction_hint(str(ctx.diagnoses[0].get("direction", "global")))
+
+        preselected: List[Tuple[str, np.ndarray, float]] = []
+        for cand_name, cand_mask in raw_candidates:
+            if cand_name == "current":
+                continue
+            if cand_name not in op_fns and not cand_name.startswith("atlas_growprune_"):
+                continue
+            if cand_mask is None or not is_valid_candidate(cand_mask):
+                continue
+            px_changed = int(np.count_nonzero(cand_mask != before_mask))
+            if px_changed <= 0:
+                continue
+            change_ratio = float(px_changed) / float(max(1, before_mask.size))
+            if change_ratio > max_change_ratio:
+                continue
+            gate_ok, _, _ = self._run_hard_anatomy_gates(
+                before_mask=before_mask,
+                after_mask=cand_mask,
+                op_name=cand_name,
+                affected_class=affected_class,
+                direction=direction,
+                view_type=ctx.view_type,
+                neighbor_masks=ctx.neighbor_masks,
+                valve_y=valve_y,
+                ex_cfg=ex_cfg,
+            )
+            if not gate_ok:
+                continue
+            proxy_score = self._score_candidate_proxy(before_mask, cand_mask, max_change_ratio)
+            preselected.append((cand_name, cand_mask, proxy_score))
+
+        if not preselected:
+            return None
+
+        preselected = sorted(preselected, key=lambda x: x[2], reverse=True)[: max(1, max_candidates)]
+        best_pick: Optional[Dict[str, Any]] = None
+        for rank, (cand_name, cand_mask, proxy_score) in enumerate(preselected):
+            vlm_vote = 0.0
+            vlm_verdict = "neutral"
+            vlm_conf = 0.0
+            if rank < max(1, topk_vlm) and ctx.img_path and self.visual_kb:
+                try:
+                    diff_path = ctx.debug_img_path(f"_candidate_{rank}_{cand_name}_diff.png")
+                    diff_stats: Dict[str, int] = {}
+                    if create_diff_overlay(
+                        ctx.img_path, before_mask, cand_mask, diff_path, stats=diff_stats
+                    ):
+                        cmp = self.judge_repair_comparison(diff_path, applied_ops=[cand_name])
+                        vlm_verdict = str(cmp.get("verdict", "neutral")).lower()
+                        vlm_conf = self._safe_float(cmp.get("confidence", 0.0), 0.0)
+                        if vlm_verdict == "improved":
+                            vlm_vote = max(0.25, vlm_conf)
+                        elif vlm_verdict in ("degraded", "worse"):
+                            vlm_vote = -max(0.25, vlm_conf)
+                except Exception:
+                    pass
+
+            final_score = float(proxy_weight * proxy_score + vlm_weight * vlm_vote)
+            pick = {
+                "name": cand_name,
+                "mask": cand_mask,
+                "proxy_score": float(proxy_score),
+                "vlm_verdict": vlm_verdict,
+                "vlm_confidence": float(vlm_conf),
+                "final_score": float(final_score),
+            }
+            if best_pick is None or float(pick["final_score"]) > float(best_pick["final_score"]):
+                best_pick = pick
+
+        if best_pick is None:
+            return None
+        if float(best_pick["final_score"]) < accept_score:
+            return None
+        return best_pick
+
     def process_case(self, ctx: CaseContext) -> None:
         """
         Execute the repair plan for a case.
@@ -471,6 +659,9 @@ class ExecutorAgent(BaseAgent):
 
         # Per-step VLM scoring and strict monotonic config
         ex_cfg = self.cfg.get("executor", {})
+        ctx.executor_candidate_search_used = False
+        ctx.executor_candidate_search_pick = ""
+        ctx.executor_candidate_search_score = 0.0
         vlm_per_step = bool(ex_cfg.get("vlm_per_step_scoring", False))
         vlm_score_tol = float(ex_cfg.get("vlm_score_tolerance", 0.3))
         vlm_min_conf = float(ex_cfg.get("vlm_score_min_confidence", 0.4))
@@ -487,6 +678,13 @@ class ExecutorAgent(BaseAgent):
         split_relabel_max_change_ratio = float(
             ex_cfg.get("split_relabel_max_change_ratio", 0.06)
         )
+        high_risk_unlock_enable = bool(ex_cfg.get("high_risk_unlock_enable", True))
+        high_risk_case, high_risk_reason = self._is_high_risk_case(ctx, ex_cfg)
+        high_risk_unlock_active = bool(high_risk_unlock_enable and high_risk_case)
+        ctx.executor_high_risk_unlock = high_risk_unlock_active
+        ctx.executor_high_risk_unlock_reason = high_risk_reason if high_risk_unlock_active else ""
+        if high_risk_unlock_active:
+            self.log(f"  [HighRiskUnlock] enabled ({high_risk_reason})")
         strict_no_baseline_block = bool(
             strict_monotonic_mode
             and vlm_per_step
@@ -499,6 +697,7 @@ class ExecutorAgent(BaseAgent):
                 "rejecting all planned steps for safety."
             )
 
+        plan_start_mask = ctx.current_mask.copy()
         for step_idx, step in enumerate(plan):
             op_name = step.get("operation", "")
             direction = normalize_direction_hint(str(step.get("direction", "global")))
@@ -687,6 +886,18 @@ class ExecutorAgent(BaseAgent):
                     f"  [{step_idx}] {op_name}: forced-atlas relax "
                     f"change_ratio_limit -> {limit_ratio:.3f}"
                 )
+            if high_risk_unlock_active and (
+                is_high_impact or op_name.startswith("atlas_") or op_name.startswith("neighbor_")
+            ):
+                unlock_scale = float(ex_cfg.get("high_risk_unlock_change_ratio_scale", 1.35))
+                unlock_cap = float(ex_cfg.get("high_risk_unlock_max_ratio_cap", 0.24))
+                relaxed = min(unlock_cap, max(limit_ratio, limit_ratio * unlock_scale))
+                if relaxed > limit_ratio + 1e-9:
+                    self.log(
+                        f"  [{step_idx}] {op_name}: high-risk unlock "
+                        f"change_ratio_limit {limit_ratio:.3f}->{relaxed:.3f}"
+                    )
+                    limit_ratio = relaxed
             if change_ratio > limit_ratio:
                 reason = (
                     f"change_ratio {change_ratio:.4f} exceeds limit {limit_ratio:.4f} "
@@ -713,6 +924,17 @@ class ExecutorAgent(BaseAgent):
                 )
                 nontarget_max_ratio = float(
                     ex_cfg.get("forced_atlas_nontarget_max_area_ratio", 1.80)
+                )
+            if high_risk_unlock_active and (
+                is_high_impact or op_name.startswith("atlas_") or op_name.startswith("neighbor_")
+            ):
+                nontarget_min_ratio = min(
+                    nontarget_min_ratio,
+                    float(ex_cfg.get("high_risk_unlock_nontarget_min_ratio", 0.55)),
+                )
+                nontarget_max_ratio = max(
+                    nontarget_max_ratio,
+                    float(ex_cfg.get("high_risk_unlock_nontarget_max_ratio", 1.85)),
                 )
 
             # Get neighbor areas for reference (GT-free baseline)
@@ -842,7 +1064,16 @@ class ExecutorAgent(BaseAgent):
                         new_conf = float(vs.get("confidence", 0) or 0)
                         vlm_step_score = new_score
                         vlm_step_conf = new_conf
-                        conf_threshold = max(vlm_min_conf, strict_step_min_conf if strict_monotonic_mode else vlm_min_conf)
+                        strict_conf_floor = strict_step_min_conf
+                        if high_risk_unlock_active and _is_high_impact_op(op_name):
+                            strict_conf_floor = min(
+                                strict_conf_floor,
+                                float(ex_cfg.get("high_risk_unlock_vlm_conf_floor", 0.48)),
+                            )
+                        conf_threshold = max(
+                            vlm_min_conf,
+                            strict_conf_floor if strict_monotonic_mode else vlm_min_conf,
+                        )
                         vlm_step_has_confident_score = bool(
                             new_score > 0 and new_conf >= conf_threshold
                         )
@@ -943,7 +1174,9 @@ class ExecutorAgent(BaseAgent):
                 "vlm_compare_verdict": "N/A",
                 "vlm_compare_confidence": 0.0,
                 "change_ratio": round(change_ratio, 6),
-                "oracle_dice_delta": round(oracle_delta, 6) if gt_mask is not None else 0.0
+                "oracle_dice_delta": round(oracle_delta, 6) if gt_mask is not None else 0.0,
+                "high_risk_unlock": bool(high_risk_unlock_active),
+                "candidate_search": False,
             }
             ctx.applied_ops.append(step_record)
             steps_applied.append(step_record)
@@ -972,6 +1205,87 @@ class ExecutorAgent(BaseAgent):
                 case_id=ctx.case_id,
             )
 
+        candidate_search_enable = bool(ex_cfg.get("candidate_search_enable", True))
+        candidate_search_when_no_step = bool(
+            ex_cfg.get("candidate_search_when_no_step_applied", True)
+        )
+        if candidate_search_enable and candidate_search_when_no_step and not steps_applied:
+            if strict_no_baseline_block and not high_risk_unlock_active:
+                self.log(
+                    "  [CandidateSearch] skipped because strict baseline is missing "
+                    "and high-risk unlock is inactive"
+                )
+            else:
+                self.log("  [CandidateSearch] no step applied; trying fallback candidates")
+                before_mask = plan_start_mask.copy()
+                pick = self._select_candidate_fallback(
+                    ctx=ctx,
+                    before_mask=before_mask,
+                    op_fns=op_fns,
+                    ex_cfg=ex_cfg,
+                    edge_map=E,
+                    valve_y=valve_plane_y(before_mask),
+                )
+                if pick is not None and pick.get("mask") is not None:
+                    picked_mask = pick["mask"]
+                    px_changed = int(np.count_nonzero(picked_mask != before_mask))
+                    change_ratio = float(px_changed) / float(max(1, before_mask.size))
+                    oracle_delta = 0.0
+                    if gt_mask is not None:
+                        try:
+                            from ..eval_metrics import dice_macro
+                            new_dice = dice_macro(picked_mask, gt_mask)[0]
+                            oracle_delta = new_dice - current_dice
+                            current_dice = new_dice
+                        except Exception:
+                            oracle_delta = 0.0
+
+                    op_label = f"candidate::{pick['name']}"
+                    step_record = {
+                        "name": op_label,
+                        "pixels_changed": px_changed,
+                        "rqs_before": 0.0,
+                        "rqs_after": 0.0,
+                        "rqs_delta": 0.0,
+                        "vlm_verdict": pick.get("vlm_verdict", "N/A"),
+                        "vlm_score": 0.0,
+                        "vlm_score_prev": ctx.current_score or 0.0,
+                        "vlm_confidence": float(pick.get("vlm_confidence", 0.0)),
+                        "vlm_compare_verdict": pick.get("vlm_verdict", "N/A"),
+                        "vlm_compare_confidence": float(pick.get("vlm_confidence", 0.0)),
+                        "change_ratio": round(change_ratio, 6),
+                        "oracle_dice_delta": round(oracle_delta, 6)
+                        if gt_mask is not None
+                        else 0.0,
+                        "high_risk_unlock": bool(high_risk_unlock_active),
+                        "candidate_search": True,
+                        "proxy_score": float(pick.get("proxy_score", 0.0)),
+                        "candidate_final_score": float(pick.get("final_score", 0.0)),
+                    }
+                    ctx.current_mask = picked_mask.copy()
+                    ctx.applied_ops.append(step_record)
+                    steps_applied.append(step_record)
+                    ctx.executor_candidate_search_used = True
+                    ctx.executor_candidate_search_pick = str(pick.get("name", ""))
+                    ctx.executor_candidate_search_score = float(
+                        pick.get("final_score", 0.0)
+                    )
+                    self.log(
+                        "  [CandidateSearch] accepted "
+                        f"{pick.get('name', '')} "
+                        f"(proxy={pick.get('proxy_score', 0.0):+.3f}, "
+                        f"vlm={pick.get('vlm_verdict', 'neutral')}, "
+                        f"score={pick.get('final_score', 0.0):+.3f})"
+                    )
+                    self.send_message(
+                        recipient="coordinator",
+                        msg_type=MessageType.STEP_COMPLETE,
+                        content=step_record,
+                        case_id=ctx.case_id,
+                    )
+                else:
+                    self.log("  [CandidateSearch] no acceptable fallback candidate found")
+
         # Report failures
         if ops_failed:
             self.send_message(
@@ -994,6 +1308,11 @@ class ExecutorAgent(BaseAgent):
                 "steps_total": len(plan),
                 "rqs_final": 0.0,
                 "failed_ops": ops_failed,
+                "high_risk_unlock": bool(ctx.executor_high_risk_unlock),
+                "high_risk_unlock_reason": str(ctx.executor_high_risk_unlock_reason),
+                "candidate_search_used": bool(ctx.executor_candidate_search_used),
+                "candidate_search_pick": str(ctx.executor_candidate_search_pick),
+                "candidate_search_score": float(ctx.executor_candidate_search_score),
             },
             case_id=ctx.case_id,
         )

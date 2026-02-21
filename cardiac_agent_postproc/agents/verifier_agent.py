@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -95,6 +96,13 @@ class VerifierAgent(BaseAgent):
 
         # Step 3: Optional GT metrics (for reporting, not decision driving)
         metrics = self._compute_metrics(ctx)
+        proxy_consensus = self._build_proxy_consensus(
+            ctx=ctx,
+            vlm_comparison=vlm_comparison,
+            vlm_quality=vlm_quality,
+            metrics=metrics,
+            ex_cfg=ex_cfg,
+        )
 
         # Step 4: LLM reasoning — synthesize all signals
         prompt = (
@@ -111,6 +119,10 @@ class VerifierAgent(BaseAgent):
         if vlm_quality:
             prompt += (
                 f"**VLM Quality of AFTER**: {json.dumps(vlm_quality)}\n"
+            )
+        if proxy_consensus.get("enabled"):
+            prompt += (
+                f"**Proxy consensus**: {json.dumps(proxy_consensus, ensure_ascii=False)}\n"
             )
 
         if metrics.get("dice_before") is not None:
@@ -202,6 +214,32 @@ class VerifierAgent(BaseAgent):
                 f"Original: {reasoning}"
             )
 
+        if proxy_consensus.get("enabled", False):
+            consensus_v = str(proxy_consensus.get("consensus_verdict", "")).lower()
+            consensus_score = self._safe_float(
+                proxy_consensus.get("consensus_score", 0.0), default=0.0
+            )
+            if consensus_v == "reject" and verdict == "approve":
+                verdict = "needs_more_work"
+                if not remaining:
+                    remaining = ["proxy_consensus_detected_regression"]
+                reasoning = (
+                    f"{reasoning} "
+                    f"(Proxy consensus downgraded approve due to regression risk, score={consensus_score:+.3f})"
+                ).strip()
+            elif (
+                consensus_v == "approve"
+                and verdict == "reject"
+                and bool(proxy_consensus.get("unlock_applied", False))
+            ):
+                verdict = "needs_more_work"
+                if not remaining:
+                    remaining = ["high_risk_unlock_retry"]
+                reasoning = (
+                    f"{reasoning} "
+                    "(High-risk unlock: proxy consensus keeps candidate for another round.)"
+                ).strip()
+
         if strict_monotonic_mode:
             cmp_v = str(vlm_comparison.get("verdict", "")).lower()
             cmp_conf = float(vlm_comparison.get("confidence", 0.0) or 0.0)
@@ -212,11 +250,20 @@ class VerifierAgent(BaseAgent):
                     "rejecting round for safety."
                 )
             elif cmp_v != "improved":
-                verdict = "reject"
-                reasoning = (
-                    f"Strict monotonic mode: comparison vs {comparison_reference} "
-                    f"is '{cmp_v or 'unknown'}' (must be 'improved')."
-                )
+                if bool(proxy_consensus.get("strict_override_allow", False)):
+                    verdict = "needs_more_work"
+                    if not remaining:
+                        remaining = ["strict_proxy_override_retry"]
+                    reasoning = (
+                        "Strict monotonic mode: comparison not improved, "
+                        "but high-risk proxy consensus allows one more refinement round."
+                    )
+                else:
+                    verdict = "reject"
+                    reasoning = (
+                        f"Strict monotonic mode: comparison vs {comparison_reference} "
+                        f"is '{cmp_v or 'unknown'}' (must be 'improved')."
+                    )
             elif cmp_conf < strict_round_min_compare_conf:
                 verdict = "reject"
                 reasoning = (
@@ -232,6 +279,17 @@ class VerifierAgent(BaseAgent):
         ctx.verified = True
         ctx.verifier_approved = verdict in ("approve",)
         ctx.verifier_feedback = reasoning
+        ctx.last_verify_result = {
+            "verdict": verdict,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "remaining_issues": list(remaining),
+            "metrics": dict(metrics),
+            "vlm_comparison": dict(vlm_comparison),
+            "vlm_quality": dict(vlm_quality),
+            "comparison_reference": comparison_reference,
+            "proxy_consensus": dict(proxy_consensus),
+        }
 
         self.log(f"  → Verdict: {verdict} (confidence={confidence:.2f})")
         self.log(f"  → Reasoning: {reasoning[:100]}")
@@ -249,6 +307,7 @@ class VerifierAgent(BaseAgent):
                 "vlm_comparison": vlm_comparison,
                 "vlm_quality": vlm_quality,
                 "comparison_reference": comparison_reference,
+                "proxy_consensus": proxy_consensus,
             },
             case_id=ctx.case_id,
         )
@@ -264,6 +323,216 @@ class VerifierAgent(BaseAgent):
                 },
                 case_id=ctx.case_id,
             )
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _clip01(value: Any, default: float = 0.0) -> float:
+        x = VerifierAgent._safe_float(value, default=default)
+        if x < 0.0:
+            return 0.0
+        if x > 1.0:
+            return 1.0
+        return x
+
+    @staticmethod
+    def _diff_stats_from_masks(mask_before: np.ndarray, mask_after: np.ndarray) -> Dict[str, int]:
+        fg_before = mask_before > 0
+        fg_after = mask_after > 0
+        added = int(np.count_nonzero((~fg_before) & fg_after))
+        removed = int(np.count_nonzero(fg_before & (~fg_after)))
+        changed = int(np.count_nonzero(fg_before & fg_after & (mask_before != mask_after)))
+        return {"added": added, "removed": removed, "changed": changed}
+
+    def _extract_diff_stats(self, vlm_comparison: Dict[str, Any]) -> Dict[str, int]:
+        stats_obj = vlm_comparison.get("diff_stats_numeric", {})
+        if isinstance(stats_obj, dict):
+            added = int(self._safe_float(stats_obj.get("added", 0), 0))
+            removed = int(self._safe_float(stats_obj.get("removed", 0), 0))
+            changed = int(self._safe_float(stats_obj.get("changed", 0), 0))
+            if added > 0 or removed > 0 or changed > 0:
+                return {"added": added, "removed": removed, "changed": changed}
+
+        txt = str(vlm_comparison.get("diff_stats", ""))
+        ma = re.search(r"\+(\d+)", txt)
+        mr = re.search(r"-(\d+)", txt)
+        mc = re.search(r"~(\d+)", txt)
+        return {
+            "added": int(ma.group(1)) if ma else 0,
+            "removed": int(mr.group(1)) if mr else 0,
+            "changed": int(mc.group(1)) if mc else 0,
+        }
+
+    def _is_high_risk_case(self, ctx: CaseContext, ex_cfg: Dict[str, Any]) -> bool:
+        triage_score = self._safe_float(getattr(ctx, "triage_score", 0.0), 0.0)
+        triage_bad_prob = self._safe_float(
+            getattr(ctx, "triage_bad_prob", 1.0 - triage_score),
+            1.0 - triage_score,
+        )
+        score_th = float(ex_cfg.get("high_risk_unlock_score_threshold", 0.62))
+        bad_prob_th = float(ex_cfg.get("high_risk_unlock_bad_prob_threshold", 0.80))
+        issue_tokens = ("missing", "massive", "severe", "fragment", "disconnect", "broken", "touch", "leak")
+        issue_hit = any(
+            any(tok in str(issue).lower() for tok in issue_tokens)
+            for issue in (ctx.triage_issues or [])
+        )
+        return triage_score <= score_th or triage_bad_prob >= bad_prob_th or issue_hit
+
+    def _proxy_from_diff(
+        self,
+        diff_stats: Dict[str, int],
+        applied_ops: List[Dict[str, Any]],
+        min_change_px: int,
+    ) -> Dict[str, Any]:
+        added = int(diff_stats.get("added", 0))
+        removed = int(diff_stats.get("removed", 0))
+        changed = int(diff_stats.get("changed", 0))
+        total = int(added + removed + changed)
+        net = int(added - removed)
+        abs_delta = max(1, total)
+        net_ratio = float(net) / float(abs_delta)
+
+        op_names = [str(op.get("name", "")) for op in (applied_ops or [])]
+        has_split = any(name in ("lv_split_to_rv", "rv_split_to_lv") for name in op_names)
+        is_pure_relabel = has_split and added <= 12 and removed <= 12 and changed >= 40
+
+        if total < int(min_change_px):
+            return {
+                "proxy_verdict": "neutral",
+                "proxy_score": 0.0,
+                "proxy_confidence": 0.30,
+                "added": added,
+                "removed": removed,
+                "changed": changed,
+                "net": net,
+            }
+
+        if is_pure_relabel:
+            return {
+                "proxy_verdict": "improved",
+                "proxy_score": 0.55,
+                "proxy_confidence": 0.70,
+                "added": added,
+                "removed": removed,
+                "changed": changed,
+                "net": net,
+            }
+
+        degrade_margin = max(30, int(0.10 * total))
+        improve_margin = max(24, int(0.08 * total))
+        if removed > added + degrade_margin:
+            score = -min(1.0, abs(net_ratio) + 0.20)
+            conf = min(0.95, 0.45 + abs(score) * 0.45)
+            verdict = "degraded"
+        elif added > removed + improve_margin:
+            score = min(1.0, abs(net_ratio) + 0.15)
+            conf = min(0.95, 0.45 + score * 0.45)
+            verdict = "improved"
+        else:
+            score = max(-0.25, min(0.25, net_ratio * 0.8))
+            conf = 0.40 + min(0.25, abs(score))
+            verdict = "neutral"
+
+        return {
+            "proxy_verdict": verdict,
+            "proxy_score": float(score),
+            "proxy_confidence": float(max(0.0, min(1.0, conf))),
+            "added": added,
+            "removed": removed,
+            "changed": changed,
+            "net": net,
+        }
+
+    def _build_proxy_consensus(
+        self,
+        ctx: CaseContext,
+        vlm_comparison: Dict[str, Any],
+        vlm_quality: Dict[str, Any],
+        metrics: Dict[str, Any],
+        ex_cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        enabled = bool(ex_cfg.get("proxy_consensus_enable", True))
+        if not enabled:
+            return {"enabled": False}
+
+        diff_stats = self._extract_diff_stats(vlm_comparison)
+        min_change_px = int(ex_cfg.get("proxy_consensus_min_change_px", 24))
+        proxy = self._proxy_from_diff(diff_stats, ctx.applied_ops, min_change_px=min_change_px)
+
+        cmp_v = str(vlm_comparison.get("verdict", "same")).lower()
+        cmp_conf = self._clip01(vlm_comparison.get("confidence", 0.0), default=0.0)
+        cmp_vote_map = {"improved": 1.0, "same": 0.0, "neutral": 0.0, "worse": -1.0, "degraded": -1.0}
+        cmp_vote = cmp_vote_map.get(cmp_v, 0.0) * max(0.35, cmp_conf)
+
+        quality_v = str(vlm_quality.get("quality", "borderline")).lower()
+        quality_conf = self._clip01(vlm_quality.get("confidence", 0.0), default=0.0)
+        quality_vote_map = {"good": 0.8, "borderline": 0.0, "bad": -0.6}
+        quality_vote = quality_vote_map.get(quality_v, 0.0) * max(0.30, quality_conf)
+
+        proxy_vote_map = {"improved": 1.0, "neutral": 0.0, "degraded": -1.0}
+        proxy_vote = proxy_vote_map.get(proxy["proxy_verdict"], 0.0) * max(
+            0.35, self._clip01(proxy["proxy_confidence"], default=0.0)
+        )
+
+        w_cmp = float(ex_cfg.get("proxy_consensus_cmp_weight", 1.00))
+        w_proxy = float(ex_cfg.get("proxy_consensus_proxy_weight", 1.00))
+        w_quality = float(ex_cfg.get("proxy_consensus_quality_weight", 0.35))
+        consensus_score = float(w_cmp * cmp_vote + w_proxy * proxy_vote + w_quality * quality_vote)
+
+        dice_delta = self._safe_float(metrics.get("dice_delta", 0.0), default=0.0)
+        if dice_delta > 0.0:
+            consensus_score += min(0.25, dice_delta * 3.0)
+
+        pos_th = float(ex_cfg.get("proxy_consensus_positive_threshold", 0.65))
+        neg_th = float(ex_cfg.get("proxy_consensus_negative_threshold", -0.65))
+        if consensus_score >= pos_th:
+            consensus_verdict = "approve"
+        elif consensus_score <= neg_th:
+            consensus_verdict = "reject"
+        else:
+            consensus_verdict = "needs_more_work"
+
+        high_risk_unlock = bool(ex_cfg.get("proxy_consensus_unlock_on_high_risk", True))
+        unlock_min_score = float(ex_cfg.get("proxy_consensus_unlock_min_score", -0.15))
+        is_high_risk = self._is_high_risk_case(ctx, ex_cfg)
+        unlock_applied = False
+        strict_override_allow = False
+        if high_risk_unlock and is_high_risk:
+            if (
+                consensus_verdict == "reject"
+                and consensus_score >= unlock_min_score
+                and cmp_v not in ("worse", "degraded")
+            ):
+                consensus_verdict = "needs_more_work"
+                unlock_applied = True
+            if (
+                proxy.get("proxy_verdict") == "improved"
+                and self._safe_float(proxy.get("proxy_confidence", 0.0), 0.0) >= 0.55
+                and cmp_v in ("same", "neutral")
+            ):
+                strict_override_allow = True
+                unlock_applied = True
+
+        return {
+            "enabled": True,
+            "diff_stats": diff_stats,
+            "proxy_verdict": proxy.get("proxy_verdict", "neutral"),
+            "proxy_score": float(proxy.get("proxy_score", 0.0)),
+            "proxy_confidence": float(proxy.get("proxy_confidence", 0.0)),
+            "consensus_score": consensus_score,
+            "consensus_verdict": consensus_verdict,
+            "cmp_vote": cmp_vote,
+            "proxy_vote": proxy_vote,
+            "quality_vote": quality_vote,
+            "unlock_applied": unlock_applied,
+            "strict_override_allow": strict_override_allow,
+            "is_high_risk_case": is_high_risk,
+        }
 
     def _compute_metrics(self, ctx: CaseContext) -> Dict[str, Any]:
         """Compute optional GT metrics for reporting (not decision driving)."""
@@ -319,12 +588,17 @@ class VerifierAgent(BaseAgent):
             after_overlay = ctx.debug_img_path("_verify_after.png")
             create_overlay(ctx.img_path, reference_mask, before_overlay)
             create_overlay(ctx.img_path, ctx.current_mask, after_overlay)
+            diff_stats = self._diff_stats_from_masks(reference_mask, ctx.current_mask)
 
             # NEW: Use diff-overlay approach with repair KB
             if self.repair_kb is not None:
                 diff_path = ctx.debug_img_path("_verify_diff.png")
                 create_diff_overlay(
-                    ctx.img_path, reference_mask, ctx.current_mask, diff_path
+                    ctx.img_path,
+                    reference_mask,
+                    ctx.current_mask,
+                    diff_path,
+                    stats=diff_stats,
                 )
                 result = self.judge_repair_comparison(
                     diff_path, 
@@ -335,11 +609,13 @@ class VerifierAgent(BaseAgent):
                 mapped = {"improved": "improved", "degraded": "worse", "neutral": "same"}
                 result["verdict"] = mapped.get(v, "same")
                 result["reference"] = reference_tag
+                result["diff_stats_numeric"] = diff_stats
                 return result, before_overlay, after_overlay, reference_tag
 
             # Fallback: old approach
             result = self.judge_visual_comparison(before_overlay, after_overlay)
             result["reference"] = reference_tag
+            result["diff_stats_numeric"] = diff_stats
             return result, before_overlay, after_overlay, reference_tag
 
         except Exception as e:

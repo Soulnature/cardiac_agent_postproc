@@ -107,6 +107,14 @@ class CaseContext:
     verified: bool = False
     verifier_approved: bool = False
     verifier_feedback: str = ""
+    last_verify_result: Dict[str, Any] = field(default_factory=dict)
+
+    # Executor diagnostics / fallbacks
+    executor_high_risk_unlock: bool = False
+    executor_high_risk_unlock_reason: str = ""
+    executor_candidate_search_used: bool = False
+    executor_candidate_search_pick: str = ""
+    executor_candidate_search_score: float = 0.0
 
     # Best-intermediate fallback (for conservative final save policy)
     best_intermediate_mask: Optional[np.ndarray] = None

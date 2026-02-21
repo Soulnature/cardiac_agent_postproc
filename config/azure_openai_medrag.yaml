@@ -138,6 +138,31 @@ executor:
   strict_require_baseline_score: false # allow progress when numeric baseline missing; round gate still enforces improved
   strict_round_min_compare_confidence: 0.60  # verifier comparison confidence floor in strict mode
   strict_round_score_delta: 0.001      # best-intermediate update margin in coordinator scoring
+  high_risk_unlock_enable: true
+  high_risk_unlock_score_threshold: 0.62
+  high_risk_unlock_bad_prob_threshold: 0.80
+  high_risk_unlock_change_ratio_scale: 1.35
+  high_risk_unlock_max_ratio_cap: 0.24
+  high_risk_unlock_nontarget_min_ratio: 0.55
+  high_risk_unlock_nontarget_max_ratio: 1.85
+  high_risk_unlock_vlm_conf_floor: 0.48
+  candidate_search_enable: true
+  candidate_search_when_no_step_applied: true
+  candidate_search_max_candidates: 12
+  candidate_search_topk_vlm: 3
+  candidate_search_max_change_ratio: 0.14
+  candidate_search_proxy_weight: 0.65
+  candidate_search_vlm_weight: 1.00
+  candidate_search_accept_score: 0.10
+  proxy_consensus_enable: true
+  proxy_consensus_cmp_weight: 1.00
+  proxy_consensus_proxy_weight: 1.00
+  proxy_consensus_quality_weight: 0.35
+  proxy_consensus_positive_threshold: 0.65
+  proxy_consensus_negative_threshold: -0.65
+  proxy_consensus_min_change_px: 24
+  proxy_consensus_unlock_on_high_risk: true
+  proxy_consensus_unlock_min_score: -0.15
   enforce_directional_execution: true  # non-global plan steps are constrained to diagnosed direction
   split_relabel_require_bbox: true     # lv_split_to_rv / rv_split_to_lv must have bbox
   split_relabel_topology_gate: true    # relabel must reduce source-class fragmentation

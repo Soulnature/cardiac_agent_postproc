@@ -357,6 +357,21 @@ class CoordinatorAgent(BaseAgent):
             dice_delta = float(metrics_obj.get("dice_delta", 0.0))
         except Exception:
             dice_delta = 0.0
+        proxy_obj = verify_content.get("proxy_consensus", {}) or {}
+        proxy_score = 0.0
+        proxy_conf = 0.0
+        proxy_v = str(proxy_obj.get("proxy_verdict", "neutral")).lower()
+        proxy_map = {"improved": 1.0, "neutral": 0.0, "degraded": -1.0}
+        try:
+            proxy_score = float(proxy_obj.get("proxy_score", 0.0))
+        except Exception:
+            proxy_score = 0.0
+        proxy_conf = self._clip01(proxy_obj.get("proxy_confidence", 0.0), default=0.0)
+        consensus_score = 0.0
+        try:
+            consensus_score = float(proxy_obj.get("consensus_score", 0.0))
+        except Exception:
+            consensus_score = 0.0
         # Cap GT contribution to avoid dominating no-GT signals.
         dice_bonus = max(-0.5, min(0.5, dice_delta * 10.0))
 
@@ -367,6 +382,10 @@ class CoordinatorAgent(BaseAgent):
             + 0.2 * quality_score
             + 0.3 * verifier_conf
             + 0.5 * cmp_conf
+            + 0.6 * proxy_map.get(proxy_v, 0.0)
+            + 0.3 * proxy_score
+            + 0.2 * proxy_conf
+            + 0.2 * consensus_score
             + dice_bonus
         )
 
@@ -376,6 +395,9 @@ class CoordinatorAgent(BaseAgent):
         cmp_v = str(cmp_obj.get("verdict", "same")).lower()
         quality_obj = verify_content.get("vlm_quality", {}) or {}
         quality_v = str(quality_obj.get("quality", "borderline")).lower()
+        proxy_obj = verify_content.get("proxy_consensus", {}) or {}
+        proxy_v = str(proxy_obj.get("proxy_verdict", "neutral")).lower()
+        consensus_v = str(proxy_obj.get("consensus_verdict", "needs_more_work")).lower()
         metrics_obj = verify_content.get("metrics", {}) or {}
         dice_delta = 0.0
         try:
@@ -397,6 +419,8 @@ class CoordinatorAgent(BaseAgent):
             verdict == "approve"
             or cmp_v == "improved"
             or quality_v == "good"
+            or proxy_v == "improved"
+            or consensus_v == "approve"
             or dice_delta > gt_delta_th
         )
 
@@ -428,7 +452,12 @@ class CoordinatorAgent(BaseAgent):
             cmp_obj = verify_content.get("vlm_comparison", {}) or {}
             cmp_v = str(cmp_obj.get("verdict", "")).lower()
             cmp_conf = self._clip01(cmp_obj.get("confidence", 0.0), default=0.0)
-            if cmp_v != "improved" or cmp_conf < strict_round_min_compare_conf:
+            proxy_obj = verify_content.get("proxy_consensus", {}) or {}
+            strict_proxy_override = bool(proxy_obj.get("strict_override_allow", False))
+            if cmp_v != "improved":
+                if not strict_proxy_override:
+                    return
+            elif cmp_conf < strict_round_min_compare_conf:
                 return
             if not self._is_best_candidate(verify_content):
                 return

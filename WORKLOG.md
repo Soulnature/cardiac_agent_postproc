@@ -3701,3 +3701,35 @@ Copy the template below and append it to the end of this file:
   - `WORKLOG.md`
 - Notes:
   - 当前策略下出现“verdict=approved 但 Dice 下降”的样例，说明无 GT 门控与真实 Dice 改善存在偏差。
+
+### Session: 2026-02-21 01:55 CST
+- Current goal:
+  - 按用户要求先将“当前最新代码”推送到 GitHub `V2` 分支，再实现“提升每个样本”的修复策略计划。
+- Done:
+  - 新建并切换到 `V2`，提交当前代码快照并成功推送：
+    - commit: `a4ed751`
+    - branch: `origin/V2`
+  - 实现计划中的关键改动（代码级）：
+    - `VerifierAgent`：新增 proxy-consensus（基于 diff 统计 + VLM compare + VLM quality）并输出 `proxy_consensus` 元信息；在 strict 模式下支持高风险样本的受控解锁（`strict_override_allow`）。
+    - `ExecutorAgent`：新增高风险解锁（step change ratio、non-target area gate、strict 置信阈值适度放宽）与 `candidate_search` 回退（当计划步骤全失败时自动检索候选并择优应用）。
+    - `CoordinatorAgent`：best-intermediate 评分与候选判定引入 `proxy_consensus` 信号；strict 模式允许受控代理信号进入 best-intermediate 更新。
+    - `run_miccai_multiagent_experiment.py`：repair CSV 新增 verifier/executor 关键诊断字段（proxy/consensus/unlock/candidate-search）。
+    - `config/default.yaml` 与 `config/azure_openai_medrag.yaml`：新增上述机制的可调配置项。
+    - `CaseContext`：新增 `last_verify_result` 与 executor 诊断字段，支持跨阶段记录。
+  - 语法校验通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/message_bus.py cardiac_agent_postproc/agents/verifier_agent.py cardiac_agent_postproc/agents/coordinator.py cardiac_agent_postproc/agents/executor.py scripts/run_miccai_multiagent_experiment.py`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_v2_proxy_unlock --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/message_bus.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 本轮先完成“上传 V2 再改”的顺序要求；改动重点是减少“误拒 + 无步可走”导致的劣化，并增强每个 case 的可解释诊断日志。
