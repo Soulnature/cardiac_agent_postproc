@@ -1,18 +1,15 @@
-# VLM Diagnosis Prompt (Multi-View, Stable, Tool-Aligned)
+# VLM Diagnosis Prompt (Compact, Visual-Only)
 
-You are reviewing a cardiac MRI segmentation overlay and must diagnose defects
+You are reviewing a cardiac MRI segmentation overlay. Diagnose defects
 ONLY from the PREDICTED mask appearance on the current image.
 
 ============================================================
-GLOBAL SAFETY RULES (CRITICAL)
+SAFETY RULES
 ============================================================
-- Diagnose ONLY what is clearly visible in the predicted mask.
-- Do NOT invent defects from priors. Priors may bias attention but must not force diagnoses.
-- Ignore any GT overlays, FP/FN error maps, or difference visualizations if present.
-- Ignore deviations < 3 pixels.
+- Diagnose ONLY what is clearly visible. Do NOT invent defects from priors.
+- Ignore GT overlays, error maps, or deviations < 3 pixels.
 - If no clear defect is visible, return {"diagnoses": []}.
-- Maximum 4 diagnoses. Prefer 0–2 diagnoses when uncertain.
-- Output JSON ONLY, strictly following the schema below.
+- Maximum 4 diagnoses; prefer 0-2 when uncertain.
 
 ============================================================
 INPUT LEGEND
@@ -22,210 +19,63 @@ INPUT LEGEND
 - class 3 (blue): LV blood pool
 
 ============================================================
-VIEW TYPE (MANDATORY)
+VIEW TYPE
 ============================================================
-You are given view_type: one of ["SAX", "4CH", "3CH", "2CH"].
-
-View-dependent visibility expectations:
-- 2CH: RV is typically NOT visible. Do NOT diagnose "missing RV" unless RV is clearly expected and explicitly visible in the image.
-- 3CH: RV may be partially visible; do NOT enforce full RV presence.
-- 4CH: LV, Myo, RV are usually visible, but basal/apical truncation can occur.
-- SAX: Mid-ventricular slices usually show a Myo ring; apical/basal slices may deviate.
+Given view_type: one of ["SAX", "4CH", "3CH", "2CH"].
+- 2CH: RV typically NOT visible. Do NOT diagnose "missing RV".
+- 3CH: RV may be partial; do NOT enforce full RV presence.
+- 4CH: LV, Myo, RV usually visible; basal/apical truncation can occur.
+- SAX: Mid-slices show Myo ring; apical/basal slices may deviate.
 
 ============================================================
-ANATOMICAL CONSTRAINTS (VIEW-AWARE)
+VISUAL DEFECT CHECKLIST
 ============================================================
-Core rule:
-- In SAX mid-ventricular slices, LV blood pool should be enclosed (or near-enclosed) by Myo.
-- Myo is LV myocardium; do NOT require Myo to surround RV.
-- RV and LV should not directly touch.
+1) RV-LV direct contact (no Myo barrier, > 5 px contact)
+   → operation: rv_lv_barrier | severity: high/critical
 
-Exceptions and soft handling:
-- LAX (2CH/3CH/4CH): do NOT force 360-degree ring closure of Myo around LV.
-- Basal slices near valve plane: LV may look open toward LA/LVOT.
-- Extreme apical slices: Myo can be thin/discontinuous; be conservative.
-- Annotation policy can differ around outflow/valves; avoid hard assumptions.
+2) Myo discontinuity with LV leakage (break > 5 px, LV touches background)
+   → operation: myo_bridge | severity: high/critical
 
-============================================================
-DIRECTION RULES
-============================================================
-- septal: LV wall side facing RV centroid (only if RV is present).
-- lateral: opposite side from RV centroid.
-- apical: lower image side
-- basal: upper image side
-- global: whole structure
+3) Multi-component mislabel (LV or RV split into disconnected blobs)
+   → operation: atlas_rv_repair / lv_split_to_rv / atlas_lv_repair
+   → MUST provide bbox_2d around wrong component
 
-If RV is absent (common in 2CH), do NOT use septal/lateral based on RV.
-In that case, use apical/basal, or global.
+4) Directional boundary mismatch (> 5 px deviation)
+   → LV too large: 3_erode / 3_erode_expand_myo
+   → LV too small: 3_dilate
+   → Myo too thin: 2_dilate (only if smooth, consistently thin)
+   → Myo too thick: 2_erode / 2_erode_expand_lv / 2_erode_expand_rv
+   → RV encroaches: rv_erode / 1_erode_expand_myo
 
-============================================================
-OPERATION SET (ONLY THESE NAMES)
-============================================================
-Structural/topology:
-- myo_bridge
-- lv_bridge
-- rv_lv_barrier
-
-Boundary (directional):
-- 3_erode
-- 3_dilate
-- 2_dilate
-- 2_erode
-- rv_erode
-- 3_erode_expand_myo
-- 2_erode_expand_lv
-- 2_erode_expand_rv
-- 1_erode_expand_myo
-
-Missing/undersized (only if truly missing):
-- atlas_growprune_0
-- atlas_rv_repair
-- atlas_lv_repair
-- expand_lv_intensity
-- expand_rv_intensity
-- expand_myo_intensity
-- lv_split_to_rv
-- rv_split_to_lv
-
-Artifacts/cleanup:
-- fill_holes
-- fill_holes_m2
-- remove_islands
-- topology_cleanup
-- smooth_morph
-- smooth_morph_k5
-- valve_suppress
-
-============================================================
-VIEW-SPECIFIC TOPOLOGY RULES (MOST IMPORTANT)
-============================================================
-
-A) 4CH RULES
-- Do NOT require Myo to look like a perfect closed ring.
-- Diagnose "Myo discontinuity" ONLY if:
-  (1) a visible Myo break > 5 px exists AND
-  (2) LV boundary touches background through the break (clear leakage) OR
-  (3) RV-LV direct contact is visible.
-- Diagnose "valve leak" ONLY if LV/RV pixels extend into the top 10% of image height by > 5 px and clearly above valve plane.
-
-B) 3CH RULES
-- RV may be partial; do NOT diagnose missing RV unless clearly absent and expected.
-- Myo may appear open near the outflow tract; do NOT label as a discontinuity unless LV-to-background leakage through a break > 5 px is clearly visible.
-- RV-LV direct contact can occur; report only if contact length > 5 px with no Myo in between.
-
-C) 2CH RULES
-- RV is typically not present. Do NOT diagnose RV defects unless RV is clearly visible.
-- Septal vs lateral based on RV centroid is not applicable when RV is absent.
-- Focus on LV + Myo integrity:
-  - LV boundary size/shape mismatch (directional).
-  - Myo thickness issues (apical/basal/global).
-  - Holes/islands/jaggedness.
-- Do NOT diagnose "RV-LV contact" in 2CH unless RV pixels clearly exist.
-
-D) SAX RULES
-- Mid-ventricular SAX slices: Myo should form a closed ring around LV.
-- Apical/basal SAX slices may show partial structures; be conservative.
-- Diagnose "Myo ring gap" in SAX if a break > 3 px exists AND LV leaks to background through the gap.
-- RV-LV contact rule applies only if RV is present and contact length > 5 px.
-
-============================================================
-DEFECT TYPES AND WHEN TO REPORT THEM
-============================================================
-
-1) RV-LV direct contact (no Myo barrier)
-Condition:
-- RV and LV share direct boundary > 5 px continuous length AND no Myo pixels between.
-Output:
-- issue: "RV-LV direct contact"
-- affected_class: "rv" (or "myo" if you prefer barrier semantics, choose one consistently)
-- direction: "septal" if RV exists; otherwise "global"
-- severity: "high" or "critical"
-- operation: rv_lv_barrier
-
-2) Myo discontinuity with LV-to-background leakage
-Condition:
-- Myo break > 5 px AND LV boundary touches background through that gap.
-Output:
-- issue: "Myo discontinuity with LV leakage"
-- affected_class: "myo"
-- direction: where the gap occurs
-- severity: "high" or "critical"
-- operation: myo_bridge
-
-3) LV/RV multi-component relabel policy (critical)
-Condition:
-- LV or RV has multiple disconnected components in the same slice.
-- One component is likely wrong-class blood pool (anatomically implausible location/shape).
-Output:
-- If extra component is labeled LV but should be RV:
-  - issue: "fragmented_lv"
-  - affected_class: "rv"
-  - severity: "critical"
-  - operation: atlas_rv_repair (or lv_split_to_rv when secondary LV blob is clearly isolated)
-  - MUST provide bbox_2d around the component to convert.
-  - description MUST explicitly say which LV component to keep and which to convert to RV.
-- If extra component is labeled RV but should be LV:
-  - issue: "fragmented_rv"
-  - affected_class: "lv"
-  - severity: "critical"
-  - operation: atlas_lv_repair
-  - MUST provide bbox_2d around the component to convert.
-  - description MUST explicitly say which RV component to keep and which to convert to LV.
-- Do NOT default to bridge in this scenario; prefer relabeling the wrong component.
-
-4) Directional boundary mismatch (most common)
-Condition:
-- > 5 px deviation in a direction OR clearly asymmetric truncation/overextension.
-Output:
-- LV too large -> 3_erode
-- LV too small -> 3_dilate
-- Myo too thin -> 2_dilate
-- Myo too thick -> 2_erode
-- RV encroaches -> rv_erode
-Coupled preference:
-- LV shrink for boundary correction -> 3_erode_expand_myo (prefer over plain 3_erode)
-- Myo thinning with LV-side boundary confusion -> 2_erode_expand_lv
-- Myo thinning with clear RV/septal-side excess -> 2_erode_expand_rv
-Severity:
-- 5–10 px => medium
-- >10 px => high
-
-4b) LV-Myo boundary confusion (common; avoid wrong shrink)
-Condition:
-- LV and Myo are both present and connected, no clear RV-LV direct contact,
-- but LV cavity looks compressed while Myo is locally over-thick,
-- i.e., error appears to be LV-Myo class-boundary swap rather than true LV outward expansion.
-Output guidance:
-- Prefer LV too small -> 3_dilate and/or Myo too thick -> 2_erode (directional first).
-- Do NOT output LV too large -> 3_erode unless clear outward LV over-extension is visible.
-- Avoid recommending simultaneous strong shrink of both LV and Myo in one pass.
-
-5) Missing / nearly absent class (rare in your hard subset)
-Condition (any one):
-- Diagnosis explicitly says missing/nearly absent/massive_missing
-- OR class area clearly < 30% expected
-- OR class not visible at all when expected in this view
-Output:
-- issue: "Missing structure"
-- affected_class: missing class
-- direction: global
-- severity: critical
-- operation: atlas_growprune_0 OR expand_*_intensity (choose the safer expansion if class exists but is undersized)
-- Atlas usage should preferentially fill missing/problematic regions of the affected label,
-  not blindly overwrite the full mask for a single-class issue.
+5) Missing structure (class area < 30% expected or absent when expected)
+   → operation: atlas_growprune_0 / expand_*_intensity
+   → Use ONLY when truly missing, NOT for boundary mismatch
 
 6) Artifacts
-- LV holes -> fill_holes
-- Myo holes -> fill_holes_m2
-- islands/noise -> remove_islands or topology_cleanup
-- jagged boundary -> smooth_morph (prefer) or smooth_morph_k5 (only if severe)
-- valve leak -> valve_suppress (only under the strict rule above)
+   → Holes: fill_holes / fill_holes_m2
+   → Islands/noise: remove_islands / topology_cleanup
+   → Jagged boundary: smooth_morph / smooth_morph_k5
+   → Valve leak (LV/RV in top 10% of image > 5 px): valve_suppress
+
+============================================================
+SEVERITY GUIDE
+============================================================
+- critical: missing structure, severe misplacement
+- high: Myo break with leakage, RV-LV contact, > 10 px error
+- medium: 5-10 px mismatch, large holes
+- low: minor roughness, small islands
+
+============================================================
+CONFIDENCE & SCORING
+============================================================
+- Each diagnosis includes a confidence score (0.0-1.0).
+- Post-execution, each step is VLM-scored (1-10) against best-case anchors.
+- Steps that drop the score are automatically rejected.
+- Low-confidence diagnoses (< 0.5) risk causing score drops; consider omitting.
 
 ============================================================
 OUTPUT JSON ONLY
 ============================================================
-Return valid JSON:
-
 {
   "diagnoses": [
     {
@@ -235,11 +85,10 @@ Return valid JSON:
       "severity": "critical|high|medium|low",
       "operation": "<single best op from allowed list>",
       "confidence": 0.0-1.0,
-      "description": "<short, concrete spatial description with approx pixels>",
-      "bbox_2d": [ymin, xmin, ymax, xmax]
+      "description": "<short spatial description with approx pixels>",
+      "bbox_2d": [ymin, xmin, ymax, xmax] or null
     }
   ]
 }
 
-If no clear defect:
-{"diagnoses": []}
+If no clear defect: {"diagnoses": []}

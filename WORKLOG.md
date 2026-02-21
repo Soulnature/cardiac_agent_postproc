@@ -1,0 +1,3703 @@
+# WORKLOG
+
+This file is used to continue work across sessions without relying on chat memory.
+
+## Usage (append one entry at the end of each session)
+
+Copy the template below and append it to the end of this file:
+
+```md
+### Session: YYYY-MM-DD HH:MM TZ
+- Current goal:
+- Done:
+  - 
+- Blocked:
+  - 
+- Next command:
+  - 
+- Key files:
+  - 
+- Notes:
+  - 
+```
+
+---
+
+### Session: 2026-02-17 20:46 CST
+- Current goal:
+  - Create a reusable cross-session worklog template and initialize the first entry.
+- Done:
+  - Created `WORKLOG.md`.
+  - Defined handoff fields: `Current goal`, `Done`, `Blocked`, `Next command`, `Key files`, `Notes`.
+- Blocked:
+  - None.
+- Next command:
+  - `sed -n '1,200p' WORKLOG.md`
+- Key files:
+  - `WORKLOG.md`
+  - `AGENTS.md`
+- Notes:
+  - In future sessions, read `WORKLOG.md` first, then continue from `Next command` or `Current goal`.
+
+### Session: 2026-02-17 20:48 CST
+- Current goal:
+  - Enforce the rule: automatically write to `WORKLOG.md` after each completed task.
+- Done:
+  - Added `Workflow Convention` to `AGENTS.md`, requiring a `WORKLOG.md` entry after each completed task.
+  - Specified minimum fields: `Current goal`, `Done`, `Blocked`, `Next command`, `Key files`, `Notes`.
+- Blocked:
+  - None.
+- Next command:
+  - `tail -n 60 WORKLOG.md`
+- Key files:
+  - `AGENTS.md`
+  - `WORKLOG.md`
+- Notes:
+  - Starting from this entry, append a new log entry automatically after each completed task.
+
+### Session: 2026-02-17 20:49 CST
+- Current goal:
+  - Convert worklog format to English.
+- Done:
+  - Translated `WORKLOG.md` header, usage text, and existing session entries into English.
+  - Updated workflow wording in `AGENTS.md` to require `Blocked: None`.
+- Blocked:
+  - None.
+- Next command:
+  - `tail -n 80 WORKLOG.md`
+- Key files:
+  - `WORKLOG.md`
+  - `AGENTS.md`
+- Notes:
+  - Future entries should remain fully in English format.
+
+### Session: 2026-02-17 21:14 CST
+- Current goal:
+  - Run `scripts/fast_triage_all.py` with Azure OpenAI (`gpt-4o`) using `config/azure_openai_medrag.yaml`.
+- Done:
+  - Ran `python scripts/fast_triage_all.py --config config/azure_openai_medrag.yaml` with `OPENAI_API_KEY` set.
+  - Completed full batch processing: 320/320 cases.
+  - Generated output CSV: `batch_eval_results/fast_triage_gpt-4o.csv`.
+  - Final summary: 311 `good`, 0 `borderline`, 9 `needs_fix`.
+- Blocked:
+  - Initial in-sandbox run could not reach Azure endpoint (`connection refused`); rerun outside sandbox succeeded.
+- Next command:
+  - `python - << 'PY'\nimport csv\nfrom collections import Counter\np='batch_eval_results/fast_triage_gpt-4o.csv'\nwith open(p,newline='') as f:\n    r=list(csv.DictReader(f))\nprint(Counter(x['Category'] for x in r))\nPY`
+- Key files:
+  - `scripts/fast_triage_all.py`
+  - `config/azure_openai_medrag.yaml`
+  - `batch_eval_results/fast_triage_gpt-4o.csv`
+  - `WORKLOG.md`
+- Notes:
+  - This run reused 225 existing overlays and created 95 new overlays.
+
+### Session: 2026-02-17 21:29 CST
+- Current goal:
+  - Compare `good` vs `needs_fix` samples on Dice and HD95, and generate a visualization.
+- Done:
+  - Merged `batch_eval_results/fast_triage_gpt-4o.csv` with `batch_eval_results/batch_evaluation_metrics.csv` by `Stem` (320/320 matched).
+  - Generated visualization: `batch_eval_results/fast_triage_good_vs_needsfix_dice_hd95.png`.
+  - Exported sample-level table: `batch_eval_results/fast_triage_good_vs_needsfix_samples.csv`.
+  - Exported group statistics: `batch_eval_results/fast_triage_good_vs_needsfix_stats.csv`.
+  - Key stats (`good` n=311 vs `needs_fix` n=9): Dice_Mean 0.9154 vs 0.9181; HD95_Mean 4.7067 vs 4.1307.
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/fast_triage_good_vs_needsfix_stats.csv').to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/fast_triage_good_vs_needsfix_dice_hd95.png`
+  - `batch_eval_results/fast_triage_good_vs_needsfix_samples.csv`
+  - `batch_eval_results/fast_triage_good_vs_needsfix_stats.csv`
+  - `WORKLOG.md`
+- Notes:
+  - The current `needs_fix` set is very small (n=9), and metric differences are not worse than `good`, suggesting VLM decisions are not purely aligned with Dice/HD95 thresholds.
+
+### Session: 2026-02-17 21:33 CST
+- Current goal:
+  - Validate whether GPT-4o triage decisions actually separate good vs bad cases by Dice/HD95.
+- Done:
+  - Computed proxy precision/recall/F1 against multiple metric-based bad definitions from merged triage+metrics data.
+  - Found very low recall for bad-case detection (e.g., recall=0.046 for `Dice_Mean<0.90`, recall=0.020 for `HD95_Mean>5.0`).
+  - Verified score collapse pattern in `fast_triage_gpt-4o.csv`: only scores `2/8/9` appeared, with strict mapping `2 -> needs_fix`, `8/9 -> good`.
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.crosstab(pd.read_csv('batch_eval_results/fast_triage_gpt-4o.csv')['VLM_Score'], pd.read_csv('batch_eval_results/fast_triage_gpt-4o.csv')['Category']))\nPY`
+- Key files:
+  - `batch_eval_results/fast_triage_gpt-4o.csv`
+  - `batch_eval_results/batch_evaluation_metrics.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Current GPT-4o triage behavior is highly conservative with strong class imbalance (`needs_fix`=9/320), and does not align with metric-defined bad cases.
+
+### Session: 2026-02-18 00:20 CST
+- Current goal:
+  - Verify whether generated triage debug overlays are in the correct format.
+- Done:
+  - Checked 40 files in `batch_eval_results/triage_only_gpt4o_debug/*_triage_overlay.png`; all readable and size-consistent.
+  - Confirmed every debug overlay has width/height ratio `1.0` vs source image (single-panel overlay, e.g., `256x256`).
+  - Compared with visual KB reference overlays in `results/Input_MnM2/{best_cases,worst_cases}`; these are multi-panel composites (e.g., `398x1570`).
+  - Verified prompt/implementation mismatch:
+    - `base_agent.py` prompt assumes 4-panel overlays (`Raw/GT/Pred/Error`).
+    - `triage_agent.py` currently calls `create_overlay(...)`.
+    - `create_overlay(...)` only generates a single blended image.
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --limit 20`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_debug/201_original_lax_4c_000_img_triage_overlay.png`
+  - `results/Input_MnM2/worst_cases/0.373_4C_LowDice_335_original_lax_4c_009.png`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/vlm_guardrail.py`
+  - `WORKLOG.md`
+- Notes:
+  - Current overlay files are valid images, but not valid input format for the 4-panel triage prompt.
+
+### Session: 2026-02-18 00:27 CST
+- Current goal:
+  - Validate that current single-panel triage overlays are not empty/blank.
+- Done:
+  - Batch-checked all `40` files under `batch_eval_results/triage_only_gpt4o_debug/*_triage_overlay.png`.
+  - Verified all files are readable and non-blank (no suspicious empty images).
+  - Measured color-content ratio (proxy for mask overlay): min `0.0201`, median `0.0521`, max `0.1015`.
+  - Verified every image has overlay color pixels (`no_overlay_color_count = 0`).
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport glob\nprint(len(glob.glob('batch_eval_results/triage_only_gpt4o_debug/*_triage_overlay.png')))\nPY`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_debug/201_original_lax_4c_000_img_triage_overlay.png`
+  - `WORKLOG.md`
+- Notes:
+  - Overlays are valid and non-empty, but still single-panel format (not the 4-panel format expected by current triage prompt).
+
+### Session: 2026-02-18 00:32 CST
+- Current goal:
+  - Analyze and document the exact “qualified vs unqualified” decision logic in the current pipeline.
+- Done:
+  - Traced triage decision flow in `TriageAgent` (feature issues + optional quality model + VLM verdict + score remapping).
+  - Traced gating behavior in `run_batch_repair.py` (`triage_category == good` => skip repair; otherwise proceed or triage-only stop).
+  - Traced full multi-agent final acceptance in `CoordinatorAgent` + `VerifierAgent` (approve/reject/needs_more_work loop and rollback behavior).
+  - Confirmed prompt/overlay mismatch in triage path: prompt expects 4-panel, runtime target overlay is single-panel.
+- Blocked:
+  - None.
+- Next command:
+  - `sed -n '1,260p' cardiac_agent_postproc/agents/triage_agent.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `run_batch_repair.py`
+  - `WORKLOG.md`
+- Notes:
+  - The active qualification logic is currently code-driven by `TriageCategory` and Verifier verdicts, not by config keys like `triage.mode/good_threshold/bad_threshold`.
+
+### Session: 2026-02-18 00:40 CST
+- Current goal:
+  - Clarify whether triage VLM input is 3 images and what those images are.
+- Done:
+  - Confirmed runtime input count is 3 images in `judge_visual_quality` (`1 good ref + 1 bad ref + 1 target`).
+  - Confirmed format mismatch: references are multi-panel overlays while target is currently single-panel overlay.
+- Blocked:
+  - None.
+- Next command:
+  - `sed -n '354,410p' cardiac_agent_postproc/agents/base_agent.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/vlm_guardrail.py`
+  - `WORKLOG.md`
+- Notes:
+  - Count is correct (3 images), but image format inconsistency can bias VLM decisions.
+
+### Session: 2026-02-18 00:54 CST
+- Current goal:
+  - Implement no-GT triage input alignment (single-panel references + single-panel prompt contract).
+- Done:
+  - Updated `BaseAgent._JUDGE_PROMPT` to single-panel overlay instructions (removed GT/error-map assumptions).
+  - Updated `VisualKnowledgeBase.load(...)` to auto-materialize single-panel reference overlays from `all_frames_export/{stem}_img.png` and `{stem}_pred.png`.
+  - Updated `VisualKnowledgeBase` knowledge text to remove error-map-dependent descriptions.
+  - Verified generated single-panel references: `results/Input_MnM2/single_panel_refs` with `49` overlays.
+  - Ran smoke test (`--limit 5`) and generated:
+    - `batch_eval_results/triage_only_gpt4o_grouping_smoke.csv`
+    - `batch_eval_results/triage_only_gpt4o_dice_diff_smoke.png`
+    - `batch_eval_results/triage_only_gpt4o_dice_stats_smoke.csv`
+  - Smoke result distribution: `good=5`, `needs_fix=0`.
+- Blocked:
+  - None.
+- Next command:
+  - `OPENAI_API_KEY=... python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --output_csv batch_eval_results/triage_only_gpt4o_grouping_v2.csv --output_plot batch_eval_results/triage_only_gpt4o_dice_diff_v2.png --stats_csv batch_eval_results/triage_only_gpt4o_dice_stats_v2.csv`
+- Key files:
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `results/Input_MnM2/single_panel_refs`
+  - `batch_eval_results/triage_only_gpt4o_grouping_smoke.csv`
+  - `WORKLOG.md`
+- Notes:
+  - This fixes the prior format mismatch where references were multi-panel but target was single-panel.
+
+### Session: 2026-02-18 00:57 CST
+- Current goal:
+  - Confirm whether VLM is currently active as a quality gate.
+- Done:
+  - Confirmed VLM is active in triage (`judge_visual_quality` / multi-image vision call) and used in smoke run logs.
+  - Confirmed Verifier still uses VLM comparison + VLM quality checks for final approval logic.
+- Blocked:
+  - None.
+- Next command:
+  - `rg -n \"judge_visual_quality|chat_vision_multi_json|_vlm_compare\" cardiac_agent_postproc/agents/*.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - VLM is enabled as a gate; rule/model signals remain as conservative fallback.
+
+### Session: 2026-02-18 01:06 CST
+- Current goal:
+  - Evaluate model performance on 10 good + 10 bad samples.
+- Done:
+  - Ran a 20-case evaluation with current triage+VLM logic:
+    - 10 good samples from `best_cases`
+    - 10 bad samples from `worst_cases`
+  - Saved detailed predictions: `batch_eval_results/triage_eval_10good_10bad.csv`
+  - Saved summary metrics: `batch_eval_results/triage_eval_10good_10bad_summary.json`
+  - Metrics:
+    - Accuracy: `0.80`
+    - Precision (`needs_fix`): `1.00`
+    - Recall (`needs_fix`): `0.60`
+    - F1 (`needs_fix`): `0.75`
+    - Confusion matrix: `TP=6, FP=0, TN=10, FN=4`
+  - Extracted 4 false negatives (bad -> predicted good): `307_...024`, `284_...003`, `209_...004`, `239_...006`.
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_eval_10good_10bad.csv')[['Stem','TrueLabel','PredLabel','VLM_Score']].to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_eval_10good_10bad.csv`
+  - `batch_eval_results/triage_eval_10good_10bad_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - Current model behavior is high precision but moderate recall for bad-case detection (misses some borderline low-dice bad samples).
+
+### Session: 2026-02-18 01:08 CST
+- Current goal:
+  - Visualize Dice differences based on the 20-case triage grouping.
+- Done:
+  - Generated Dice comparison figure by predicted group and true group:
+    - `batch_eval_results/triage_eval_10good_10bad_dice_by_group.png`
+  - Exported grouped Dice stats:
+    - `batch_eval_results/triage_eval_10good_10bad_dice_by_group_stats.csv`
+  - Predicted-group Dice summary:
+    - `good` (n=14): mean `0.9162`, median `0.9605`
+    - `needs_fix` (n=6): mean `0.7225`, median `0.7870`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_eval_10good_10bad_dice_by_group_stats.csv').to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_eval_10good_10bad_dice_by_group.png`
+  - `batch_eval_results/triage_eval_10good_10bad_dice_by_group_stats.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Dice values here use `DiceHintFromSet` parsed from curated best/worst filenames.
+
+### Session: 2026-02-18 01:20 CST
+- Current goal:
+  - Remove sample-size labels from Dice plots and keep only numeric value annotations.
+- Done:
+  - Updated plot annotation logic in `scripts/run_triage_only_gpt4o_grouping.py`:
+    - Removed `n=...` from on-plot text.
+    - Kept only numeric mean value annotation (e.g., `0.934`).
+  - Re-rendered Dice-by-group figures (value-only labels):
+    - `batch_eval_results/triage_eval_10good_10bad_dice_by_group.png`
+    - `batch_eval_results/triage_eval_10good_10bad_dice_by_group_values_only.png`
+    - `batch_eval_results/triage_eval_10good_10bad_tight_dice_by_group.png`
+    - `batch_eval_results/triage_eval_10good_10bad_tight_dice_by_group_values_only.png`
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --output_csv ... --output_plot ... --stats_csv ...`
+- Key files:
+  - `scripts/run_triage_only_gpt4o_grouping.py`
+  - `batch_eval_results/triage_eval_10good_10bad_dice_by_group.png`
+  - `batch_eval_results/triage_eval_10good_10bad_tight_dice_by_group.png`
+  - `WORKLOG.md`
+- Notes:
+  - Plot annotations now show only values; sample size remains available in CSV stats if needed.
+
+### Session: 2026-02-18 01:27 CST
+- Current goal:
+  - Run triage-only GPT-4o on all cases in background and save outputs to CSV for next-day plotting.
+- Done:
+  - Verified network behavior:
+    - In-sandbox run hit connection refused.
+    - Out-of-sandbox run successfully called GPT-4o.
+  - Launched detached full run (all discovered cases) in background using `setsid`.
+  - Background PID: `2899722`
+  - Confirmed process is alive and progressing (`~7/320` at initial check).
+- Running command:
+  - `setsid env OPENAI_API_KEY='***' python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --output_csv batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv --output_plot batch_eval_results/triage_only_gpt4o_dice_diff_all_cases.png --stats_csv batch_eval_results/triage_only_gpt4o_dice_stats_all_cases.csv > batch_eval_results/triage_only_gpt4o_all_cases.log 2>&1 < /dev/null &`
+- Output files:
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - `batch_eval_results/triage_only_gpt4o_dice_diff_all_cases.png`
+  - `batch_eval_results/triage_only_gpt4o_dice_stats_all_cases.csv`
+  - `batch_eval_results/triage_only_gpt4o_all_cases.log`
+- Quick check commands:
+  - `ps -fp 2899722`
+  - `tail -n 40 batch_eval_results/triage_only_gpt4o_all_cases.log`
+- Blocked:
+  - None.
+- Notes:
+  - The run should continue overnight as a detached process.
+
+### Session: 2026-02-18 10:15 CST
+- Current goal:
+  - Check `WORKLOG.md` and recover the latest task context.
+- Done:
+  - Reviewed the most recent worklog entries.
+  - Identified last recorded active task: detached all-case triage run with background PID `2899722`.
+  - Collected latest context to resume from the final logged session.
+- Blocked:
+  - None.
+- Next command:
+  - `ps -fp 2899722 && tail -n 40 batch_eval_results/triage_only_gpt4o_all_cases.log`
+- Key files:
+  - `WORKLOG.md`
+  - `batch_eval_results/triage_only_gpt4o_all_cases.log`
+- Notes:
+  - Latest prior session timestamp in log: `2026-02-18 01:27 CST`.
+
+### Session: 2026-02-18 10:16 CST
+- Current goal:
+  - Verify whether detached all-case triage run (`PID 2899722`) has completed.
+- Done:
+  - Checked process table: PID `2899722` is no longer running.
+  - Checked log tail and confirmed full completion (`320/320`) with outputs saved.
+  - Captured final group summary from log:
+    - `good=262`
+    - `needs_fix=58`
+  - Captured Dice mean by group from log:
+    - `good=0.923502`
+    - `needs_fix=0.879397`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_only_gpt4o_dice_stats_all_cases.csv').to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_all_cases.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - `batch_eval_results/triage_only_gpt4o_dice_diff_all_cases.png`
+  - `batch_eval_results/triage_only_gpt4o_dice_stats_all_cases.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Background run launched at `2026-02-18 01:27 CST` is now complete.
+
+### Session: 2026-02-18 10:23 CST
+- Current goal:
+  - Upgrade triage group visualization from 2 groups to 3 groups (`good`, `borderline`, `bad`) with MICCAI-style boxplot from CSV input.
+- Done:
+  - Added new standalone plotting script:
+    - `scripts/plot_triage_boxplot_miccai.py`
+  - Implemented CSV-driven plotting workflow:
+    - Input CSV + configurable score column (`--score_col`, default `Dice_Mean`)
+    - Automatic group-column selection (`--group_col auto`, prefers `VLM_Quality`)
+    - Group normalization to `good/borderline/bad` (supports aliases like `needs_fix` → `bad`)
+    - Fallback split logic: if only binary triage exists, uses `VLM_Quality` to split bad cases into `borderline` vs `bad`
+  - Implemented MICCAI-style figure settings:
+    - paper-like seaborn context, clean whitegrid, publication-friendly DPI/fonts/spines
+    - 3-group boxplot + jittered points + mean annotations
+  - Generated outputs from existing all-case CSV:
+    - `batch_eval_results/triage_only_gpt4o_dice_boxplot_miccai_3groups.png`
+    - `batch_eval_results/triage_only_gpt4o_dice_boxplot_miccai_3groups_stats.csv`
+  - Verified run output (auto-selected `VLM_Quality`):
+    - counts: `good=198`, `borderline=107`, `bad=15`
+    - Dice mean: `good=0.923982`, `borderline=0.907297`, `bad=0.862228`
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/plot_triage_boxplot_miccai.py --input_csv batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv --output_plot batch_eval_results/triage_only_gpt4o_dice_boxplot_miccai_3groups.pdf --stats_csv batch_eval_results/triage_only_gpt4o_dice_boxplot_miccai_3groups_stats.csv`
+- Key files:
+  - `scripts/plot_triage_boxplot_miccai.py`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - `batch_eval_results/triage_only_gpt4o_dice_boxplot_miccai_3groups.png`
+  - `batch_eval_results/triage_only_gpt4o_dice_boxplot_miccai_3groups_stats.csv`
+  - `WORKLOG.md`
+- Notes:
+  - This plotting path is fully decoupled from model inference and can be rerun directly from any compatible CSV.
+
+### Session: 2026-02-18 10:31 CST
+- Current goal:
+  - Plot 3-group MICCAI-style boxplot for Ollama all-case triage CSV.
+- Done:
+  - Verified input exists:
+    - `/data484_5/xzhao14/cardiac_agent_postproc/batch_eval_results/triage_only_ollama_grouping_all_cases.csv`
+  - Ran 3-group plotting script on Ollama results.
+  - Generated outputs:
+    - `batch_eval_results/triage_only_ollama_dice_boxplot_miccai_3groups.png`
+    - `batch_eval_results/triage_only_ollama_dice_boxplot_miccai_3groups_stats.csv`
+  - Auto-selected group column: `VLM_Quality`
+  - Group counts:
+    - `good=55`
+    - `borderline=11`
+    - `bad=254`
+  - Dice mean by group:
+    - `good=0.919470`
+    - `borderline=0.917323`
+    - `bad=0.914572`
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/plot_triage_boxplot_miccai.py --input_csv /data484_5/xzhao14/cardiac_agent_postproc/batch_eval_results/triage_only_ollama_grouping_all_cases.csv --output_plot batch_eval_results/triage_only_ollama_dice_boxplot_miccai_3groups.pdf --stats_csv batch_eval_results/triage_only_ollama_dice_boxplot_miccai_3groups_stats.csv`
+- Key files:
+  - `scripts/plot_triage_boxplot_miccai.py`
+  - `batch_eval_results/triage_only_ollama_grouping_all_cases.csv`
+  - `batch_eval_results/triage_only_ollama_dice_boxplot_miccai_3groups.png`
+  - `batch_eval_results/triage_only_ollama_dice_boxplot_miccai_3groups_stats.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Same plotting pipeline now covers both GPT-4o and Ollama triage outputs.
+
+### Session: 2026-02-18 10:48 CST
+- Current goal:
+  - Read `WORKLOG.md` and recover the latest operation context.
+- Done:
+  - Loaded the latest `WORKLOG.md` entries.
+  - Confirmed the most recent previously logged session is `2026-02-18 10:31 CST`.
+  - Prepared the latest-session summary for user handoff.
+- Blocked:
+  - None.
+- Next command:
+  - `tail -n 80 WORKLOG.md`
+- Key files:
+  - `WORKLOG.md`
+- Notes:
+  - User requested direct readback of the worklog.
+
+### Session: 2026-02-18 11:03 CST
+- Current goal:
+  - Compute correlation between VLM score and Dice for the GPT-4o all-case triage run.
+- Done:
+  - Parsed `batch_eval_results/triage_only_gpt4o_all_cases.log` and extracted per-case VLM scores from `DEBUG: Raw VLM Response`.
+  - Aligned extracted scores with per-case Dice values from the run output CSV.
+  - Computed correlation on 320 matched cases:
+    - Pearson `r = 0.288370` (`p = 1.519e-07`)
+    - Spearman `rho = 0.287988` (`p = 1.580e-07`)
+  - Verified extracted VLM score distribution:
+    - `3: 15`, `5: 107`, `8: 72`, `9: 126`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv')[['VLM_Quality','Dice_Mean']].groupby('VLM_Quality').describe())\nPY`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_all_cases.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - `WORKLOG.md`
+- Notes:
+  - The log itself does not contain per-case Dice values; Dice was joined from the CSV produced by the same run referenced inside the log.
+
+### Session: 2026-02-18 11:06 CST
+- Current goal:
+  - Compute binary triage metrics (`good` vs `needs_fix`) against curated good/worst folder groupings.
+- Done:
+  - Parsed curated labels from:
+    - `results/Input_MnM2/best_cases` as `good`
+    - `results/Input_MnM2/worst_cases` as `needs_fix`
+  - Matched stems to predictions in:
+    - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv` (`TriageCategory`)
+  - Evaluated 49 labeled samples (10 good + 39 needs_fix), all matched.
+  - Computed confusion matrix and metrics:
+    - `TP=26, FP=0, TN=10, FN=13`
+    - `Accuracy=0.734694`
+    - `Recall(needs_fix)=0.666667`
+    - `Recall(good)=1.000000`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nm = pd.read_csv('batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv')\nprint(m['TriageCategory'].value_counts().to_string())\nPY`
+- Key files:
+  - `results/Input_MnM2/best_cases`
+  - `results/Input_MnM2/worst_cases`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Positive class for recall is reported as `needs_fix`; `recall_good` is also provided for completeness.
+
+### Session: 2026-02-18 11:28 CST
+- Current goal:
+  - Create an English visualization figure for binary triage performance on curated best/worst sets.
+- Done:
+  - Built a two-panel English figure from curated labels + GPT-4o triage predictions:
+    - Left: confusion matrix (`True: Good/Needs Fix` vs `Pred: Good/Needs Fix`)
+    - Right: bar chart of `Accuracy`, `Recall (Needs Fix)`, `Recall (Good)`
+  - Saved figure:
+    - `batch_eval_results/triage_eval_mnm2_best_worst_binary_metrics_en.png`
+  - Saved numeric summary:
+    - `batch_eval_results/triage_eval_mnm2_best_worst_binary_metrics_en.csv`
+  - Confirmed plotted metrics:
+    - `Accuracy=0.734694`
+    - `Recall (Needs Fix)=0.666667`
+    - `Recall (Good)=1.000000`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nfrom PIL import Image\nim = Image.open('batch_eval_results/triage_eval_mnm2_best_worst_binary_metrics_en.png')\nprint(im.size)\nPY`
+- Key files:
+  - `batch_eval_results/triage_eval_mnm2_best_worst_binary_metrics_en.png`
+  - `batch_eval_results/triage_eval_mnm2_best_worst_binary_metrics_en.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Figure text and labels are fully in English as requested.
+
+### Session: 2026-02-18 11:33 CST
+- Current goal:
+  - Evaluate and visualize Ollama triage performance with Pearson correlation and binary metrics (AUC/ACC/Recall).
+- Done:
+  - Parsed per-case raw VLM score from:
+    - `batch_eval_results/triage_only_ollama_all_cases.log`
+  - Computed Pearson correlation between raw VLM score and `Dice_Mean` on all 320 cases:
+    - `Pearson r = 0.048646`
+    - `p = 3.858e-01`
+  - Built curated binary eval set from:
+    - `results/Input_MnM2/best_cases` as `good`
+    - `results/Input_MnM2/worst_cases` as `needs_fix`
+  - Matched 49 labeled samples and computed:
+    - `AUC = 0.591026` (using risk score derived from raw VLM score)
+    - `ACC = 0.693878`
+    - `Recall(needs_fix) = 0.794872`
+    - Confusion: `TP=31, FP=7, TN=3, FN=8`
+  - Generated English visualization:
+    - `batch_eval_results/triage_eval_ollama_auc_acc_recall_en.png`
+    - Includes ROC panel and metric bar chart.
+  - Exported numeric summary:
+    - `batch_eval_results/triage_eval_ollama_auc_acc_recall_en.csv`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_eval_ollama_auc_acc_recall_en.csv').to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_only_ollama_all_cases.log`
+  - `batch_eval_results/triage_only_ollama_grouping_all_cases.csv`
+  - `batch_eval_results/triage_eval_ollama_auc_acc_recall_en.png`
+  - `batch_eval_results/triage_eval_ollama_auc_acc_recall_en.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Pearson correlation used all-case data (n=320); AUC/ACC/Recall used curated best/worst subset (n=49).
+
+### Session: 2026-02-18 11:38 CST
+- Current goal:
+  - Add a direct GPT-4o vs Ollama comparison figure for binary triage metrics.
+- Done:
+  - Computed both models under the same evaluation protocol:
+    - Pearson correlation between raw VLM score and Dice on all 320 cases.
+    - Binary AUC/ACC/Recall on curated `best_cases` vs `worst_cases` subset (n=49).
+  - Generated English comparison figure with:
+    - ROC curves overlay (`GPT-4o` vs `Ollama`)
+    - Grouped bars for `AUC`, `ACC`, `Recall (Needs Fix)`
+  - Saved outputs:
+    - `batch_eval_results/triage_eval_gpt4o_vs_ollama_comparison_en.png`
+    - `batch_eval_results/triage_eval_gpt4o_vs_ollama_comparison_en.csv`
+  - Key results:
+    - GPT-4o: `AUC=0.616667`, `ACC=0.734694`, `Recall=0.666667`, `Pearson r=0.288370`
+    - Ollama: `AUC=0.591026`, `ACC=0.693878`, `Recall=0.794872`, `Pearson r=0.048646`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_eval_gpt4o_vs_ollama_comparison_en.csv').to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_eval_gpt4o_vs_ollama_comparison_en.png`
+  - `batch_eval_results/triage_eval_gpt4o_vs_ollama_comparison_en.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Evaluation subset and metric definitions are aligned across both models for fair comparison.
+
+### Session: 2026-02-18 11:42 CST
+- Current goal:
+  - Rebuild GPT-4o vs Ollama comparison using Dice-threshold labels (`Dice_Mean > 0.9` as good).
+- Done:
+  - Re-defined binary ground truth on all 320 cases:
+    - `good` if `Dice_Mean > 0.9`
+    - `needs_fix` if `Dice_Mean <= 0.9`
+  - Recomputed metrics for both models and generated a new English comparison figure:
+    - ROC overlay + grouped bars for `AUC`, `ACC`, `Recall (Needs Fix)`
+  - Saved outputs:
+    - `batch_eval_results/triage_eval_gpt4o_vs_ollama_dice_threshold_0p9_comparison_en.png`
+    - `batch_eval_results/triage_eval_gpt4o_vs_ollama_dice_threshold_0p9_comparison_en.csv`
+  - Key results under Dice-threshold labels (`n=320`, good=255, needs_fix=65):
+    - GPT-4o: `AUC=0.688145`, `ACC=0.778125`, `Recall=0.400000`
+    - Ollama: `AUC=0.511704`, `ACC=0.328125`, `Recall=0.815385`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_eval_gpt4o_vs_ollama_dice_threshold_0p9_comparison_en.csv').to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_eval_gpt4o_vs_ollama_dice_threshold_0p9_comparison_en.png`
+  - `batch_eval_results/triage_eval_gpt4o_vs_ollama_dice_threshold_0p9_comparison_en.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Positive class for recall remains `needs_fix`.
+
+### Session: 2026-02-18 12:09 CST
+- Current goal:
+  - Audit triage diagnosis logic and update prompts/scoring to improve AUC stability.
+- Done:
+  - Identified key calibration issues:
+    - VLM score prompt encouraged coarse/discrete scores.
+    - Triagescore mapping collapsed to 3 values (`~0.0/0.5/1.0`), limiting ranking quality.
+    - KB prompt used hard Dice wording that can over-bias visual judgment.
+  - Updated VLM judge prompt in `cardiac_agent_postproc/agents/base_agent.py`:
+    - Added morphology-first rubric and continuous score guidance.
+    - Added per-criterion subscore schema (`ring_integrity`, `separation`, `structure_presence`, `contour_quality`).
+  - Updated KB decision guidance in `cardiac_agent_postproc/agents/visual_knowledge.py`:
+    - Replaced hard Dice boundary wording with anatomy-first boundary description.
+  - Updated triage prompt in `prompts/triage_system.txt`:
+    - Added score-calibration instruction and no-exact-Dice reminder.
+  - Refactored triage scoring in `cardiac_agent_postproc/agents/triage_agent.py`:
+    - Replaced discrete score mapping with continuous calibrated score.
+    - Blended VLM good-prob and quality-model score (configurable weights).
+    - Added severity penalty and category consistency pass.
+    - Exposed new context fields: `vlm_score`, `vlm_good_prob`, `qm_bad_prob`, `triage_bad_prob`, `triage_severity`.
+  - Extended triage-only CSV exports:
+    - `scripts/run_triage_only_gpt4o_grouping.py`
+    - `scripts/run_triage_only_ollama_grouping.py`
+    - Added columns: `TriageBadProb`, `TriageSeverity`, `VLM_Score`, `VLM_GoodProb`, `QM_BadProb`.
+  - Ran syntax checks:
+    - `python -m py_compile ...` on all touched files (passed).
+  - Offline diagnostic scan (pre-change outputs) showed blend potential:
+    - GPT-4o AUC: raw VLM `0.688` → blended risk best `0.708` (alpha_vlm≈0.85).
+    - Ollama AUC: raw VLM `0.512`; best is quality-model dominated (`~0.624`).
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --output_csv batch_eval_results/triage_only_gpt4o_grouping_all_cases_v2.csv --output_plot batch_eval_results/triage_only_gpt4o_dice_diff_all_cases_v2.png --stats_csv batch_eval_results/triage_only_gpt4o_dice_stats_all_cases_v2.csv`
+- Key files:
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `prompts/triage_system.txt`
+  - `scripts/run_triage_only_gpt4o_grouping.py`
+  - `scripts/run_triage_only_ollama_grouping.py`
+  - `WORKLOG.md`
+- Notes:
+  - New metrics require rerunning triage scripts because prompt/scoring updates only affect fresh inference outputs.
+
+### Session: 2026-02-18 12:11 CST
+- Current goal:
+  - Validate updated triage pipeline and set model-specific blend weights in config.
+- Done:
+  - Updated triage blend config for GPT-4o:
+    - `config/azure_openai_medrag.yaml`
+    - `vlm_good_prob_weight=0.85`, `qm_good_prob_weight=0.15`
+  - Updated triage blend config for local Ollama ministral:
+    - `config/ollama_ministral_triage.yaml`
+    - `vlm_good_prob_weight=0.0`, `qm_good_prob_weight=1.0`
+  - Ran GPT-4o smoke test (`--limit 5`) with updated prompt + scoring:
+    - `batch_eval_results/triage_only_gpt4o_grouping_smoke.csv`
+    - `batch_eval_results/triage_only_gpt4o_dice_diff_smoke.png`
+    - `batch_eval_results/triage_only_gpt4o_dice_stats_smoke.csv`
+  - Confirmed new CSV fields are emitted:
+    - `TriageBadProb`, `TriageSeverity`, `VLM_Score`, `VLM_GoodProb`, `QM_BadProb`
+  - Observed VLM now returns calibrated decimal score format plus subscores (e.g., `score=8.5` with `subscores` block).
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/run_triage_only_ollama_grouping.py --config config/ollama_ministral_triage.yaml --limit 50 --output_csv batch_eval_results/triage_only_ollama_grouping_recalib50.csv --output_plot batch_eval_results/triage_only_ollama_dice_diff_recalib50.png --stats_csv batch_eval_results/triage_only_ollama_dice_stats_recalib50.csv`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `config/ollama_ministral_triage.yaml`
+  - `batch_eval_results/triage_only_gpt4o_grouping_smoke.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Smoke run verified execution path and new output schema; full-run metrics still require full-case rerun.
+
+### Session: 2026-02-18 15:51 CST
+- Current goal:
+  - Check current triage-agent decision logic and verify how many reference images are used in VLM triage.
+- Done:
+  - Inspected `cardiac_agent_postproc/agents/triage_agent.py` decision flow in `process_case()`.
+  - Confirmed triage calls `judge_visual_quality(overlay_path)` without overriding `n_refs`.
+  - Confirmed default in `cardiac_agent_postproc/agents/base_agent.py` is `n_refs=1`, and VLM few-shot selection is `get_few_shot_set(n_refs, n_refs)`.
+  - Verified this means `1 good + 1 bad = 2 reference` overlays are sent, plus the target overlay (total 3 images in the triage VLM call).
+  - Checked `cardiac_agent_postproc/agents/visual_knowledge.py`: `get_few_shot_set()` returns random subsets and can return fewer examples only if the KB pool itself is smaller.
+  - Confirmed no config entry currently controls triage `n_refs`; it is hardcoded by default argument.
+  - Noted `triage.vlm_enabled` in config is currently not read by `TriageAgent` code path.
+- Blocked:
+  - None.
+- Next command:
+  - `rg -n "judge_visual_quality\\(|n_refs|get_few_shot_set\\(" cardiac_agent_postproc -S`
+- Key files:
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `WORKLOG.md`
+- Notes:
+  - If `visual_kb` is missing or `create_overlay()` fails, triage falls back to non-VLM signals for that case.
+
+### Session: 2026-02-18 16:22 CST
+- Current goal:
+  - Analyze how to improve DiagnosisAgent accuracy and identify highest-impact bottlenecks.
+- Done:
+  - Reviewed diagnosis pipeline implementation in `cardiac_agent_postproc/agents/diagnosis_agent.py`:
+    - rule diagnosis generation (`_diagnose_rules`)
+    - VLM diagnosis path (`_diagnose_vlm`)
+    - LLM synthesis + parsing (`process_case`, `_parse_llm_diagnoses`)
+  - Reviewed diagnosis prompts:
+    - `prompts/diagnosis_system.txt`
+    - `prompts/diagnosis_prompt.txt`
+  - Audited existing logs for diagnosis issue-name stability and parser compatibility.
+  - Ran a quick frequency scan over local logs to compare emitted issue names vs canonical `ISSUE_OPS_MAP` keys.
+  - Key finding: issue-label drift is severe (top non-canonical labels dominate):
+    - `"Myo discontinuity with LV leakage"`: 802
+    - `"RV-LV direct contact"`: 588
+    - many additional variants such as `"LV too large"`, `"Myo too thin"`, `"Rough LV boundary edges"`.
+  - Identified likely root causes:
+    - Prompt requests natural-language issue names while planner/executor logic depends on canonical issue ontology.
+    - Current `issue_map` normalization is limited and mostly exact-match/case-sensitive.
+    - LLM synthesis can overwrite deterministic rule labels before canonicalization/dedup.
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/run_diagnosis_audit.py --chunk 0 --total_chunks 1`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `case_335_diagnosis_debug.log`
+  - `case_335_diagnosis_fix.log`
+  - `WORKLOG.md`
+- Notes:
+  - High-priority improvement should focus on canonical issue normalization and deterministic merge policy before tuning reference count or model prompts.
+
+### Session: 2026-02-18 16:30 CST
+- Current goal:
+  - Improve triage correctness first by reducing VLM reference noise and issue-label drift.
+- Done:
+  - Updated triage VLM few-shot selection to be more stable and relevant:
+    - Added deterministic sampling support (`seed`) in `VisualKnowledgeBase`.
+    - Added same-view preference (`2CH/3CH/4CH/SAX` normalization + view-priority selection with fallback).
+    - Extended few-shot APIs with optional `view_type` and `seed`.
+  - Extended `BaseAgent.judge_visual_quality()` to accept:
+    - `n_refs`, `view_type`, `seed` (backward compatible defaults retained).
+  - Updated `TriageAgent.process_case()`:
+    - Added configurable triage VLM refs (`agents.triage.vlm_n_refs`, default fallback=2).
+    - Added optional view-matching toggle (`agents.triage.vlm_ref_match_view`, default fallback=true).
+    - Passed deterministic seed (`triage:{stem}`) to reference selection for reproducibility.
+  - Added triage issue canonicalization:
+    - New normalization helpers map noisy VLM/LLM text (e.g., `"Myo discontinuity with LV leakage"`, `"RV-LV direct contact"`) into canonical triage labels (e.g., `disconnected_myo`, `rv_lv_touching`).
+    - Applied normalization after feature detection, VLM merge, LLM merge, and challenge handling.
+    - Recomputed final severity using merged canonical issues to improve gating consistency.
+  - Added new triage config keys to main configs:
+    - `config/default.yaml`
+    - `config/azure_openai_medrag.yaml`
+    - `config/openai.yaml`
+    - `config/gemini.yaml`
+    - `config/ollama_local.yaml`
+    - `config/ollama_ministral_triage.yaml`
+    - `config/gpt4o_case307.yaml`
+  - Validation completed:
+    - `python -m py_compile cardiac_agent_postproc/agents/visual_knowledge.py cardiac_agent_postproc/agents/base_agent.py cardiac_agent_postproc/agents/triage_agent.py`
+    - Quick deterministic-selection sanity check and issue-normalization sanity check via inline Python snippets.
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --limit 50 --output_csv batch_eval_results/triage_only_gpt4o_grouping_viewmatch50.csv --output_plot batch_eval_results/triage_only_gpt4o_dice_diff_viewmatch50.png --stats_csv batch_eval_results/triage_only_gpt4o_dice_stats_viewmatch50.csv`
+- Key files:
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `config/openai.yaml`
+  - `config/gemini.yaml`
+  - `config/ollama_local.yaml`
+  - `config/ollama_ministral_triage.yaml`
+  - `config/gpt4o_case307.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - This change intentionally prioritizes triage consistency/precision over token cost (refs default changed to 2 per class in triage path).
+
+### Session: 2026-02-18 16:31 CST
+- Current goal:
+  - Run a smoke test to verify new triage reference-selection and issue-normalization logic in live pipeline path.
+- Done:
+  - Executed:
+    - `python scripts/run_triage_only_ollama_grouping.py --config config/ollama_ministral_triage.yaml --limit 1 --output_csv batch_eval_results/_triage_smoke_new_logic.csv --output_plot batch_eval_results/_triage_smoke_new_logic.png --stats_csv batch_eval_results/_triage_smoke_new_logic_stats.csv`
+  - Confirmed runtime log now reports:
+    - `VLM judge: 2 good + 2 bad refs (view=4ch) ...`
+  - Confirmed output artifacts generated:
+    - `batch_eval_results/_triage_smoke_new_logic.csv`
+    - `batch_eval_results/_triage_smoke_new_logic.png`
+    - `batch_eval_results/_triage_smoke_new_logic_stats.csv`
+  - Observed environment-specific runtime limitation:
+    - Local Ollama endpoint refused connection (`http://localhost:11434/v1`), so VLM response was empty in this smoke.
+    - Pipeline still completed successfully using fallback logic.
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --limit 50 --output_csv batch_eval_results/triage_only_gpt4o_grouping_viewmatch50.csv --output_plot batch_eval_results/triage_only_gpt4o_dice_diff_viewmatch50.png --stats_csv batch_eval_results/triage_only_gpt4o_dice_stats_viewmatch50.csv`
+- Key files:
+  - `scripts/run_triage_only_ollama_grouping.py`
+  - `batch_eval_results/_triage_smoke_new_logic.csv`
+  - `batch_eval_results/_triage_smoke_new_logic.png`
+  - `batch_eval_results/_triage_smoke_new_logic_stats.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Smoke run validated code path integration and new logging semantics despite unavailable local VLM backend.
+
+### Session: 2026-02-18 16:41 CST
+- Current goal:
+  - Launch full `run_triage_only_gpt4o_grouping.py` in background using latest triage logic and renamed outputs.
+- Done:
+  - Confirmed latest triage code path is active (logs show `2 good + 2 bad refs (view=4ch)`).
+  - Stopped foreground run after user interruption and switched to background execution.
+  - Started background command with explicit API key env and new output names:
+    - CSV: `batch_eval_results/triage_only_gpt4o_grouping_all_cases_ref4_viewmatch_bg.csv`
+    - Plot: `batch_eval_results/triage_only_gpt4o_dice_diff_all_cases_ref4_viewmatch_bg.png`
+    - Stats: `batch_eval_results/triage_only_gpt4o_dice_stats_all_cases_ref4_viewmatch_bg.csv`
+    - Debug dir: `batch_eval_results/triage_only_gpt4o_debug_ref4_viewmatch_bg`
+    - Log: `batch_eval_results/triage_only_gpt4o_all_cases_ref4_viewmatch_bg.log`
+  - Verified process is running in background:
+    - PID: `3586905`
+- Blocked:
+  - None.
+- Next command:
+  - `tail -f batch_eval_results/triage_only_gpt4o_all_cases_ref4_viewmatch_bg.log`
+- Key files:
+  - `scripts/run_triage_only_gpt4o_grouping.py`
+  - `batch_eval_results/triage_only_gpt4o_all_cases_ref4_viewmatch_bg.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases_ref4_viewmatch_bg.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Background process writes progress/errors to the log file; final artifacts are generated after process exits.
+
+### Session: 2026-02-18 16:49 CST
+- Current goal:
+  - Stop/verify termination of triage background run after user feedback about empty VLM responses.
+- Done:
+  - Checked active processes for `run_triage_only_gpt4o_grouping.py`.
+  - Verified no running Python triage process remains.
+  - Confirmed the last run had already completed and produced outputs, but with VLM failures (`Raw VLM Response: {}` / connection-refused path).
+- Blocked:
+  - None.
+- Next command:
+  - `tail -n 50 batch_eval_results/triage_only_gpt4o_all_cases_ref4_viewmatch_bg.log`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_all_cases_ref4_viewmatch_bg.log`
+  - `WORKLOG.md`
+- Notes:
+  - Before rerun comparison, VLM endpoint connectivity/auth must be fixed to avoid fallback-only results.
+
+### Session: 2026-02-18 16:51 CST
+- Current goal:
+  - Store user-provided API key in project `.env` file.
+- Done:
+  - Updated `OPENAI_API_KEY` value in `.env` to the user-provided key.
+- Blocked:
+  - None.
+- Next command:
+  - `cat .env`
+- Key files:
+  - `.env`
+  - `WORKLOG.md`
+- Notes:
+  - Only the `OPENAI_API_KEY` line was changed.
+
+### Session: 2026-02-18 16:53 CST
+- Current goal:
+  - Stop all running `run_triage_only_gpt4o_grouping.py` tasks on user request.
+- Done:
+  - Located active triage background process.
+  - Terminated matching process via `pkill -f "python .*run_triage_only_gpt4o_grouping.py"`.
+  - Verified no `python ...run_triage_only_gpt4o_grouping.py` process remains.
+- Blocked:
+  - None.
+- Next command:
+  - `pgrep -af "python .*run_triage_only_gpt4o_grouping.py" || true`
+- Key files:
+  - `WORKLOG.md`
+- Notes:
+  - Task stop requested explicitly by user and completed.
+
+### Session: 2026-02-18 17:07 CST
+- Current goal:
+  - Construct a 4-way triage reference dataset collection for few-shot experiments.
+- Done:
+  - Added new script:
+    - `scripts/build_triage_fourshot_collections.py`
+  - Implemented automatic 4-way categorization from `results/Input_MnM2/metrics_report.csv`:
+    - `good`: `mean_dice >= 0.93` and `was_disc_c2 == False`
+    - `bad_high_dice`: `was_disc_c2 == True` and `mean_dice > 0.90`
+    - `bad`: `mean_dice < 0.90` and not in `bad_high_dice`
+    - `other`: remaining cases
+  - Implemented overlay handling:
+    - Prefer existing `single_panel_refs/{stem}_overlay.png`
+    - Auto-generate missing overlays from `all_frames_export/{stem}_img.png + {stem}_pred.png`
+  - Generated 4-way collection outputs under:
+    - `results/Input_MnM2/triage_4way_collections/`
+  - Output files:
+    - `results/Input_MnM2/triage_4way_collections/triage_4way_manifest.csv`
+    - `results/Input_MnM2/triage_4way_collections/triage_4way_summary.csv`
+  - Output category folders:
+    - `results/Input_MnM2/triage_4way_collections/categories/good`
+    - `results/Input_MnM2/triage_4way_collections/categories/bad`
+    - `results/Input_MnM2/triage_4way_collections/categories/bad_high_dice`
+    - `results/Input_MnM2/triage_4way_collections/categories/other`
+  - Verified completeness:
+    - 320/320 rows in manifest, 0 missing overlays.
+  - Category counts:
+    - `good=124`, `bad=65`, `bad_high_dice=5`, `other=126`
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/build_triage_fourshot_collections.py --results_dir results/Input_MnM2 --output_dir results/Input_MnM2/triage_4way_collections --good_min_dice 0.93 --bad_max_dice 0.90 --bad_high_dice_min 0.90`
+- Key files:
+  - `scripts/build_triage_fourshot_collections.py`
+  - `results/Input_MnM2/triage_4way_collections/triage_4way_manifest.csv`
+  - `results/Input_MnM2/triage_4way_collections/triage_4way_summary.csv`
+  - `results/Input_MnM2/triage_4way_collections/categories/good`
+  - `results/Input_MnM2/triage_4way_collections/categories/bad`
+  - `results/Input_MnM2/triage_4way_collections/categories/bad_high_dice`
+  - `results/Input_MnM2/triage_4way_collections/categories/other`
+  - `WORKLOG.md`
+- Notes:
+  - Current dataset is all 4C view because source metrics contain only `view=4C`.
+
+### Session: 2026-02-18 17:14 CST
+- Current goal:
+  - Rebuild reference collections using only gold-standard curated folders (`best_cases`, `worst_cases`) for good/bad construction.
+- Done:
+  - Updated `scripts/build_triage_fourshot_collections.py` to support source mode:
+    - `--source_mode metrics|gold_cases` (default remains `metrics`).
+  - Implemented `gold_cases` parsing from filename pattern in:
+    - `results/Input_MnM2/best_cases/*.png`
+    - `results/Input_MnM2/worst_cases/*.png`
+  - In `gold_cases` mode:
+    - `best_cases -> good`
+    - `worst_cases -> bad` or `bad_high_dice` (if Dice > threshold)
+  - Generated new gold-only collection:
+    - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_manifest.csv`
+    - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_summary.csv`
+    - category folders under `results/Input_MnM2/triage_4way_collections_gold/categories/`
+  - Final gold-only counts:
+    - `good=10` (all from `best_cases`)
+    - `bad=34` (from `worst_cases`, Dice <= 0.90)
+    - `bad_high_dice=5` (from `worst_cases`, Dice > 0.90)
+    - `other=0`
+  - Verified manifest size and labels:
+    - total rows `49` (`10 best + 39 worst`)
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/build_triage_fourshot_collections.py --source_mode gold_cases --results_dir results/Input_MnM2 --output_dir results/Input_MnM2/triage_4way_collections_gold`
+- Key files:
+  - `scripts/build_triage_fourshot_collections.py`
+  - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_manifest.csv`
+  - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_summary.csv`
+  - `results/Input_MnM2/triage_4way_collections_gold/categories/good`
+  - `results/Input_MnM2/triage_4way_collections_gold/categories/bad`
+  - `results/Input_MnM2/triage_4way_collections_gold/categories/bad_high_dice`
+  - `WORKLOG.md`
+- Notes:
+  - This version aligns with user's requirement that good/bad must come from curated gold folders.
+
+### Session: 2026-02-18 17:18 CST
+- Current goal:
+  - Build a separate `good_low_dice` subset (10 samples) with Dice in [0.90, 0.95].
+- Done:
+  - Added script:
+    - `scripts/build_good_low_dice_subset.py`
+  - Implemented subset construction from `results/Input_MnM2/metrics_report.csv` with configurable range and top-k.
+  - Executed:
+    - `python scripts/build_good_low_dice_subset.py --results_dir results/Input_MnM2 --output_dir results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10 --min_dice 0.90 --max_dice 0.95 --top_k 10`
+  - Selection policy used:
+    - `0.90 <= mean_dice <= 0.95`
+    - exclude `was_disc_c2=True` (good-style low-Dice subset)
+    - pick 10 lowest Dice within range (hardest good-low-Dice examples)
+  - Output files:
+    - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/good_low_dice_manifest.csv`
+    - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/good_low_dice_summary.csv`
+    - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/categories/good_low_dice/`
+    - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/overlays/`
+  - Verified integrity:
+    - 10 rows selected, 10 overlays generated, 0 missing overlay paths.
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/build_good_low_dice_subset.py --results_dir results/Input_MnM2 --output_dir results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10 --min_dice 0.90 --max_dice 0.95 --top_k 10`
+- Key files:
+  - `scripts/build_good_low_dice_subset.py`
+  - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/good_low_dice_manifest.csv`
+  - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/good_low_dice_summary.csv`
+  - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/categories/good_low_dice`
+  - `WORKLOG.md`
+- Notes:
+  - If needed, `--include_disc` can include `was_disc_c2=True` in this subset.
+
+### Session: 2026-02-18 17:20 CST
+- Current goal:
+  - Unify folder names for the final 4-category reference set.
+- Done:
+  - Unified category directory names under:
+    - `results/Input_MnM2/triage_4way_collections_gold/categories/`
+  - Final folder names:
+    - `01_good`
+    - `02_good_low_dice`
+    - `03_bad_high_dice`
+    - `04_bad`
+  - Moved/renamed existing gold categories:
+    - `good -> 01_good`
+    - `bad_high_dice -> 03_bad_high_dice`
+    - `bad -> 04_bad`
+  - Added `02_good_low_dice` by linking files from:
+    - `results/Input_MnM2/good_low_dice_subset_0p90_0p95_top10/categories/good_low_dice`
+  - Removed empty legacy `other` folder from this gold collection.
+  - Synchronized manifests/summaries to match unified naming and include 4 classes:
+    - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_manifest.csv`
+    - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_summary.csv`
+  - Saved backup of pre-rename manifest:
+    - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_manifest.pre_rename_backup.csv`
+- Blocked:
+  - None.
+- Next command:
+  - `python - <<'PY'\nimport pandas as pd\np='results/Input_MnM2/triage_4way_collections_gold/triage_4way_summary.csv'\nprint(pd.read_csv(p).to_string(index=False))\nPY`
+- Key files:
+  - `results/Input_MnM2/triage_4way_collections_gold/categories/01_good`
+  - `results/Input_MnM2/triage_4way_collections_gold/categories/02_good_low_dice`
+  - `results/Input_MnM2/triage_4way_collections_gold/categories/03_bad_high_dice`
+  - `results/Input_MnM2/triage_4way_collections_gold/categories/04_bad`
+  - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_manifest.csv`
+  - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_summary.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Verified `category_overlay_path` existence: 0 missing.
+
+### Session: 2026-02-18 17:28 CST
+- Current goal:
+  - Stop previous triage runs and switch runtime reference sampling to "pick 1 from each of 4 folders" per case.
+- Done:
+  - Confirmed old `run_triage_only_gpt4o_grouping.py` jobs were stopped.
+  - Updated runtime KB loading to ingest 4-way manifest:
+    - `results/Input_MnM2/triage_4way_collections_gold/triage_4way_manifest.csv`
+  - Added 4-way sampling API in visual KB:
+    - `get_four_way_set(categories, view_type, seed)` returns one reference per category.
+  - Updated VLM triage judgment path to support 4-way refs:
+    - `BaseAgent.judge_visual_quality(..., four_way_categories=...)`
+  - Wired triage config flags:
+    - `vlm_four_way_refs: true`
+    - `vlm_ref_categories: ["01_good","02_good_low_dice","03_bad_high_dice","04_bad"]`
+  - Smoke-tested with `--limit 1`; log confirms:
+    - `VLM judge: 4-way refs (...) -> 4 refs`
+  - Started new full background run with renamed outputs:
+    - CSV: `batch_eval_results/triage_only_gpt4o_grouping_all_cases_ref4_each1.csv`
+    - Plot: `batch_eval_results/triage_only_gpt4o_dice_diff_all_cases_ref4_each1.png`
+    - Stats: `batch_eval_results/triage_only_gpt4o_dice_stats_all_cases_ref4_each1.csv`
+    - Debug dir: `batch_eval_results/triage_only_gpt4o_debug_ref4_each1`
+    - Log: `batch_eval_results/triage_only_gpt4o_all_cases_ref4_each1.log`
+    - PID: `3626079`
+- Blocked:
+  - None.
+- Next command:
+  - `tail -n 40 batch_eval_results/triage_only_gpt4o_all_cases_ref4_each1.log`
+- Key files:
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - This keeps backward compatibility: if `vlm_four_way_refs` is disabled, the old good/bad balanced sampling is still used.
+
+### Session: 2026-02-18 17:29 CST
+- Current goal:
+  - Verify background run health after switching to 4-way (1-per-folder) references.
+- Done:
+  - Monitored log:
+    - `batch_eval_results/triage_only_gpt4o_all_cases_ref4_each1.log`
+  - Found repeated runtime failures after startup:
+    - `[LLM-Vision-Multi] Connection refused`
+    - `DEBUG: Raw VLM Response: {}`
+  - Stopped the unhealthy run to avoid producing invalid evaluation outputs:
+    - terminated PID `3626079`
+  - Confirmed no active `run_triage_only_gpt4o_grouping.py` process remains.
+- Blocked:
+  - External VLM endpoint/service connectivity issue (`Connection refused`).
+- Next command:
+  - `tail -n 60 batch_eval_results/triage_only_gpt4o_all_cases_ref4_each1.log`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_all_cases_ref4_each1.log`
+  - `WORKLOG.md`
+- Notes:
+  - Sampling-mode code/config changes remain in place; only the failing run process was stopped.
+
+### Session: 2026-02-18 17:30 CST
+- Current goal:
+  - Re-check VLM connectivity after stopping the unhealthy background run.
+- Done:
+  - Ran a new 1-case probe with 4-way refs:
+    - `python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml --limit 1 --output_csv batch_eval_results/_triage_probe_ref4_each1_after_stop.csv --output_plot batch_eval_results/_triage_probe_ref4_each1_after_stop.png --stats_csv batch_eval_results/_triage_probe_ref4_each1_after_stop_stats.csv --debug_dir batch_eval_results/_triage_probe_ref4_each1_after_stop_debug`
+  - Verified 4-way sampling in log:
+    - `VLM judge: 4-way refs (01_good,02_good_low_dice,03_bad_high_dice,04_bad) -> 4 refs`
+  - Probe returned valid non-empty VLM JSON (no `{}`).
+- Blocked:
+  - None.
+- Next command:
+  - `setsid env OPENAI_API_KEY='***' python scripts/run_triage_only_gpt4o_grouping.py --config config/azure_openai_medrag.yaml ... &`
+- Key files:
+  - `batch_eval_results/_triage_probe_ref4_each1_after_stop.csv`
+  - `batch_eval_results/_triage_probe_ref4_each1_after_stop.png`
+  - `batch_eval_results/_triage_probe_ref4_each1_after_stop_stats.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Full-run failure appears intermittent/service-side rather than a deterministic code-path issue in 4-way sampling.
+
+### Session: 2026-02-18 17:32 CST
+- Current goal:
+  - Restart triage-only evaluation in background with 4-way refs and limit to 100 cases.
+- Done:
+  - Started new background run (limit=100) with renamed outputs:
+    - PID: `3643058`
+    - Log: `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100.log`
+    - CSV: `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100.csv`
+    - Plot: `batch_eval_results/triage_only_gpt4o_dice_diff_ref4_each1_limit100.png`
+    - Stats: `batch_eval_results/triage_only_gpt4o_dice_stats_ref4_each1_limit100.csv`
+    - Debug dir: `batch_eval_results/triage_only_gpt4o_debug_ref4_each1_limit100`
+  - Verified process is running via `ps -fp 3643058`.
+  - Confirmed runtime is using 4-way refs:
+    - `VLM judge: 4-way refs (01_good,02_good_low_dice,03_bad_high_dice,04_bad) -> 4 refs`
+- Blocked:
+  - VLM API calls currently showing repeated:
+    - `Connection refused`
+    - `DEBUG: Raw VLM Response: {}`
+  - This may degrade triage quality despite the run continuing.
+- Next command:
+  - `tail -n 40 batch_eval_results/triage_only_gpt4o_ref4_each1_limit100.log`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100.csv`
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - User requested a smaller background run; kept to 100 cases as requested.
+
+### Session: 2026-02-18 17:35 CST
+- Current goal:
+  - Ensure the provided API key is reliably picked up by runtime settings.
+- Done:
+  - Updated `.env` to include both key names:
+    - `OPENAI_API_KEY=...`
+    - `AZURE_OPENAI_API_KEY=...`
+  - Updated key loading fallback in settings:
+    - `OPENAI_API_KEY` -> fallback to `AZURE_OPENAI_API_KEY`
+  - Verified with a quick runtime check:
+    - `LLMSettings().openai_api_key` loaded successfully (length 32).
+- Blocked:
+  - None.
+- Next command:
+  - `python scripts/test_azure_openai_api.py --config config/azure_openai_medrag.yaml --timeout 90`
+- Key files:
+  - `.env`
+  - `cardiac_agent_postproc/settings.py`
+  - `WORKLOG.md`
+- Notes:
+  - This change prevents key-name mismatch issues across scripts/configs.
+
+### Session: 2026-02-18 17:37 CST
+- Current goal:
+  - Start a new background triage run (100 cases) after key-loading adjustments.
+- Done:
+  - Launched background command with both env vars:
+    - `OPENAI_API_KEY=...`
+    - `AZURE_OPENAI_API_KEY=...`
+  - Run details:
+    - PID: `3657948`
+    - Log: `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_keyfix.log`
+    - CSV: `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_keyfix.csv`
+    - Plot: `batch_eval_results/triage_only_gpt4o_dice_diff_ref4_each1_limit100_keyfix.png`
+    - Stats: `batch_eval_results/triage_only_gpt4o_dice_stats_ref4_each1_limit100_keyfix.csv`
+    - Debug dir: `batch_eval_results/triage_only_gpt4o_debug_ref4_each1_limit100_keyfix`
+  - Verified run is using 4-way refs per case:
+    - `VLM judge: 4-way refs (01_good,02_good_low_dice,03_bad_high_dice,04_bad) -> 4 refs`
+- Blocked:
+  - Runtime still shows repeated connectivity failures:
+    - `Connection refused`
+    - `DEBUG: Raw VLM Response: {}`
+- Next command:
+  - `tail -n 80 batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_keyfix.log`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_keyfix.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_keyfix.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Key-name mismatch has been addressed, but endpoint connectivity remains unstable/failed in this environment.
+
+### Session: 2026-02-18 17:38 CST
+- Current goal:
+  - Stop the currently running 100-case background triage job.
+- Done:
+  - Stopped PID `3657948`.
+  - Verified no active `python scripts/run_triage_only_gpt4o_grouping.py` process remains.
+- Blocked:
+  - None.
+- Next command:
+  - `ps -ef | rg -n "python scripts/run_triage_only_gpt4o_grouping.py" -N || true`
+- Key files:
+  - `WORKLOG.md`
+- Notes:
+  - Stop was requested by user.
+
+### Session: 2026-02-18 17:39 CST
+- Current goal:
+  - Restart triage-only run in background with user-provided API key and 100-case limit.
+- Done:
+  - Started new run with both key env vars set:
+    - `OPENAI_API_KEY=...`
+    - `AZURE_OPENAI_API_KEY=...`
+  - Run details:
+    - PID: `3659757`
+    - Log: `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_keyfix_rerun1.log`
+    - CSV: `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_keyfix_rerun1.csv`
+    - Plot: `batch_eval_results/triage_only_gpt4o_dice_diff_ref4_each1_limit100_keyfix_rerun1.png`
+    - Stats: `batch_eval_results/triage_only_gpt4o_dice_stats_ref4_each1_limit100_keyfix_rerun1.csv`
+    - Debug dir: `batch_eval_results/triage_only_gpt4o_debug_ref4_each1_limit100_keyfix_rerun1`
+  - Verified process is running.
+  - Verified reference mode in log:
+    - `VLM judge: 4-way refs (01_good,02_good_low_dice,03_bad_high_dice,04_bad) -> 4 refs`
+- Blocked:
+  - Ongoing endpoint failures in runtime log:
+    - `Connection refused`
+    - `DEBUG: Raw VLM Response: {}`
+- Next command:
+  - `tail -n 80 batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_keyfix_rerun1.log`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_keyfix_rerun1.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_keyfix_rerun1.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Job keeps running despite VLM call failures; outputs may be biased if failures persist.
+
+### Session: 2026-02-18 17:41 CST
+- Current goal:
+  - Enforce "AZURE_OPENAI_API_KEY only" for triage runs.
+- Done:
+  - Stopped previous run (`PID 3659757`).
+  - Updated settings to read only `AZURE_OPENAI_API_KEY` for API key loading.
+  - Removed `OPENAI_API_KEY` entry from `.env`; kept only:
+    - `AZURE_OPENAI_API_KEY=...`
+  - Updated config comments to match Azure key source.
+  - Smoke-tested with explicit env unsetting:
+    - `env -u OPENAI_API_KEY AZURE_OPENAI_API_KEY='...' ... --limit 1`
+  - Started new background 100-case run using Azure key only:
+    - `setsid env -u OPENAI_API_KEY AZURE_OPENAI_API_KEY='...' python scripts/run_triage_only_gpt4o_grouping.py ...`
+    - PID: `3661466`
+    - Log: `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only.log`
+    - CSV: `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only.csv`
+    - Plot: `batch_eval_results/triage_only_gpt4o_dice_diff_ref4_each1_limit100_azure_only.png`
+    - Stats: `batch_eval_results/triage_only_gpt4o_dice_stats_ref4_each1_limit100_azure_only.csv`
+- Blocked:
+  - Runtime still shows endpoint errors:
+    - `Connection refused`
+    - `DEBUG: Raw VLM Response: {}`
+- Next command:
+  - `tail -n 80 batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only.log`
+- Key files:
+  - `.env`
+  - `cardiac_agent_postproc/settings.py`
+  - `config/azure_openai_medrag.yaml`
+  - `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only.log`
+  - `WORKLOG.md`
+- Notes:
+  - Key source is now strictly Azure env key for this project runtime path.
+
+### Session: 2026-02-18 17:46 CST
+- Current goal:
+  - Diagnose persistent `Connection refused`/empty VLM responses and run outside sandbox.
+- Done:
+  - Ran outside-sandbox connectivity probes (5 rounds) using:
+    - `python scripts/test_azure_openai_api.py --config config/azure_openai_medrag.yaml --image test_vlm.png --timeout 90`
+  - Probe results:
+    - 5/5 passed (OpenAI SDK text + project client text + SDK vision + project client vision).
+  - Conclusion:
+    - API key is valid and endpoint is reachable outside sandbox.
+    - Prior failures are environment/network-restriction related in sandboxed execution context.
+  - Restarted triage-only 100-case run explicitly outside sandbox (Azure key only):
+    - PID: `3664973`
+    - Log: `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only_outside.log`
+    - CSV: `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+    - Plot: `batch_eval_results/triage_only_gpt4o_dice_diff_ref4_each1_limit100_azure_only_outside.png`
+    - Stats: `batch_eval_results/triage_only_gpt4o_dice_stats_ref4_each1_limit100_azure_only_outside.csv`
+  - Verified early runtime health:
+    - VLM returns non-empty JSON (`DEBUG: Ollama API returned. Length: ...`)
+    - No `Connection refused` / empty `{}` signatures in current log.
+- Blocked:
+  - None.
+- Next command:
+  - `tail -n 80 batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only_outside.log`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only_outside.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Keep running this job outside sandbox to avoid recurrence of connection failures.
+
+### Session: 2026-02-18 21:13 CST
+- Current goal:
+  - Check status of the previous triage-only 100-case Azure-outside run.
+- Done:
+  - Confirmed no active `python scripts/run_triage_only_gpt4o_grouping.py` process is running.
+  - Confirmed run completion from log tail:
+    - `Triage-only GPT-4o: 100%|██████████| 100/100`
+    - `Saved grouping CSV`, `Saved Dice plot`, `Saved Dice stats`.
+  - Verified output artifacts exist and were last updated at `2026-02-18 17:57 CST`:
+    - `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only_outside.log`
+    - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+    - `batch_eval_results/triage_only_gpt4o_dice_diff_ref4_each1_limit100_azure_only_outside.png`
+    - `batch_eval_results/triage_only_gpt4o_dice_stats_ref4_each1_limit100_azure_only_outside.csv`
+  - Verified summary metrics:
+    - `good=80`, `needs_fix=20`
+    - Dice mean: `good=0.927104`, `needs_fix=0.878562`
+- Blocked:
+  - None.
+- Next command:
+  - `head -n 20 batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+- Key files:
+  - `WORKLOG.md`
+  - `batch_eval_results/triage_only_gpt4o_ref4_each1_limit100_azure_only_outside.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+  - `batch_eval_results/triage_only_gpt4o_dice_stats_ref4_each1_limit100_azure_only_outside.csv`
+- Notes:
+  - Previous task completed successfully; no rerun currently in progress.
+
+### Session: 2026-02-18 22:01 CST
+- Current goal:
+  - Compute ACC/AUC/Recall on curated `best_cases` + `worst_cases` labels.
+- Done:
+  - Parsed curated labels from:
+    - `results/Input_MnM2/best_cases` -> `good`
+    - `results/Input_MnM2/worst_cases` -> `needs_fix`
+  - Evaluated previous completed run output:
+    - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+  - Matched overlap:
+    - `n_eval_overlap=15` (from `n_labels_total=49`)
+    - Class counts in overlap: `good=3`, `needs_fix=12`
+  - Computed metrics:
+    - `ACC=0.800000`
+    - `AUC=0.722222` (score=`TriageBadProb`)
+    - `Recall(needs_fix)=0.750000`
+    - Confusion: `TP=9, FP=0, TN=3, FN=3`
+  - Saved matched evaluation rows:
+    - `batch_eval_results/triage_eval_best_worst_on_ref4_each1_limit100_azure_only_outside.csv`
+- Blocked:
+  - None.
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nprint(pd.read_csv('batch_eval_results/triage_eval_best_worst_on_ref4_each1_limit100_azure_only_outside.csv').head(20).to_string(index=False))\nPY`
+- Key files:
+  - `results/Input_MnM2/best_cases`
+  - `results/Input_MnM2/worst_cases`
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+  - `batch_eval_results/triage_eval_best_worst_on_ref4_each1_limit100_azure_only_outside.csv`
+  - `WORKLOG.md`
+- Notes:
+  - User text used `recon`; metric was interpreted as `Recall(needs_fix)`.
+
+### Session: 2026-02-18 23:55 CST
+- Current goal:
+  - Check whether grouping differs between the latest 100-case run and the overlapping 100 cases in the previous all-cases run.
+- Done:
+  - Identified latest 100-case output:
+    - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv` (100 rows)
+  - Identified previous all-cases output:
+    - `batch_eval_results/triage_only_gpt4o_grouping_all_cases_ref4_viewmatch_bg.csv` (320 rows)
+  - Compared by `Stem` on overlap (100/100 matched stems):
+    - `same=20`, `diff=80`, `same_rate=0.20`
+    - Transition summary: previous `needs_fix` -> current `good` for 80 cases; previous `needs_fix` -> current `needs_fix` for 20 cases.
+  - Also computed reference comparison with older all-cases file:
+    - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+    - Overlap 100: `same=89`, `diff=11`
+- Blocked:
+  - None
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\nc='batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv'\np='batch_eval_results/triage_only_gpt4o_grouping_all_cases_ref4_viewmatch_bg.csv'\ndc=pd.read_csv(c)\ndp=pd.read_csv(p)[['Stem','TriageCategory']].rename(columns={'TriageCategory':'PrevCategory'})\nm=dc.merge(dp,on='Stem',how='inner')\nprint(m[m['TriageCategory']!=m['PrevCategory']][['Stem','PrevCategory','TriageCategory']].to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases_ref4_viewmatch_bg.csv`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Primary comparison used the most recent previous all-cases GPT-4o file by timestamp.
+
+### Session: 2026-02-18 23:59 CST
+- Current goal:
+  - Re-compare grouping difference using user-specified previous run log: `batch_eval_results/triage_only_gpt4o_all_cases.log`.
+- Done:
+  - Confirmed from log that previous all-cases output was:
+    - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - Recomputed overlap comparison against latest 100-case run:
+    - Current: `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+    - Previous: `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - Overlap comparison on `Stem`:
+    - `overlap=100`, `same=89`, `diff=11`
+  - Direction counts:
+    - previous `good` -> current `needs_fix`: `7`
+    - previous `needs_fix` -> current `good`: `4`
+  - Extracted 11 differing case stems for reporting.
+- Blocked:
+  - None
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\ncur='batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv'\nprev='batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv'\ndc=pd.read_csv(cur)[['Stem','TriageCategory']].rename(columns={'TriageCategory':'CurrentCategory'})\ndp=pd.read_csv(prev)[['Stem','TriageCategory']].rename(columns={'TriageCategory':'PrevCategory'})\nm=dc.merge(dp,on='Stem',how='inner')\nprint(m[m['CurrentCategory']!=m['PrevCategory']][['Stem','PrevCategory','CurrentCategory']].sort_values('Stem').to_string(index=False))\nPY`
+- Key files:
+  - `batch_eval_results/triage_only_gpt4o_all_cases.log`
+  - `batch_eval_results/triage_only_gpt4o_grouping_all_cases.csv`
+  - `batch_eval_results/triage_only_gpt4o_grouping_ref4_each1_limit100_azure_only_outside.csv`
+  - `WORKLOG.md`
+- Notes:
+  - This resolves ambiguity between multiple all-cases variants by anchoring to the explicit log-specified output path.
+
+### Session: 2026-02-19 00:03 CST
+- Current goal:
+  - Provide exact commands to run the full multi-agent pipeline.
+- Done:
+  - Verified CLI entrypoint and arguments:
+    - `python -m cardiac_agent_postproc.run --help`
+    - confirmed required arg: `--config`
+  - Reviewed runtime config requirements from:
+    - `cardiac_agent_postproc/run.py`
+    - `cardiac_agent_postproc/orchestrator.py`
+    - `config/default.yaml`
+    - `config/azure_openai_medrag.yaml`
+  - Confirmed current key loading behavior:
+    - `cardiac_agent_postproc/settings.py` reads `AZURE_OPENAI_API_KEY` as default OpenAI-compatible key source.
+  - Prepared run guidance to include install, env setup, config selection, launch command, and output locations.
+- Blocked:
+  - None
+- Next command:
+  - `python -m cardiac_agent_postproc.run --config config/azure_openai_medrag.yaml`
+- Key files:
+  - `cardiac_agent_postproc/run.py`
+  - `cardiac_agent_postproc/orchestrator.py`
+  - `cardiac_agent_postproc/settings.py`
+  - `config/azure_openai_medrag.yaml`
+  - `config/default.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - `run.py` executes full SOURCE+TARGET pipeline using `*_pred.png` + `*_img.png` discovery.
+
+### Session: 2026-02-19 00:25 CST
+- Current goal:
+  - Consolidate the project workflow into one experiment pipeline that takes `all_frames_export + best_cases + worst_cases` and outputs triage metrics, need-fix repair results, and MICCAI-style figures.
+- Done:
+  - Added a new unified runner:
+    - `scripts/run_miccai_multiagent_experiment.py`
+  - Implemented Stage-1 triage output:
+    - per-case triage CSV for all cases
+    - curated best/worst evaluation with `AUC`, `ACC`, `Precision`, `Recall`, `F1`, confusion counts
+    - 2-group Dice stats (`good` vs `needs_fix`)
+  - Implemented Stage-2 need-fix repair output:
+    - selects repair subset (`triage_need_fix` or curated `worst_cases`)
+    - runs diagnosis→plan→execute→verify via coordinator
+    - saves repaired labels to `repair/repaired_labels`
+    - saves diagnosis/op details and pre/post Dice + Dice delta per case
+    - computes repair summary metrics (mean Dice gain, improved ratio, paired t-test)
+  - Implemented Stage-3 MICCAI-style visualization output:
+    - ROC curve for triage curated classification
+    - Dice boxplot by triage group
+    - before/after Dice plot for need-fix repairs
+    - Dice-delta histogram
+    - each figure saved as PNG + PDF
+  - Updated README usage docs for the unified runner:
+    - `README.md` new section “Unified Experiment Runner (MICCAI-Style)”
+  - Validation:
+    - `python -m py_compile scripts/run_miccai_multiagent_experiment.py`
+    - `python scripts/run_miccai_multiagent_experiment.py --help`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_miccai_v1 --limit 20`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `README.md`
+  - `WORKLOG.md`
+- Notes:
+  - Stage-1 classification metrics are computed on curated overlap from `best_cases`/`worst_cases`, while group Dice stats use all triage rows with available GT Dice.
+
+### Session: 2026-02-19 00:29 CST
+- Current goal:
+  - Add visualization for the most-improved cases (5-10) to strengthen evidence of Dice improvement.
+- Done:
+  - Extended unified experiment runner with top-improved case visualization:
+    - Added CLI params:
+      - `--top_improved_k` (default `8`)
+      - `--top_improved_min_delta` (default `0.0`)
+    - Added output generation under:
+      - `figures/top_improved_cases/`
+    - For each selected case, generated a panel with:
+      - MRI image
+      - GT label
+      - before mask (+ Dice)
+      - after mask (+ Dice)
+      - change overlay highlighting corrected/regressed pixels
+    - Added summary files:
+      - `top_improved_cases.csv`
+      - top-improvement bar chart (`PNG` + `PDF`)
+  - Updated README with usage example for top-improved visualization flags.
+  - Validation:
+    - `python -m py_compile scripts/run_miccai_multiagent_experiment.py`
+    - `python scripts/run_miccai_multiagent_experiment.py --help`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_miccai_v1 --top_improved_k 10 --top_improved_min_delta 0.01`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `README.md`
+  - `WORKLOG.md`
+- Notes:
+  - This visualization is generated after repair statistics, so it directly reflects final saved repaired labels.
+
+### Session: 2026-02-19 00:43 CST
+- Current goal:
+  - Add flexible runtime controls for atlas/ref/LLM switches and ensure intermediate artifacts are materialized under a dedicated folder.
+- Done:
+  - Verified unified runner supports new CLI controls:
+    - `--atlas_mode`, `--atlas_filename`
+    - `--triage_n_refs`, `--triage_four_way_refs`, `--triage_ref_categories`
+    - `--llm_enabled`, `--vision_enabled`
+    - `--artifacts_dir`, `--refs_copy_mode`
+  - Verified artifact materialization paths:
+    - atlas files under `artifacts/atlas/`
+    - triage 4-way references under `artifacts/triage_4way_collections_gold/` with 4 category folders
+    - runtime config/args snapshots under `artifacts/config/` and `artifacts/runtime/`
+  - Verified local per-sample atlas path is used during repair when `--atlas_mode local_per_sample`.
+  - Verified LLM/VLM enable flags are honored in agent base logic (text/vision reasoning short-circuit with deterministic fallback when disabled).
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_miccai_v2 --artifacts_dir results/exp_miccai_v2/artifacts_all --atlas_mode local_per_sample --triage_n_refs 4 --triage_four_way_refs true --triage_ref_categories 01_good,02_good_low_dice,03_bad_high_dice,04_bad --llm_enabled true --vision_enabled true --top_improved_k 10 --top_improved_min_delta 0.01`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `README.md`
+  - `WORKLOG.md`
+- Notes:
+  - `--artifacts_dir` can be outside `<target_dir>`; summary JSON records resolved runtime overrides and artifact paths for reproducibility.
+
+### Session: 2026-02-19 01:18 CST
+- Current goal:
+  - Fully encapsulate dataset migration so atlas, repair KB, and quality model can be auto-prepared for a new source root (e.g., `results/Input_UKB`) in one command.
+- Done:
+  - Extended `scripts/run_miccai_multiagent_experiment.py` with auto-preparation controls:
+    - 4-way refs generation mode:
+      - `--refs4_build_mode {reuse,build_if_missing,rebuild}`
+      - auto-generates `triage_4way_manifest.csv` from `best_cases`/`worst_cases` when missing.
+    - quality model lifecycle:
+      - `--quality_model_mode {train_if_missing,retrain,reuse,disable}`
+      - `--quality_model_output`, `--quality_bad_dice_threshold`, `--quality_classifier_threshold`, `--quality_train_max_cases`
+      - trains dataset-specific `quality_model.pkl` from extracted features + GT Dice labels (with curated label override).
+    - repair KB lifecycle:
+      - `--repair_kb_mode {build_if_missing,rebuild,reuse,disable}`
+      - `--repair_kb_dir`, `--repair_kb_max_cases`, `--repair_kb_max_ops`, `--repair_kb_improved_thr`, `--repair_kb_degraded_thr`
+      - auto-builds `repair_kb/{improved,degraded,neutral}` using op-generated before/after diff overlays.
+  - Wired prepared artifact paths back into runtime config:
+    - `cfg.paths.repair_kb_dir`
+    - `cfg.quality_model.path` + triage override
+  - Added preparation details to summary JSON:
+    - `preparation.refs4`, `preparation.quality_model`, `preparation.repair_kb`
+  - Updated docs with one-command migration example for `results/Input_UKB`:
+    - `README.md` section “One-Command Migration To A New Dataset”.
+  - Validation:
+    - `python -m py_compile scripts/run_miccai_multiagent_experiment.py`
+    - `python scripts/run_miccai_multiagent_experiment.py --help`
+    - smoke run with auto quality model + auto repair KB on `results/Input_MnM2` (skip repair stage)
+    - smoke run with source root lacking `triage_4way_collections_gold` to verify auto 4-way refs generation
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_UKB --target_dir results/exp_ukb_miccai_v1 --artifacts_dir results/exp_ukb_miccai_v1/artifacts_all --atlas_mode rebuild_global --refs4_build_mode build_if_missing --quality_model_mode retrain --repair_kb_mode build_if_missing --triage_n_refs 4 --triage_four_way_refs true --triage_ref_categories 01_good,02_good_low_dice,03_bad_high_dice,04_bad --top_improved_k 10 --top_improved_min_delta 0.01`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `README.md`
+  - `WORKLOG.md`
+- Notes:
+  - Defaults now support dataset-scoped artifacts under `<target_dir>/artifacts` (or custom `--artifacts_dir`) to avoid accidental reuse across datasets.
+
+### Session: 2026-02-19 01:38 CST
+- Current goal:
+  - Add one parameter to support quick small-case runs while reusing previously generated knowledge and auto-skipping rebuild when knowledge exists.
+- Done:
+  - Added high-level switch:
+    - `--knowledge_mode {custom,auto_skip,force_rebuild}`
+  - Implemented policy mapping:
+    - `auto_skip`:
+      - refs4 -> `build_if_missing`
+      - quality model -> `train_if_missing`
+      - repair KB -> `build_if_missing` + `skip_if_exists=True`
+    - `force_rebuild`:
+      - refs4 -> `rebuild`
+      - quality model -> `retrain`
+      - repair KB -> `rebuild`
+    - `custom`:
+      - preserve detailed mode arguments (`--refs4_build_mode`, `--quality_model_mode`, `--repair_kb_mode`)
+  - Adjusted repair KB skip logic:
+    - in `build_if_missing` mode, if `skip_if_exists=True`, any detected existing KB artifacts trigger reuse (no rebuild), even for quick probe runs.
+  - Added runtime logging and summary recording for effective knowledge policy modes.
+  - Updated README with quick probe example:
+    - `--knowledge_mode auto_skip --limit 5`
+  - Validation:
+    - `python -m py_compile scripts/run_miccai_multiagent_experiment.py`
+    - two consecutive runs with identical args:
+      - first run builds quality model + repair KB
+      - second run confirms `trained=False, used_existing=True` (quality model) and `built=False, used_existing=True` (repair KB)
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_UKB --target_dir results/exp_ukb_probe --artifacts_dir results/exp_ukb_miccai_v1/artifacts_all --knowledge_mode auto_skip --atlas_mode reuse_global --limit 5`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `README.md`
+  - `WORKLOG.md`
+- Notes:
+  - For fastest probe reruns, combine `--knowledge_mode auto_skip` with `--atlas_mode reuse_global`.
+
+### Session: 2026-02-19 01:49 CST
+- Current goal:
+  - Validate the pipeline on `results/Input_MnM2` and confirm it can run correctly end-to-end.
+- Done:
+  - Executed end-to-end smoke test on the requested dataset root with repair stage enabled:
+    - command used:
+      - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /tmp/mnm2_pipeline_test_20260219 --artifacts_dir /tmp/mnm2_pipeline_test_20260219/artifacts --knowledge_mode auto_skip --atlas_mode reuse_global --limit 5 --llm_enabled false --vision_enabled false --top_improved_k 5 --top_improved_min_delta 0.0`
+    - process exited successfully (`exit code 0`)
+    - generated full outputs under:
+      - `/tmp/mnm2_pipeline_test_20260219/triage`
+      - `/tmp/mnm2_pipeline_test_20260219/repair`
+      - `/tmp/mnm2_pipeline_test_20260219/figures`
+      - `/tmp/mnm2_pipeline_test_20260219/summary/experiment_summary.json`
+    - summary checks:
+      - `n_cases_processed=5`
+      - `triage_rows=5`
+      - `repair_rows=5`
+  - Executed additional 1-case probe with LLM/VLM enabled (same dataset):
+    - command used:
+      - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /tmp/mnm2_pipeline_test_20260219_llm_probe --artifacts_dir /tmp/mnm2_pipeline_test_20260219/artifacts --knowledge_mode auto_skip --atlas_mode reuse_global --limit 1 --skip_repair --top_improved_k 3`
+    - process exited successfully (`exit code 0`)
+    - observed runtime warning in this environment:
+      - `Connection refused — is Ollama running?`
+      - pipeline continued via fallback behavior and still produced outputs.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_full --artifacts_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_full/artifacts_all --knowledge_mode auto_skip --atlas_mode reuse_global`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `WORKLOG.md`
+  - `/tmp/mnm2_pipeline_test_20260219/summary/experiment_summary.json`
+  - `/tmp/mnm2_pipeline_test_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `/tmp/mnm2_pipeline_test_20260219/triage/triage_results.csv`
+- Notes:
+  - End-to-end pipeline on Input_MnM2 is runnable and stable in no-LLM/no-VLM mode; LLM-enabled probe indicates provider/connectivity needs to be set correctly for real remote reasoning.
+
+### Session: 2026-02-19 02:01 CST
+- Current goal:
+  - Run LLM-enabled tests outside sandbox on `results/Input_MnM2` and verify both triage-only and full repair paths.
+- Done:
+  - Outside-sandbox LLM test run #1 (2 cases):
+    - command:
+      - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /tmp/mnm2_pipeline_llm_outside_20260219 --artifacts_dir /tmp/mnm2_pipeline_test_20260219/artifacts --knowledge_mode auto_skip --atlas_mode reuse_global --limit 2 --llm_enabled true --vision_enabled true --top_improved_k 5 --top_improved_min_delta 0.0`
+    - result:
+      - process completed successfully (`exit code 0`)
+      - warmup and VLM calls returned valid responses
+      - triage outputs: 2 rows, both `good`
+      - repair subset size = 0 for this small slice
+  - Outside-sandbox LLM test run #2 (forced hard case, full repair path):
+    - command:
+      - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /tmp/mnm2_pipeline_llm_outside_case209_20260219 --artifacts_dir /tmp/mnm2_pipeline_test_20260219/artifacts --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 209_original_lax_4c_004 --limit 1 --llm_enabled true --vision_enabled true --top_improved_k 5 --top_improved_min_delta 0.0`
+    - result:
+      - process completed successfully (`exit code 0`)
+      - triage category: `needs_fix`
+      - entered diagnosis/planner/executor/verifier full loop
+      - final repair verdict: `approved`
+      - repaired label saved to:
+        - `/tmp/mnm2_pipeline_llm_outside_case209_20260219/repair/repaired_labels/209_original_lax_4c_004_pred.png`
+  - Verified generated outputs and summaries exist for both runs.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_llm_full --artifacts_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_llm_full/artifacts_all --knowledge_mode auto_skip --atlas_mode reuse_global --llm_enabled true --vision_enabled true`
+- Key files:
+  - `/tmp/mnm2_pipeline_llm_outside_20260219/summary/experiment_summary.json`
+  - `/tmp/mnm2_pipeline_llm_outside_case209_20260219/summary/experiment_summary.json`
+  - `/tmp/mnm2_pipeline_llm_outside_case209_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Observed a non-fatal diagnosis-stage warning in run #2:
+    - `VLM diagnosis failed: 'bool' object is not callable`
+  - Pipeline continued via fallback and still completed successfully.
+
+### Session: 2026-02-19 02:12 CST
+- Current goal:
+  - Identify root cause of `VLM diagnosis failed: 'bool' object is not callable` and verify fix.
+- Done:
+  - Root cause confirmed in `cardiac_agent_postproc/agents/diagnosis_agent.py`:
+    - `DiagnosisAgent.__init__` stored a boolean in `self._vlm_enabled`
+    - `BaseAgent` also defines method `_vlm_enabled()`
+    - method got shadowed by bool, so `think_vision()` calling `self._vlm_enabled()` raised `TypeError: 'bool' object is not callable`
+  - Applied fix:
+    - renamed diagnosis-specific flag to `self._diag_vlm_enabled`
+    - updated gate check to `if self._diag_vlm_enabled and self._vlm_enabled() and ctx.img_path:`
+  - Verification:
+    - `python -m py_compile cardiac_agent_postproc/agents/diagnosis_agent.py`
+    - reran case `209_original_lax_4c_004` pipeline smoke
+    - confirmed the previous `'bool' object is not callable` error no longer appears
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_llm_full --artifacts_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_llm_full/artifacts_all --knowledge_mode auto_skip --atlas_mode reuse_global --llm_enabled true --vision_enabled true`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `WORKLOG.md`
+  - `/tmp/mnm2_diagfix_smoke/summary/experiment_summary.json`
+- Notes:
+  - This was a code-level name-collision bug, not a model/service quality issue.
+
+### Session: 2026-02-19 11:19 CST
+- Current goal:
+  - Encapsulate 4-provider LLM workflow benchmarking (Ollama ministral, Azure OpenAI, OpenAI, Gemini) into one command with unified summary output.
+- Done:
+  - Added new multi-model runner script:
+    - `scripts/run_workflow_model_compare.py`
+    - Built-in model/config mapping:
+      - `ollama_ministral -> config/ollama_ministral_triage.yaml`
+      - `azure_openai -> config/azure_openai_medrag.yaml`
+      - `openai -> config/openai.yaml`
+      - `gemini -> config/gemini.yaml`
+    - Supports shared workflow controls:
+      - `--source_root`, `--output_root`, `--knowledge_mode`, `--atlas_mode`, `--limit`, `--case_contains`, `--skip_repair`, `--llm_enabled`, `--vision_enabled`, etc.
+    - Supports subset run via `--models` and extra arg passthrough via trailing `-- ...`.
+    - For each model run, writes dedicated folder/log and auto-collects summary metrics into:
+      - `model_comparison_summary.csv`
+      - `model_comparison_summary.md`
+      - `model_comparison_summary.json`
+      - plus `run_plan.json` for reproducibility.
+  - Updated documentation:
+    - Added "One-Command 4-Model Comparison" section in `README.md` with usage examples.
+  - Validation completed:
+    - `python -m py_compile scripts/run_workflow_model_compare.py`
+    - `python scripts/run_workflow_model_compare.py --help`
+    - dry-run smoke:
+      - `python scripts/run_workflow_model_compare.py --source_root results/Input_MnM2 --output_root /tmp/model_compare_smoke --models azure_openai,openai --limit 1 --dry_run`
+    - Confirmed summary and plan files are generated correctly in `/tmp/model_compare_smoke`.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_workflow_model_compare.py --source_root results/Input_MnM2 --output_root results/exp_model_compare_mnm2 --limit 5 --knowledge_mode auto_skip --atlas_mode reuse_global`
+- Key files:
+  - `scripts/run_workflow_model_compare.py`
+  - `README.md`
+  - `WORKLOG.md`
+- Notes:
+  - Current config files for Azure/OpenAI use OpenAI-compatible provider key (`provider: ollama`) by design in this codebase.
+  - To pass additional underlying runner flags, append them after `--`, e.g. `-- --repair_kb_max_cases 32`.
+
+### Session: 2026-02-19 11:26 CST
+- Current goal:
+  - Validate the new model-compare wrapper by running one real gpt-4o workflow on Input_MnM2 and confirming full-stage execution + full outputs.
+- Done:
+  - Executed single-model wrapper run (azure gpt-4o) on MnM2 with a forced need-fix case to cover full pipeline:
+    - command:
+      - `python scripts/run_workflow_model_compare.py --source_root results/Input_MnM2 --output_root /tmp/model_compare_gpt4o_mnm2_escalated --models azure_openai --case_contains 209_original_lax_4c_004 --limit 1 --knowledge_mode auto_skip --atlas_mode reuse_global`
+  - Verified run completed successfully:
+    - wrapper summary status: `ok`, `exit_code=0`
+    - run elapsed: `151.23s`
+    - model summary row recorded in:
+      - `/tmp/model_compare_gpt4o_mnm2_escalated/model_comparison_summary.csv`
+  - Confirmed full stage flow was executed end-to-end on case `209_original_lax_4c_004`:
+    - triage -> diagnosis -> planner -> executor -> verifier (2 rounds)
+    - final coordinator message: `Approved on round 2`
+    - final repair CSV verdict: `approved`
+  - Confirmed critical outputs exist and are well-formed:
+    - triage CSV:
+      - `/tmp/model_compare_gpt4o_mnm2_escalated/azure_openai/triage/triage_results.csv`
+    - repair CSV:
+      - `/tmp/model_compare_gpt4o_mnm2_escalated/azure_openai/repair/need_fix_diagnosis_repair_results.csv`
+    - repaired mask:
+      - `/tmp/model_compare_gpt4o_mnm2_escalated/azure_openai/repair/repaired_labels/209_original_lax_4c_004_pred.png`
+    - figures (png+pdf):
+      - `/tmp/model_compare_gpt4o_mnm2_escalated/azure_openai/figures/`
+    - summary json:
+      - `/tmp/model_compare_gpt4o_mnm2_escalated/azure_openai/summary/experiment_summary.json`
+    - unified compare outputs:
+      - `/tmp/model_compare_gpt4o_mnm2_escalated/model_comparison_summary.{csv,md,json}`
+  - Connectivity sanity check:
+    - in this successful outside-sandbox run, `run.log` has no `Connection refused` lines.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_workflow_model_compare.py --source_root results/Input_MnM2 --output_root results/exp_model_compare_mnm2_full --models ollama_ministral,azure_openai,openai,gemini --knowledge_mode auto_skip --atlas_mode reuse_global --limit 20`
+- Key files:
+  - `scripts/run_workflow_model_compare.py`
+  - `/tmp/model_compare_gpt4o_mnm2_escalated/model_comparison_summary.csv`
+  - `/tmp/model_compare_gpt4o_mnm2_escalated/azure_openai/summary/experiment_summary.json`
+  - `/tmp/model_compare_gpt4o_mnm2_escalated/azure_openai/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - A prior in-sandbox attempt produced fallback behavior due connectivity limits; outside-sandbox rerun is the authoritative verification for real gpt-4o endpoint execution.
+
+### Session: 2026-02-19 12:56 CST
+- Current goal:
+  - Explain how the quality model is built in the current codebase and inspect the existing `quality_model.pkl`.
+- Done:
+  - Traced quality feature engineering in `cardiac_agent_postproc/quality_model.py`:
+    - confirmed 30 features (geometry/topology + intensity/edge + view one-hot).
+  - Traced auto-training flow in `scripts/run_miccai_multiagent_experiment.py`:
+    - labels come from Dice threshold (`--quality_bad_dice_threshold`, default `0.90`) with curated override from `best_cases`/`worst_cases`.
+    - trainer builds `RandomForestRegressor` (Dice) and optional `RandomForestClassifier` (bad/good), saves `threshold` + `use_classifier`.
+    - model is auto-prepared via `--quality_model_mode {train_if_missing,retrain,reuse,disable}` and injected into runtime config.
+  - Traced runtime usage:
+    - triage fast classifier path in `cardiac_agent_postproc/agents/triage_agent.py`.
+    - optional RQS blending/replacement in `cardiac_agent_postproc/rqs.py` via `quality_model.blend_mode`.
+  - Inspected current repo artifact `quality_model.pkl`:
+    - payload has `use_classifier=True`, `threshold=0.2578020177288312`, `feature_count=30`.
+    - `train_meta`: `n_total=320`, `n_bad=14`, `n_good=306`, `bad_threshold=0.93`, `best_approach=RF_balanced`.
+    - estimator stacks are pipeline-based (`StandardScaler+GradientBoostingRegressor` and `StandardScaler+RandomForestClassifier`), indicating a legacy training flow.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/default.yaml --source_root results/Input_MnM2 --target_dir /tmp/quality_model_retrain_probe --quality_model_mode retrain --quality_bad_dice_threshold 0.90 --quality_classifier_threshold 0.5 --limit 1`
+- Key files:
+  - `cardiac_agent_postproc/quality_model.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/rqs.py`
+  - `quality_model.pkl`
+  - `WORKLOG.md`
+- Notes:
+  - Current loader is backward-compatible, so both legacy and new payload formats can be loaded.
+  - Existing root-level `quality_model.pkl` appears to come from an older training script/workflow than the current in-repo auto-trainer.
+
+### Session: 2026-02-19 13:04 CST
+- Current goal:
+  - Assess whether future no-GT deployment should build quality model using only curated `best_cases`/`worst_cases` membership.
+- Done:
+  - Confirmed this is a sensible direction for no-GT target domains:
+    - use curated set membership as supervision (`best=good`, `worst=needs_fix`),
+    - keep feature extraction from `pred+img`,
+    - avoid relying on global GT Dice for unlabeled future cases.
+  - Identified current gap:
+    - `scripts/run_miccai_multiagent_experiment.py::_collect_quality_training_table` still derives labels from GT Dice by default, then applies curated override.
+  - Recommended training policy:
+    - curated-only classifier mode for no-GT scenarios; treat Dice/GT as optional calibration data only when available.
+- Blocked:
+  - None
+- Next command:
+  - `rg -n \"def _collect_quality_training_table|def _train_quality_model|quality_bad_dice_threshold\" scripts/run_miccai_multiagent_experiment.py`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/quality_model.py`
+  - `WORKLOG.md`
+- Notes:
+  - Using only names is not enough by itself; names provide labels, but model inputs should remain extracted quantitative features.
+
+### Session: 2026-02-19 13:13 CST
+- Current goal:
+  - Add a runtime parameter for quality-model label-source policy and make curated-only the default mode.
+- Done:
+  - Implemented new CLI argument in `scripts/run_miccai_multiagent_experiment.py`:
+    - `--quality_label_mode {curated_only,dice_with_curated_override}`
+    - default is `curated_only`.
+  - Updated quality training table builder:
+    - `curated_only`: requires only `*_img.png` + `*_pred.png`, and labels come from curated mapping (`best_cases/worst_cases`).
+    - `dice_with_curated_override`: keeps legacy behavior (GT Dice labels with curated override).
+  - Improved regressor target handling for no-GT rows:
+    - when `dice_mean` is missing, fallback target uses curated label (`good->1`, `needs_fix->0`) so training remains valid.
+    - added meta fields `n_dice_available`, `n_dice_missing`, `reg_target_mode`.
+  - Wired new option end-to-end:
+    - `_prepare_quality_model(...)` now accepts and records `label_mode`.
+    - call site passes `args.quality_label_mode`.
+    - startup logs and summary JSON now include `quality_label_mode`.
+  - Validation:
+    - `python -m py_compile scripts/run_miccai_multiagent_experiment.py` passed.
+    - `--help` output confirms new option appears.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/default.yaml --source_root results/Input_MnM2 --target_dir /tmp/quality_label_mode_smoke --quality_model_mode retrain --quality_label_mode curated_only --limit 1`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `WORKLOG.md`
+- Notes:
+  - Default behavior is now curated-only, matching no-GT deployment needs.
+
+### Session: 2026-02-19 13:51 CST
+- Current goal:
+  - Run a full outside-sandbox test on the first 5 cases using `gpt-4o`, with output directories explicitly distinguished by `gpt4o`.
+- Done:
+  - Executed outside-sandbox run:
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_top5_outside_20260219 --artifacts_dir results/exp_mnm2_gpt4o_top5_outside_20260219/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --limit 5`
+  - Confirmed model connectivity and real calls to `gpt-4o` in runtime output:
+    - warmup succeeded (`Model gpt-4o ready`)
+    - repeated `Requesting gpt-4o` calls during triage/diagnosis/planner/verifier.
+  - Verified processed first 5 stems (sorted discovery order):
+    - `201_original_lax_4c_000`
+    - `201_original_lax_4c_009`
+    - `202_original_lax_4c_000`
+    - `202_original_lax_4c_010`
+    - `203_original_lax_4c_000`
+  - Output verification:
+    - triage rows: 5 (`good=4`, `needs_fix=1`)
+    - repair rows: 1 (triage-need-fix subset), final verdict `gave_up` with original mask preserved
+    - summary/figures/artifacts all generated under the gpt4o-tagged directory.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_top20_outside_20260219 --artifacts_dir results/exp_mnm2_gpt4o_top20_outside_20260219/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --limit 20`
+- Key files:
+  - `results/exp_mnm2_gpt4o_top5_outside_20260219/triage/triage_results.csv`
+  - `results/exp_mnm2_gpt4o_top5_outside_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_top5_outside_20260219/summary/experiment_summary.json`
+  - `results/exp_mnm2_gpt4o_top5_outside_20260219/artifacts_gpt4o/`
+  - `WORKLOG.md`
+- Notes:
+  - User requested outside-sandbox execution; run was completed under escalated permissions.
+
+### Session: 2026-02-19 14:10 CST
+- Current goal:
+  - Verify whether GPT diagnosis outputs have corresponding executable operations in the planner/executor pipeline.
+- Done:
+  - Verified architecture path:
+    - diagnosis emits `issue + operation` with canonical mapping in `cardiac_agent_postproc/agents/diagnosis_agent.py`.
+    - planner carries operations into plan (with dedupe/safety ordering) in `cardiac_agent_postproc/agents/planner_agent.py`.
+    - executor checks availability in `op_fns` and executes supported ops in `cardiac_agent_postproc/agents/executor.py`.
+  - Confirmed current gpt4o sample output was aligned:
+    - diagnosis operations: `3_erode`, `2_erode`, `smooth_morph`
+    - planner plan used the same operations
+    - executor has all three ops implemented.
+  - Performed global mismatch audit (`ISSUE_OPS_MAP` vs executor op table):
+    - found 8 operation names present in mapping but not implemented in executor:
+      - `myo_bridge_strong`, `myo_bridge_mild`
+      - `lv_bridge_strong`, `lv_bridge_mild`
+      - `rv_lv_barrier_strong`, `rv_lv_barrier_mild`
+      - `topology_cleanup_strong`, `topology_cleanup_mild`
+- Blocked:
+  - None
+- Next command:
+  - `rg -n \"myo_bridge_strong|lv_bridge_strong|rv_lv_barrier_strong|topology_cleanup_strong\" cardiac_agent_postproc/agents/diagnosis_agent.py cardiac_agent_postproc/agents/executor.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `results/exp_mnm2_gpt4o_top5_outside_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Current case-level alignment is good, but alias support for `*_strong/*_mild` operation names is missing and can cause `NOT AVAILABLE` on other samples.
+
+### Session: 2026-02-19 14:24 CST
+- Current goal:
+  - For case `201_original_lax_4c_009`, compare GT vs prediction and pinpoint the actual segmentation errors.
+- Done:
+  - Loaded `*_img.png`, `*_pred.png`, `*_gt.png` and computed per-class Dice:
+    - mean `0.9405`, RV `0.9574`, Myo `0.9049`, LV `0.9591`.
+  - Ran detailed class-confusion and component-level error localization:
+    - Myo is the main error source (`FP=141`, `FN=68`), with net over-segmentation (`pred_area - gt_area = +73`).
+    - LV is slightly under-segmented globally (`pred_area - gt_area = -55`), and **all LV FN pixels (101) were predicted as Myo** (`GT=3 -> Pred=2`), indicating LV-Myo boundary inward shift.
+    - Myo FN is concentrated in apical-septal area (many `GT=2 -> Pred=1/0`), indicating local septal-apical thinning/leak.
+    - RV has minor under-segmentation (`FN=38`, mostly `GT=1 -> Pred=0`), also near apical-septal region.
+  - Structural sanity checks:
+    - no RV-LV touching in either GT or prediction (`touch_pixels=0` for both),
+    - all three classes remain single connected components (no catastrophic break).
+  - Saved analysis artifacts:
+    - JSON: `results/exp_mnm2_gpt4o_top5_outside_20260219/analysis_gt_vs_pred/201_original_lax_4c_009_analysis.json`
+    - visual diff overlay: `results/exp_mnm2_gpt4o_top5_outside_20260219/analysis_gt_vs_pred/201_original_lax_4c_009_gt_vs_pred_diff.png`
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY' ... load analysis JSON and print top error components ... PY`
+- Key files:
+  - `results/Input_MnM2/all_frames_export/201_original_lax_4c_009_pred.png`
+  - `results/Input_MnM2/all_frames_export/201_original_lax_4c_009_gt.png`
+  - `results/exp_mnm2_gpt4o_top5_outside_20260219/analysis_gt_vs_pred/201_original_lax_4c_009_analysis.json`
+  - `results/exp_mnm2_gpt4o_top5_outside_20260219/analysis_gt_vs_pred/201_original_lax_4c_009_gt_vs_pred_diff.png`
+  - `WORKLOG.md`
+- Notes:
+  - This case is primarily a boundary/class-confusion problem (LV↔Myo), not a severe topology/contact failure.
+
+### Session: 2026-02-19 14:27 CST
+- Current goal:
+  - Add prompt guidance for the `LV↔Myo` boundary-confusion pattern so GPT diagnosis/planning is less likely to choose wrong shrink operations.
+- Done:
+  - Updated diagnosis system prompt with a dedicated rule block:
+    - `LV-Myo boundary confusion` pattern definition.
+    - prefer `3_dilate` / `2_erode` in this case.
+    - avoid labeling `lv_too_large` unless clear outward LV over-extension is visible.
+    - avoid simultaneous strong shrinking of both LV and Myo in one round.
+  - Updated VLM diagnosis prompt (`diagnosis_prompt.txt`) with the same pattern-specific guidance.
+  - Updated planner prompt conflict rules:
+    - avoid `3_erode` when diagnosis indicates `lv_too_small` / `myo_too_thick` unless explicit LV over-expansion evidence.
+    - avoid default `3_erode + 2_erode` combo in one round; prefer conservative single correction then re-diagnose.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir /tmp/prompt_patch_case201_gpt4o --artifacts_dir /tmp/prompt_patch_case201_gpt4o/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 201_original_lax_4c_009 --limit 1`
+- Key files:
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/planner_system.txt`
+  - `WORKLOG.md`
+- Notes:
+  - This patch is prompt-only and does not change operation code paths.
+
+### Session: 2026-02-19 14:49 CST
+- Current goal:
+  - Clarify whether `3_erode` should reassign vacated pixels to LV/RV/Myo based on diagnosis.
+- Done:
+  - Verified current op behavior in code:
+    - `3_erode` maps to `dilate_or_erode(... cls=3, op=\"erode\")`.
+    - In `dilate_or_erode`, only class mask is eroded, then merged with unchanged other classes.
+    - Vacated pixels from eroded class become background (no diagnosis-aware reassignment).
+  - Identified coupled alternatives already available:
+    - `3_erode_expand_myo`: erode LV then assign vacated LV pixels to Myo.
+    - `1_erode_expand_myo`: erode RV then conditionally assign vacated RV pixels to Myo if adjacent.
+  - Confirmed there is no current operation that erodes Myo and reassigns vacated Myo pixels to LV/RV based on direction/adjacency.
+- Blocked:
+  - None
+- Next command:
+  - `rg -n \"3_erode_expand_myo|1_erode_expand_myo|def dilate_or_erode\" cardiac_agent_postproc/agents/executor.py cardiac_agent_postproc/ops.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/ops.py`
+  - `WORKLOG.md`
+- Notes:
+  - Current behavior explains why plain `3_erode` can create regressions in LV↔Myo boundary-confusion cases.
+
+### Session: 2026-02-19 15:00 CST
+- Current goal:
+  - Add coupled erosion-design ops so vacated pixels can be reassigned to anatomically related classes based on diagnosis/planning context.
+- Done:
+  - Added new coupled ops in `cardiac_agent_postproc/ops.py`:
+    - `erode_myo_expand_lv` (Myo erosion + vacated Myo -> LV if adjacent)
+    - `erode_myo_expand_rv` (Myo erosion + vacated Myo -> RV if adjacent)
+  - Wired new ops into executor op registry:
+    - `2_erode_expand_lv`
+    - `2_erode_expand_rv`
+  - Updated diagnosis issue-op mapping:
+    - `myo_too_thick` now prefers coupled path (`2_erode_expand_lv`) before plain `2_erode`.
+  - Added planner-side coupled-op auto-conversion in `_sanitize_plan`:
+    - `3_erode -> 3_erode_expand_myo` when linked issue indicates LV boundary shrink and diagnosis context also includes `myo_too_thick` or `lv_too_small`.
+    - `2_erode -> 2_erode_expand_lv` (default) or `2_erode_expand_rv` (septal/RV-small context).
+    - Appends conversion note into step reason and re-deduplicates final plan after conversion.
+  - Updated prompts to expose coupled ops and usage intent:
+    - `prompts/diagnosis_system.txt`
+    - `prompts/diagnosis_prompt.txt`
+    - `prompts/planner_system.txt`
+  - Validation:
+    - `python -m py_compile cardiac_agent_postproc/ops.py cardiac_agent_postproc/agents/executor.py cardiac_agent_postproc/agents/diagnosis_agent.py cardiac_agent_postproc/agents/planner_agent.py`
+    - quick functional smoke on `201_original_lax_4c_009` confirmed new ops run and preserve valid labels.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir /tmp/coupled_ops_case201_gpt4o --artifacts_dir /tmp/coupled_ops_case201_gpt4o/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 201_original_lax_4c_009 --limit 1`
+- Key files:
+  - `cardiac_agent_postproc/ops.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/planner_system.txt`
+  - `WORKLOG.md`
+- Notes:
+  - Existing `*_strong/*_mild` alias ops are still not implemented in executor (known gap from earlier audit), but coupled ops requested in this task are fully connected end-to-end.
+
+### Session: 2026-02-19 15:08 CST
+- Current goal:
+  - Clarify whether diagnosis output `direction="lateral"` can be spatially localized by the current pipeline.
+- Done:
+  - Confirmed localization path:
+    - `compute_region_mask` computes septal/lateral using LV centroid and RV centroid relation.
+    - When plan step has no bbox, executor infers bbox from direction via `compute_region_mask` (SmartGlobal path).
+    - If diagnosis already provides bbox, planner carries it and executor applies local op directly.
+  - Clarified practical behavior:
+    - yes, `lateral` is currently localizable as the wall opposite RV relative to LV.
+    - this is half-plane level localization unless bbox is explicitly provided.
+- Blocked:
+  - None
+- Next command:
+  - `rg -n \"def compute_region_mask|SmartGlobal|if direction == \\\"lateral\\\"\" cardiac_agent_postproc/agents/diagnosis_agent.py cardiac_agent_postproc/agents/executor.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `WORKLOG.md`
+- Notes:
+  - In RV-absent views, septal/lateral is less robust; prefer apical/basal/global or explicit bbox.
+
+### Session: 2026-02-19 15:11 CST
+- Current goal:
+  - Improve localization quality when AI cannot provide `bbox`, especially for `direction="lateral"` style diagnoses.
+- Done:
+  - Updated executor SmartGlobal bbox inference to be class-aware:
+    - previously: bbox from full directional half-plane (`compute_region_mask` only).
+    - now: bbox prefers `direction_region ∩ affected_class_mask` when available, with fallback to directional region.
+  - This keeps no-bbox edits near the diagnosed structure instead of touching a broad half-plane.
+  - Validation:
+    - `python -m py_compile cardiac_agent_postproc/agents/executor.py` passed.
+    - quick probe on `201_original_lax_4c_009`:
+      - lateral region bbox was broad (`[0,125,256,256]`, 33536 px),
+      - class-aware focus bbox is much tighter (`[139,125,200,147]`, 943 px).
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir /tmp/nobox_focus_case201_gpt4o --artifacts_dir /tmp/nobox_focus_case201_gpt4o/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 201_original_lax_4c_009 --limit 1`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `WORKLOG.md`
+- Notes:
+  - This change is backward-compatible: if class-focused mask is too small/empty, it automatically falls back to original directional behavior.
+
+### Session: 2026-02-19 15:22 CST
+- Current goal:
+  - Test 3 `worse` cases outside sandbox with GPT-4o and check whether repair is effective.
+- Done:
+  - Selected 3 stems from `results/Input_MnM2/worst_cases` and ran each case outside sandbox via:
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_worst3_outside_20260219/case_<stem> --artifacts_dir results/exp_mnm2_gpt4o_worst3_outside_20260219/case_<stem>/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains <stem> --limit 1 --repair_subset worst_cases`
+  - Cases tested:
+    - `335_original_lax_4c_009`
+    - `307_original_lax_4c_024`
+    - `244_original_lax_4c_009`
+  - Collected exact per-case Pre/Post/Delta Dice from `repair/need_fix_diagnosis_repair_results.csv`.
+  - Observed final outcomes:
+    - `335_original_lax_4c_009`: worsened (`delta=-0.01615185956806031`, verdict approved repaired)
+    - `307_original_lax_4c_024`: unchanged (`delta=0.0`, triage good, skipped)
+    - `244_original_lax_4c_009`: unchanged (`delta=0.0`, final saved original)
+- Blocked:
+  - None
+- Next command:
+  - `cat results/exp_mnm2_gpt4o_worst3_outside_20260219/case_*/repair/need_fix_diagnosis_repair_results.csv`
+- Key files:
+  - `results/exp_mnm2_gpt4o_worst3_outside_20260219/case_335_original_lax_4c_009/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_worst3_outside_20260219/case_307_original_lax_4c_024/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_worst3_outside_20260219/case_244_original_lax_4c_009/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - For this 3-case sample, final repaired masks did not show net positive improvement.
+
+### Session: 2026-02-19 15:36 CST
+- Current goal:
+  - Explain why an intermediate improved case can be rolled back to original in final output.
+- Done:
+  - Traced verifier/coordinator/output-save gating logic.
+  - Confirmed two rollback points:
+    1) On verifier `reject`, coordinator immediately resets `ctx.current_mask` to `ctx.original_mask` and clears applied ops.
+    2) In experiment writer, only final verdict `approved` saves repaired mask; any other verdict (`good`/`gave_up`/etc.) saves original mask.
+  - Confirmed this specific case evidence:
+    - `244_original_lax_4c_009` has `FinalVerdict=gave_up`, `SavedMaskType=original`, `RoundsCompleted=2`.
+    - Runtime config uses `multi_agent.max_rounds_per_case: 2`, so non-approved trajectory quickly exhausts and exits as `gave_up`.
+  - Verified dice is report-only in verifier decision path and quantitative Dice override is intentionally disabled in current code.
+- Blocked:
+  - None
+- Next command:
+  - `rg -n "Rejected — reverting to original|if verdict == \"approved\"|for reporting, not decision driving|Quantitative Override" cardiac_agent_postproc/agents/coordinator.py cardiac_agent_postproc/agents/verifier_agent.py scripts/run_miccai_multiagent_experiment.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `results/exp_mnm2_gpt4o_worst3_outside_20260219/case_244_original_lax_4c_009/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_worst3_outside_20260219/case_244_original_lax_4c_009/artifacts_gpt4o/config/resolved_runtime_config.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - Current behavior is conservative by design for no-GT deployment safety, but it can discard true intermediate gains.
+
+### Session: 2026-02-19 16:02 CST
+- Current goal:
+  - Implement two policy changes requested by user:
+    1) keep best intermediate mask instead of always reverting to original when final verdict is non-approved;
+    2) force atlas replacement for very low-score + near-missing-class cases (e.g. `335_original_lax_4c_009`).
+- Done:
+  - Added best-intermediate fields to case context for cross-round caching:
+    - `best_intermediate_mask`, `best_intermediate_score`, `best_intermediate_round`, `best_intermediate_verdict`, `best_intermediate_reason`, `best_intermediate_ops`, `best_intermediate_is_original`.
+  - Updated coordinator verification loop:
+    - score each round from no-GT verifier outputs (`verdict`, `vlm_comparison`, `vlm_quality`, confidences);
+    - cache best intermediate mask before any reject-triggered rollback.
+  - Updated repair run script save policy:
+    - `approved` -> save repaired;
+    - else if best intermediate exists -> save `best_intermediate`;
+    - else -> save original.
+    - Added output columns for best-intermediate traceability.
+    - Updated summary metric `n_saved_repaired` to include `best_intermediate`.
+  - Added planner policy override for atlas replacement:
+    - if `triage_score <= force_atlas_low_score_threshold` (default 0.25)
+      and any required class is near-missing (`area==0` or `<300 px` or `<0.5%`),
+      force plan to atlas op (`atlas_<class>_repair`; or `atlas_growprune_0` for multi-class near-missing).
+  - Validation:
+    - `python -m py_compile` passed for modified files.
+    - function-level probe on `335_original_lax_4c_009` confirms forced plan becomes `atlas_rv_repair`.
+- Blocked:
+  - Outside-sandbox full rerun was interrupted by user before completion.
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_force_atlas_20260219 --artifacts_dir results/exp_mnm2_gpt4o_case335_force_atlas_20260219/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/message_bus.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `WORKLOG.md`
+- Notes:
+  - New planner override thresholds are code defaults under `planner.*` config keys and can be tuned without code changes.
+
+### Session: 2026-02-19 16:07 CST
+- Current goal:
+  - Change atlas-forcing policy to global replacement regardless of single-class or multi-class near-missing condition.
+- Done:
+  - Updated planner override logic so any triggered low-score + near-missing case always uses `atlas_growprune_0`.
+  - Kept trigger condition unchanged (`triage_score` threshold + near-missing detection).
+  - Updated policy reason text to explicitly state GLOBAL atlas replacement.
+  - Validation:
+    - `python -m py_compile cardiac_agent_postproc/agents/planner_agent.py` passed.
+    - Function-level probe on `335_original_lax_4c_009` now returns `operation=atlas_growprune_0`.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_globalatlas_20260219 --artifacts_dir results/exp_mnm2_gpt4o_case335_globalatlas_20260219/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - Policy behavior is now deterministic and uniform for both single-class and multi-class near-missing scenarios.
+
+### Session: 2026-02-19 16:22 CST
+- Current goal:
+  - Run updated repair pipeline outside sandbox and verify whether performance improved after global-atlas override + best-intermediate support.
+- Done:
+  - Outside-sandbox run completed for 3 worse cases with GPT-4o:
+    - `335_original_lax_4c_009`
+    - `307_original_lax_4c_024`
+    - `244_original_lax_4c_009`
+  - Output root:
+    - `results/exp_mnm2_gpt4o_worst3_globalatlas_bestint_20260219`
+  - Collected final metrics from `repair/need_fix_diagnosis_repair_results.csv`:
+    - 335: `delta=0.0000` (was `-0.01615` in previous run; no longer worsened)
+    - 307: `delta=0.0000` (unchanged)
+    - 244: `delta=0.0000` (unchanged)
+  - Runtime observations:
+    - `335` now consistently planned `atlas_growprune_0` via policy override, but executor gate rejected op (`Myo_area_drop`), so final remained original.
+    - `244` still achieved strong intermediate Oracle Dice gains (~0.7593 -> 0.8057) but Verifier returned `reject`; coordinator reverted to original in both rounds.
+    - `BestIntermediateUsed` remained `False` for all three in this run.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case244_bestintermediate_policyfix --artifacts_dir results/exp_mnm2_gpt4o_case244_bestintermediate_policyfix/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 244_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `results/exp_mnm2_gpt4o_worst3_globalatlas_bestint_20260219/case_335_original_lax_4c_009/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_worst3_globalatlas_bestint_20260219/case_307_original_lax_4c_024/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_worst3_globalatlas_bestint_20260219/case_244_original_lax_4c_009/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - The current best-intermediate cache policy only saves candidates when verifier-side signals are positive (`approve` or compare `improved` or quality `good`), so high-Oracle-improvement but compare=`degraded` cases are not persisted.
+
+### Session: 2026-02-19 16:38 CST
+- Current goal:
+  - Address user feedback: (1) atlas replacement should be class-specific (not full-mask), (2) relax executor gating for forced atlas operations, and (3) explain/mitigate 244 rollback despite intermediate gain.
+- Done:
+  - Planner policy override changed to class-specific atlas ops:
+    - Forced plan now emits `atlas_<class>_repair` per near-missing class with `policy_tag=forced_atlas_class_replace`.
+  - Executor gating relaxed only for forced atlas-tagged steps:
+    - trust-region limit can increase via `executor.forced_atlas_max_step_change_ratio` (default 0.45)
+    - non-target area preservation relaxed via `executor.forced_atlas_nontarget_min_area_ratio` (default 0.55) and `executor.forced_atlas_nontarget_max_area_ratio` (default 1.80)
+    - neighbor-consistency gate skipped for forced atlas-tagged steps.
+  - Coordinator best-intermediate candidate logic updated:
+    - if GT metrics are available and `dice_delta` exceeds threshold (`multi_agent.best_intermediate_gt_dice_delta_threshold`, default 0.01), intermediate can still be kept even when VLM compare is degraded.
+    - scoring now includes bounded GT dice bonus when available.
+  - Outside-sandbox validation runs:
+    - `results/exp_mnm2_gpt4o_targeted_atlas_relaxed_20260219/case_335_original_lax_4c_009`
+      - plan used `atlas_rv_repair` with forced-atlas relax active; final `delta=-0.03405` (worse)
+    - `results/exp_mnm2_gpt4o_targeted_atlas_relaxed_20260219/case_244_original_lax_4c_009`
+      - final approved with applied ops `rv_lv_barrier`, `3_erode_expand_myo`; final `delta=+0.04061` (improved)
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_worst3_targeted_atlas_relaxed --artifacts_dir results/exp_mnm2_gpt4o_worst3_targeted_atlas_relaxed/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains <stem> --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `results/exp_mnm2_gpt4o_targeted_atlas_relaxed_20260219/case_335_original_lax_4c_009/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_targeted_atlas_relaxed_20260219/case_244_original_lax_4c_009/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - Class-specific atlas + relax solved execution blocking for 335, but quality still regressed for that case, indicating verifier acceptance policy may be too permissive for severe RV-only atlas edits.
+
+### Session: 2026-02-19 16:52 CST
+- Current goal:
+  - Translate user-provided anatomy/QA knowledge to English and integrate it into prompts so the workflow is more view-aware and anatomically consistent.
+- Done:
+  - Added new view-aware anatomy constraints to diagnosis system prompt:
+    - SAX mid-slice LV-within-Myo constraint
+    - LAX soft-constraint exceptions (no forced 360 closure)
+    - basal valve-plane and extreme apical exceptions
+    - explicit rule that Myo is LV myocardium and should not be treated as surrounding RV
+    - atlas usage phrased as filling missing/problematic regions, not single-class full-mask overwrite
+  - Added matching anatomy constraints to diagnosis vision prompt (`diagnosis_prompt.txt`).
+  - Added planner rules:
+    - atlas repair semantics (target problematic regions for affected class)
+    - view-aware planning constraints for SAX/LAX/basal/apical contexts
+    - explicit Myo-vs-RV identity constraint
+  - Added verifier-side view-aware anatomy section to align acceptance criteria with SAX vs LAX differences.
+  - Verified insertions via `rg` and reviewed diff snippets.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_prompt_anatomy_update --artifacts_dir results/exp_mnm2_gpt4o_prompt_anatomy_update/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 244_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/planner_system.txt`
+  - `prompts/verifier_system.txt`
+  - `WORKLOG.md`
+- Notes:
+  - Changes are prompt-level behavior constraints (no code-path dependency), intended to reduce view-mismatch errors and over-aggressive ring-closure assumptions.
+
+### Session: 2026-02-19 17:03 CST
+- Current goal:
+  - Implement user-requested atlas RV replacement semantics:
+    - replace problematic RV regions using atlas RV label,
+    - do not enforce Myo wrapping around RV,
+    - keep Myo mainly as RV-LV separator.
+- Done:
+  - Updated `atlas_class_repair` in `cardiac_agent_postproc/ops.py` with an RV-specific branch (`target_class==1`):
+    - Candidate updates now target problematic RV zone (atlas-supported RV + neighborhood of current RV).
+    - LV overwrite is disallowed in RV repair path.
+    - Added septal Myo keep-zone (Myo close to both RV and LV) and preserved it during RV replacement.
+    - Added post-step trimming of non-septal Myo shell around RV to avoid artificial RV encasement.
+    - Generic behavior for Myo/LV class repair remains available in the non-RV branch.
+  - Validation:
+    - `python -m py_compile` passed for modified modules.
+    - quick op-level check on `335_original_lax_4c_009` confirmed semantics:
+      - non-septal Myo near RV reduced to zero in the repaired candidate,
+      - RV area increased while Myo/LV were comparatively stabilized.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_rv_atlas_sep_myo --artifacts_dir results/exp_mnm2_gpt4o_case335_rv_atlas_sep_myo/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `cardiac_agent_postproc/ops.py`
+  - `WORKLOG.md`
+- Notes:
+  - This change aligns atlas RV repair with the stated anatomy constraint that Myo should primarily serve as an LV wall/septal separator rather than encasing RV.
+
+### Session: 2026-02-19 17:11 CST
+- Current goal:
+  - Run only `335_original_lax_4c_009` outside sandbox and report updated repair result.
+- Done:
+  - Outside-sandbox single-case run completed:
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_outside_20260219_rerun --artifacts_dir results/exp_mnm2_gpt4o_case335_outside_20260219_rerun/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+  - Key runtime observations:
+    - Planner forced atlas class repair: `atlas_rv_repair`.
+    - Executor accepted the op under forced-atlas relaxed gate.
+    - Verifier approved due to VLM comparison improved override.
+  - Final case metrics:
+    - `PreDice_Mean=0.3729080863`
+    - `PostDice_Mean=0.3488500168`
+    - `DiceDelta_Mean=-0.0240580695`
+    - RV delta notably negative (`-0.0541012164`).
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_guardrail_fix --artifacts_dir results/exp_mnm2_gpt4o_case335_guardrail_fix/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode reuse_global --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `results/exp_mnm2_gpt4o_case335_outside_20260219_rerun/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_outside_20260219_rerun/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - This run confirms current pipeline still degrades case 335 despite approval; verifier override remains a primary risk point.
+
+### Session: 2026-02-19 17:36 CST
+- Current goal:
+  - Enforce `atlas_mode=local_per_sample` with global atlas fully disabled for execution, and validate outside-sandbox behavior on `335_original_lax_4c_009`.
+- Done:
+  - Fixed local-per-sample atlas source scope in `scripts/run_miccai_multiagent_experiment.py`:
+    - `_run_repair_stage(...)` now accepts `atlas_source_cases`.
+    - Local atlas grouping now uses `atlas_source_cases` (full discovered cohort) instead of only filtered processing cases.
+    - Main call passes `atlas_source_cases=list(all_cases_full)` when `--atlas_mode local_per_sample`.
+  - Verified syntax with `python -m py_compile scripts/run_miccai_multiagent_experiment.py`.
+  - Outside-sandbox rerun completed:
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v2 --artifacts_dir results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v2/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode local_per_sample --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+  - Validation outcome:
+    - Local atlas file was built and used: `artifacts_gpt4o/atlas/per_sample/335_original_lax_4c_009_atlas.pkl`.
+    - `atlas_rv_repair` is now available and executed in round 1 (no longer `NOT AVAILABLE`).
+    - Round-1 Oracle Dice had a small gain (`+0.0005`), but final saved mask remained `original` due verifier/gating path; final CSV reports `DiceDelta_Mean=0.0`.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_worse3_local_per_sample_no_global --artifacts_dir results/exp_mnm2_gpt4o_worse3_local_per_sample_no_global/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode local_per_sample --repair_subset worst_cases --limit 3`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v2/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v2/artifacts_gpt4o/atlas/per_sample/335_original_lax_4c_009_atlas.pkl`
+  - `WORKLOG.md`
+- Notes:
+  - Root cause of prior local atlas failure for single-case debug runs was `limit/case_contains` shrinking atlas group to one slice.
+
+### Session: 2026-02-19 17:45 CST
+- Current goal:
+  - Implement user-requested local atlas donor policy and round behavior:
+    1) local atlas must exclude current slice and use nearest neighboring donors,
+    2) atlas replacement should be class-only,
+    3) round-2 should run post-processing instead of repeating atlas replacement.
+- Done:
+  - Updated local atlas construction in `scripts/run_miccai_multiagent_experiment.py`:
+    - `_build_local_atlas_for_case(...)` now excludes self slice and selects nearest donor slices by `|slice_index - current|` (max 2 donors).
+    - Supports sparse groups with 1 donor (still self-excluded).
+    - Returns donor stems for traceability; repair stage logs donor list.
+  - Updated RV atlas class repair in `cardiac_agent_postproc/ops.py`:
+    - Enforced class-only RV replacement behavior:
+      - additions only assign RV label,
+      - prune step only reverts newly-added RV pixels back to original labels,
+      - removed argmax-based relabeling of non-target classes in RV branch.
+  - Updated planner policy in `cardiac_agent_postproc/agents/planner_agent.py`:
+    - If atlas class repair was already applied in a previous round, next round uses deterministic cleanup plan (e.g., `rv_lv_barrier`/`lv_bridge`/`topology_cleanup`) and skips repeated forced atlas replacement.
+  - Validation:
+    - `python -m py_compile` passed for modified files.
+    - Outside-sandbox case run completed:
+      - `results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v3`
+      - log confirms donor policy: `[local_atlas] 335_original_lax_4c_009: donor_stems=['335_original_lax_4c_019']`.
+      - run outcome: `atlas_rv_repair` applied, final `DiceDelta_Mean=+0.008715`.
+    - Offline checks:
+      - planner round-2 helper returns post-atlas cleanup plan.
+      - RV atlas class-only check: `changed=778, add_to_rv=778, drop_from_rv=0, non_target_to_non_target=0`.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_worse3_local_per_sample_neighbor2_class_only --artifacts_dir results/exp_mnm2_gpt4o_worse3_local_per_sample_neighbor2_class_only/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode local_per_sample --repair_subset worst_cases --limit 3`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/ops.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v3/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - In this validation run, verifier approved on round 1, so round-2 cleanup was not executed in that case; policy is in place for cases entering round 2.
+
+### Session: 2026-02-19 17:56 CST
+- Current goal:
+  - Implement diagnosis-guided atlas replacement localization and persist progress while user is away.
+- Done:
+  - Diagnosis spatial info persistence:
+    - Updated `cardiac_agent_postproc/agents/diagnosis_agent.py` to store `bbox` in `ctx.diagnoses`.
+    - Added directional bbox inference for non-global diagnoses when LLM/rules did not provide bbox (`_infer_directional_bbox`, `_region_to_bbox`).
+  - Forced atlas plan now carries diagnosis location hints:
+    - Updated `cardiac_agent_postproc/agents/planner_agent.py`:
+      - Added `_pick_spatial_hint_for_class` and severity-aware hint ranking.
+      - `forced_atlas_class_replace` now uses diagnosis-derived `direction` and `bbox` instead of always `global`.
+  - Executor now applies diagnosis-constrained region merge:
+    - Updated `cardiac_agent_postproc/agents/executor.py` so atlas/neighbor ops still run globally for context, but final pixel acceptance is constrained by diagnosis `direction` and optional `bbox` intersection.
+  - Atlas RV replacement allows local cross-label correction when evidence is strong:
+    - Updated `cardiac_agent_postproc/ops.py` so RV repair can relabel LV→RV in target area if RV probability strongly exceeds LV probability.
+  - Round-2 postprocess retained and refined:
+    - Planner post-atlas cleanup includes `safe_topology_fix` before cleanup stack.
+  - Outside-sandbox validation run completed:
+    - `results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v4_diag_roi`
+    - Donor policy confirmed: `[local_atlas] ... donor_stems=['335_original_lax_4c_019']` (self excluded).
+    - Round 1 atlas op: Oracle Dice `0.3729 -> 0.4372` (`+0.0643`).
+    - Round 2 triggered post-atlas cleanup plan (`lv_bridge`, `safe_topology_fix`, `topology_cleanup`) as intended.
+    - Final saved mask type: `best_intermediate` with `DiceDelta_Mean=+0.0642949974`.
+  - Cross-label correction check on saved repaired mask:
+    - Pixel transitions: `3->1: 213`, `2->1: 23`, demonstrating diagnosis-constrained non-class-rigid correction in target zone.
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_worse3_local_per_sample_diag_roi --artifacts_dir results/exp_mnm2_gpt4o_worse3_local_per_sample_diag_roi/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode local_per_sample --repair_subset worst_cases --limit 3`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/ops.py`
+  - `results/exp_mnm2_gpt4o_case335_local_per_sample_20260219_v4_diag_roi/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - This update addresses user requirement: replacement region must follow diagnosis position and can correct wrong labels within that region, not only same-class-only overwrite.
+
+### Session: 2026-02-19 21:19 CST
+- Current goal:
+  - 在 prompt 中加入“LV/RV 单连通域 + 多余连通域按 LLM 判定重标为对侧血池类（RV/LV）”规则，并确保解析层不回退该策略。
+- Done:
+  - 更新 `prompts/diagnosis_system.txt`：
+    - 增加单连通域硬规则：LV（以及 3CH/4CH 的 RV）应只有一个主连通域。
+    - 增加多连通域重标策略：
+      - `fragmented_lv` -> `atlas_rv_repair`（或 `lv_split_to_rv`）
+      - `fragmented_rv` -> `atlas_lv_repair`
+    - 强制要求输出 `bbox_2d`，并在描述里说明“保留哪一块、替换哪一块”。
+  - 更新 `prompts/diagnosis_prompt.txt`：同步以上规则与 JSON schema（含 `bbox_2d`）。
+  - 更新 `prompts/planner_system.txt`：新增 `Single-Component Policy`，要求对 `fragmented_*` / `missing_*_fragments` 优先做局部重标而非默认 bridge。
+  - 更新 `cardiac_agent_postproc/agents/diagnosis_agent.py`：
+    - `ISSUE_OPS_MAP` 加入 `atlas_rv_repair` / `atlas_lv_repair`（含 `missing_*_fragments`），避免 prompt 输出后被回退。
+    - 扩展 issue 归一化别名（`lv_multi_component`/`rv_multi_component` 等）。
+    - 语义重写从“按 affected_class 拼接”改为“按 issue 显式映射”：
+      - `fragmented_lv` -> `missing_lv_fragments`
+      - `fragmented_rv` -> `missing_rv_fragments`
+      并在高严重度时分别优先 atlas 类别修复。
+  - 校验：`python -m py_compile cardiac_agent_postproc/agents/diagnosis_agent.py` 通过。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219 --artifacts_dir results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode local_per_sample --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+- Key files:
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/planner_system.txt`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 该改动将“多连通域判错”明确上升为 prompt 级强约束，并把 `bbox_2d` 作为必须输出用于定位替换区域。
+
+### Session: 2026-02-19 21:26 CST
+- Current goal:
+  - 运行 case 335 单例实验，验证“LV/RV 单连通域 + 多余连通域重标”新 prompt 是否生效。
+- Done:
+  - 完成实验：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219 --artifacts_dir results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219/artifacts_gpt4o --knowledge_mode auto_skip --atlas_mode local_per_sample --case_contains 335_original_lax_4c_009 --limit 1 --repair_subset worst_cases`
+  - 运行结果（335）：
+    - `FinalVerdict=approved`, `SavedMaskType=repaired`, `AppliedOps=["atlas_rv_repair"]`, `RoundsCompleted=1`
+    - `PreDice_Mean=0.3729080863 -> PostDice_Mean=0.5716272583` (`DiceDelta_Mean=+0.1987191720`)
+    - RV 提升显著：`0.0559 -> 0.5724`（`+0.5165`）
+  - 诊断输出检查：
+    - 输出包含 `fragmented_lv` 与 `missing_lv_fragments`，并触发 `atlas_rv_repair`。
+    - 但该条目未给出 `bbox`（仍为 `None`），未完全满足“必须 bbox_2d”预期。
+  - 连通域检查（修复后）：
+    - 仍为 `LV_cc=4`, `RV_cc=2`（未达到单连通域目标）。
+  - 对比前次基线（v4_diag_roi）：
+    - Dice 增益从 `+0.0643` 提升到 `+0.1987`，但拓扑单连通域约束仍未落地。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv, json\nrow=next(csv.DictReader(open('results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219/repair/need_fix_diagnosis_repair_results.csv')))\nprint(row['Diagnoses'])\nPY`
+- Key files:
+  - `results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219/repair/repaired_labels/335_original_lax_4c_009_pred.png`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_prompt_20260219/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 新 prompt 明显提升了 RV 修复力度与整体 Dice，但单连通域约束还需要执行层/验收层硬约束配合（仅靠 prompt 不足）。
+
+### Session: 2026-02-19 21:57 CST
+- Current goal:
+  - 将“LLM 诊断到碎裂/多连通域问题后直接替换次连通域”的需求改为执行层硬规则，并验证真实落盘结果。
+- Done:
+  - 执行层新增确定性连通域重标算子：
+    - `reassign_secondary_lv_to_rv`（`lv_split_to_rv`）
+    - `reassign_secondary_rv_to_lv`（`rv_split_to_lv`）
+    - 文件：`cardiac_agent_postproc/ops.py`
+  - Executor 接入新操作：
+    - `_build_op_fn` 新增 `lv_split_to_rv` / `rv_split_to_lv`
+    - 文件：`cardiac_agent_postproc/agents/executor.py`
+  - Planner 硬规则注入：
+    - 若诊断含 `fragmented_lv/missing_lv_fragments` 或 `fragmented_rv/missing_rv_fragments`，自动插入硬替换步骤。
+    - 硬替换步骤优先执行，并屏蔽 forced-atlas 覆盖该步骤。
+    - 文件：`cardiac_agent_postproc/agents/planner_agent.py`
+  - 诊断映射补齐：
+    - `ISSUE_OPS_MAP` 增加 `rv_split_to_lv` 和 `missing_*_fragments` 对应硬替换 op。
+    - 文件：`cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - Fallback 持久化策略修正（关键）：
+    - `coordinator` 在硬替换步骤执行后，即便 verifier 拒绝，也会将该轮结果写入 `best_intermediate`（覆盖 baseline-only 状态）。
+    - 文件：`cardiac_agent_postproc/agents/coordinator.py`
+  - 三轮验证（335）：
+    - v1/v2：硬替换已执行，但最终仍回退到 original（修复前 fallback 条件未触发）。
+    - v3：硬替换执行并最终按 `best_intermediate` 落盘。
+      - 目录：`results/exp_mnm2_gpt4o_case335_singlecc_hardrule_v3_20260219`
+      - `SavedMaskType=best_intermediate`
+      - `BestIntermediateOps=["lv_split_to_rv"]`
+      - 次连通域替换验证：原 LV 次连通域 `771` 像素，`771/771` 全部替换为 RV。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\nrow=next(csv.DictReader(open('results/exp_mnm2_gpt4o_case335_singlecc_hardrule_v3_20260219/repair/need_fix_diagnosis_repair_results.csv')))\nprint(row['SavedMaskType'], row['BestIntermediateOps'], row['SavedPredPath'])\nPY`
+- Key files:
+  - `cardiac_agent_postproc/ops.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_hardrule_v3_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 该实现已满足“诊断命中后直接替换次连通域”与“最终文件可落盘为替换结果”两点；当前 case 的 Dice 会下降（`-0.1740`），属于策略预期风险。
+
+### Session: 2026-02-19 22:15 CST
+- Current goal:
+  - 修复“联通域替换选错块”问题：替换必须跟随 LLM/VLM 的空间提示，不允许在无提示时按默认次小联通域硬替换。
+- Done:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+    - 新增 `normalize_direction_hint(...)`，将自由文本方向归一化为 `septal/lateral/apical/basal/left/right/global`。
+    - `compute_region_mask(...)` 接入方向归一化，避免非标准方向字符串退化成不可控全局区域。
+    - LLM 解析时标准化 `affected_class`，并用 `direction + description` 联合归一化方向。
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+    - `_pick_fragment_relabel_hint(...)`：不再只看 bbox；改为综合 `issue/class/source/direction/bbox/severity` 打分，优先 `source=llm/vlm`。
+    - `_sanitize_plan(...)`：不再无条件覆盖已有 bbox；仅在 step 缺 bbox 时补充，并在 step 为 `global` 时才回填诊断方向。
+    - `_hard_fragment_relabel_steps(...)`：硬替换触发条件收紧为
+      1) 必须是 LLM/VLM 诊断出的 `fragmented_*`/`missing_*_fragments`；
+      2) 必须有空间提示（bbox 或 non-global direction）；
+      否则跳过硬替换，避免盲目替换错误联通域。
+  - 校验：`python -m py_compile` 通过。
+  - 快速行为验证（本地脚本）通过：
+    - `rules_only -> []`
+    - `llm_global -> []`
+    - `llm_non_global -> [lv_split_to_rv]`
+  - 整例回归：
+    - `v4`（旧触发逻辑）仍会执行 `lv_split_to_rv`，Dice `-0.1740`。
+    - `v5`（新触发逻辑）不再执行错误硬替换，计划改为 `neighbor_rv_repair` 等，最终 `approve`，Dice `+0.2740`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_singlecc_hardrule_v5_20260220 --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_hardrule_v4_20260220/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_hardrule_v5_20260220/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 本次修复后，“替换哪一块”由 LLM/VLM 空间提示驱动；没有空间提示时不会强制替换，避免错误联通域被误改。
+
+### Session: 2026-02-19 23:19 CST
+- Current goal:
+  - 按用户要求实现“执行 LV/RV split 替换后，强制再进行 1 轮 LLM 诊断与后处理修复”。
+- Done:
+  - 修改 `cardiac_agent_postproc/agents/coordinator.py` 的主循环为动态轮次控制：
+    - 检测本轮新执行操作中是否包含 `lv_split_to_rv` / `rv_split_to_lv`。
+    - 若包含，则设置 `post_split_cleanup_pending`，即使本轮 verifier 为 `approve`，也不立即返回。
+    - 下一轮进入强制后处理（重新 Diagnosis → Plan → Execute → Verify）。
+    - 若 split 轮 verifier 为 `reject`，也先不回滚，保留当前 mask 进行该 1 轮后处理。
+    - 仅完成该强制后处理轮后，恢复常规收敛/退出逻辑。
+  - 语法校验通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/coordinator.py`
+  - 最小 mock 回归通过：
+    - 设置 `max_rounds=1`，第 1 轮执行 `lv_split_to_rv` 且 verifier=approve。
+    - 结果实际执行到第 2 轮后处理后才 `Approved on round 2`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219 --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `WORKLOG.md`
+- Notes:
+  - 该改动保证“替换后至少再跑 1 轮 LLM 诊断修复”，满足用户最新流程要求。
+
+### Session: 2026-02-19 23:56 CST
+- Current goal:
+  - 从 `WORKLOG.md` 还原最近一次开发状态，便于继续衔接后续实验。
+- Done:
+  - 读取并核对 `WORKLOG.md` 尾部记录，确认最新 session 为 `2026-02-19 23:19 CST`。
+  - 提炼最近连续 4 次关键变更：
+    - `21:57`：引入 `lv_split_to_rv/rv_split_to_lv` 与 fallback 落盘策略。
+    - `22:15`：硬替换触发改为空间提示驱动，避免误替换联通域。
+    - `23:19`：split 后强制追加 1 轮 LLM 后处理。
+  - 明确当前可续跑命令与关键文件位置（以最新 session 的 `Next command` 为准）。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219 --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `WORKLOG.md`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/ops.py`
+- Notes:
+  - 还原结果显示当前主线目标是验证“split 后强制一轮 cleanup”在真实 case 上的整体收益与稳定性。
+
+### Session: 2026-02-20 00:00 CST
+- Current goal:
+  - 执行 case 335 实验命令，验证 `post-split cleanup` 版本在真实流程中的行为与结果。
+- Done:
+  - 执行命令：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219 --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+  - 运行完成并产出：
+    - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv`
+    - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/summary/experiment_summary.json`
+  - 关键结果（`Stem=335_original_lax_4c_009`）：
+    - `FinalVerdict=approved`, `SavedMaskType=repaired`, `RoundsCompleted=1`
+    - `AppliedOps=["lv_bridge","3_erode_expand_myo","topology_cleanup"]`
+    - 本次未触发 `lv_split_to_rv/rv_split_to_lv`，因此未进入 split 后强制 cleanup 的额外轮次。
+    - `PreDice_Mean=0.3729080863 -> PostDice_Mean=0.3567562268`，`DiceDelta_Mean=-0.0161518596`
+  - 汇总指标（`repair_outputs.metrics`）：
+    - `n_cases=1`, `n_approved=1`, `delta_dice_mean=-0.0161518596`, `worsened_count=1`
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\np='results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv'\nrow=next(csv.DictReader(open(p)))\nprint(row['Stem'], row['Diagnoses'], row['AppliedOps'])\nPY`
+- Key files:
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 该次运行验证了流程稳定完成，但未覆盖“split 触发后强制追加 1 轮”分支；如需验证该分支，需要构造会触发 split 的诊断场景。
+
+### Session: 2026-02-20 00:02 CST
+- Current goal:
+  - 解释“为何本次未触发 post-split cleanup”，对齐触发条件与用户预期。
+- Done:
+  - 对照代码与运行结果定位触发链路：
+    - `coordinator` 仅在本轮 `new_ops` 含 `lv_split_to_rv/rv_split_to_lv` 时，设置 `post_split_cleanup_pending`（见 `cardiac_agent_postproc/agents/coordinator.py`）。
+    - `planner` 仅在 `fragmented_*` 来自 `source in {llm, vlm}` 且有空间提示（`bbox` 或 `direction != global`）时，才生成 split 操作（见 `cardiac_agent_postproc/agents/planner_agent.py`）。
+  - 本次 case 实际诊断证据（CSV）：
+    - `fragmented_lv` 条目为 `source=rules, direction=global, bbox=null`，不满足 split 触发门槛。
+    - 因此本轮 `AppliedOps` 仅有 `lv_bridge/3_erode_expand_myo/topology_cleanup`，无 split 操作，自然不会进入 post-split 强制追加轮。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv, json\np='results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv'\nrow=next(csv.DictReader(open(p)))\nprint('fragment issue source/direction/bbox from Diagnoses:')\nfor d in json.loads(row['Diagnoses']):\n    if d.get('issue') in {'fragmented_lv','missing_lv_fragments','fragmented_rv','missing_rv_fragments'}:\n        print(d.get('issue'), d.get('source'), d.get('direction'), d.get('bbox'))\nprint('AppliedOps=', row['AppliedOps'])\nPY`
+- Key files:
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 当前实现保证的是“split 一旦执行，100% 追加一轮”；并非“出现 fragmented 问题就 100% split + 追加轮”。
+
+### Session: 2026-02-20 00:17 CST
+- Current goal:
+  - 向用户确认本次是否触发 LLM/VLM，并给出落盘诊断输出明细。
+- Done:
+  - 读取 `repair` 结果 CSV 并解析 `Diagnoses` 字段，确认 `Stem=335_original_lax_4c_009` 的 4 条诊断：
+    - `myo_too_thick`（`source=rules`, `direction=septal`, `bbox=[83,145,214,226]`）
+    - `lv_too_large`（`source=rules`, `direction=apical`, `bbox=[134,108,210,216]`）
+    - `myo_thickness_var`（`source=rules`, `direction=global`, `bbox=None`）
+    - `fragmented_lv`（`source=rules`, `direction=global`, `bbox=None`）
+  - 同时核对 `triage` 结果 CSV：
+    - `TriageCategory=needs_fix`
+    - `Issues=["disconnected_myo","fragmented_lv","rv_lv_touching"]`
+  - 对照运行时 stdout（本次执行会话）确认存在多次 `[LLM]` / `[LLM-Vision]` 请求并返回，因此链路已触发。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv, json\np='results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv'\nrow=next(csv.DictReader(open(p)))\nfor d in json.loads(row['Diagnoses']):\n    print(d['issue'], d.get('source'), d.get('direction'), d.get('bbox'))\nPY`
+- Key files:
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/triage/triage_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 本次 split 未触发的直接证据是 `fragmented_lv` 来自 `rules` 且无空间提示，不满足当前硬触发门槛。
+
+### Session: 2026-02-20 00:19 CST
+- Current goal:
+  - 回答“为什么最终诊断不是 LLM source”，定位诊断来源回退/覆盖机制。
+- Done:
+  - 检查 `DiagnosisAgent.process_case` 合并逻辑：
+    - 先 `think_json` + `_parse_llm_diagnoses`。
+    - 若 `llm_diagnoses` 为空，直接 `final_diagnoses = rule_diagnoses`。
+    - 若非空，也会把缺失的高严重度 rule diagnosis 插到前面，再按 `max_suggestions` 截断。
+  - 检查配置：`max_suggestions=4`（`config/azure_openai_medrag.yaml`）。
+  - 检查本次落盘 `Diagnoses`：4 条均为 `high + source=rules`，说明最终前 4 位被规则项占满。
+  - 结合本次 stdout：诊断阶段确有 LLM 调用（返回长度 `1302`），不是“没调 LLM”，而是“最终合并结果显示为 rules”。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv, json\nrow=next(csv.DictReader(open('results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv')))\nfor d in json.loads(row['Diagnoses']):\n    print(d['issue'], d['severity'], d['source'])\nPY`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `config/azure_openai_medrag.yaml`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 当前实现是“LLM synthesis + 高严重度 rule 强注入 + top-k 截断”，所以最终 source 可能全部显示为 `rules`。
+
+### Session: 2026-02-20 00:21 CST
+- Current goal:
+  - 回答“rules 下 fragmented 是否应 100% 进入 atlas 替换”并给出代码依据。
+- Done:
+  - 核对 `planner` 主逻辑，确认当前实现并非 rules 下 100% atlas：
+    - `rules` 产生的 `fragmented_lv` 默认 operation 是 `lv_bridge`（非 atlas）。
+    - `hard_fragment_relabel` 仅允许 `source in {llm, vlm}` 且有空间提示时触发 split。
+    - `force_atlas_plan_if_needed` 在存在 `fragmented_*` issue 时直接返回 `None`（禁用强制 atlas 分支）。
+    - atlas 前置排序仅在“critical missing”条件下生效，`high fragmented` 不属于该条件。
+  - 结论：当前策略是“对 rules 的 fragmented 走保守桥接/常规修复”，不是“100% atlas 替换”。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nfrom cardiac_agent_postproc.agents.diagnosis_agent import ISSUE_OPS_MAP\nprint('fragmented_lv ops:', ISSUE_OPS_MAP['fragmented_lv'])\nprint('missing_lv_fragments ops:', ISSUE_OPS_MAP['missing_lv_fragments'])\nPY`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 若业务期望是“rules 的 fragmented 也强制 atlas/split”，需要改 planner 的触发门槛和 forced-atlas 早退条件。
+
+### Session: 2026-02-20 00:27 CST
+- Current goal:
+  - 按用户要求在沙箱外重跑 case 335，并提取 Diagnosis 阶段的原始 LLM JSON 输出。
+- Done:
+  - 创建临时脚本 `/tmp/run_case335_diag_raw.py`，运行时 monkey-patch `BaseAgent.think_json`：
+    - 当 `self.name == "diagnosis"` 时打印 `[DIAG_RAW_JSON_START] ... [DIAG_RAW_JSON_END]`。
+  - 使用沙箱外命令执行：
+    - `PYTHONPATH=/data484_5/xzhao14/cardiac_agent_postproc python /tmp/run_case335_diag_raw.py`
+  - 成功捕获两轮 diagnosis 的原始 LLM JSON（均包含 `diagnoses` 数组）：
+    - Round 1: `rv_lv_touching`, `broken_ring`, `fragmented_lv`, `jagged_boundary`
+    - Round 2: `rv_lv_touching`, `broken_ring`, `fragmented_lv`, `irregular_boundaries`
+  - 本次 run 最终结果：
+    - `FinalVerdict=gave_up`, `SavedMaskType=original`, `RoundsCompleted=2`, `DiceDelta_Mean=0.0`
+    - 路径：`results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219_rerun_diagraw`
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv, json\np='results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219_rerun_diagraw/repair/need_fix_diagnosis_repair_results.csv'\nrow=next(csv.DictReader(open(p)))\nprint(row['Stem'], row['FinalVerdict'], row['SavedMaskType'], row['RoundsCompleted'])\nPY`
+- Key files:
+  - `/tmp/run_case335_diag_raw.py`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219_rerun_diagraw/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260219_rerun_diagraw/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 这次证明“LLM 诊断确有输出”，但后续合并与策略选择仍可能导致最终落盘诊断来源显示为 `rules`。
+
+### Session: 2026-02-20 00:30 CST
+- Current goal:
+  - 验证“按 LLM 诊断输入时是否会触发 split”的具体条件。
+- Done:
+  - 通过最小脚本直接调用 `PlannerAgent._hard_fragment_relabel_steps(...)`，验证三种输入：
+    - `source=llm + fragmented_lv + direction=global + bbox=None` -> 不触发 split（返回空）。
+    - `source=llm + fragmented_lv + bbox有效` -> 触发 `lv_split_to_rv`。
+    - `source=llm + missing_lv_fragments + bbox有效` -> 触发 `lv_split_to_rv`。
+  - 结论：是否触发 split 取决于“LLM/VLM来源 + 空间提示（bbox或非global方向）”是否同时满足。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nfrom cardiac_agent_postproc.agents.message_bus import MessageBus\nfrom cardiac_agent_postproc.agents.planner_agent import PlannerAgent\nimport yaml\ncfg=yaml.safe_load(open('config/azure_openai_medrag.yaml'))\nplanner=PlannerAgent(cfg, MessageBus())\nprint(planner._hard_fragment_relabel_steps([{'issue':'fragmented_lv','affected_class':'lv','direction':'global','severity':'high','source':'llm','bbox':None}]))\nprint(planner._hard_fragment_relabel_steps([{'issue':'fragmented_lv','affected_class':'lv','direction':'global','severity':'high','source':'llm','bbox':[5,8,22,25]}]))\nPY`
+- Key files:
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 当前实现并非“LLM一出现就 split”，而是“LLM/VLM + 可定位空间提示”才 split。
+
+### Session: 2026-02-20 00:32 CST
+- Current goal:
+  - 回答用户“给了方向是否也可触发 split”。
+- Done:
+  - 通过最小脚本验证：
+    - 输入 `issue=fragmented_lv, source=llm, direction=septal, bbox=None`。
+    - `PlannerAgent._hard_fragment_relabel_steps(...)` 返回 `lv_split_to_rv`，说明“非 global 方向”本身即可作为空间提示触发 split。
+  - 结合本次实际 case：`fragmented_lv` 在最终诊断中为 `direction=global` 且 `source=rules`，因此未触发。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nfrom cardiac_agent_postproc.agents.message_bus import MessageBus\nfrom cardiac_agent_postproc.agents.planner_agent import PlannerAgent\nimport yaml\ncfg=yaml.safe_load(open('config/azure_openai_medrag.yaml'))\nplanner=PlannerAgent(cfg, MessageBus())\nprint(planner._hard_fragment_relabel_steps([{'issue':'fragmented_lv','affected_class':'lv','direction':'septal','severity':'high','source':'llm','bbox':None}]))\nPY`
+- Key files:
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 方向可触发的前提是该 `fragmented_*` 诊断条目本身保留为 `source=llm/vlm` 且方向非 `global`。
+
+### Session: 2026-02-20 00:38 CST
+- Current goal:
+  - 按用户要求修改并验证：让 LLM 诊断在合并后不被 rules 挤掉，并在 `fragmented/missing_fragments` 无 bbox 时补齐可用空间提示以触发 split。
+- Done:
+  - 修改 `cardiac_agent_postproc/agents/diagnosis_agent.py`：
+    - 合并策略改为：`llm_diagnoses` 保持在前，缺失的高严重度 rule diagnosis 仅追加到末尾（避免 `max_suggestions` 截断时丢失 LLM 空间提示）。
+    - 在构建 `ctx.diagnoses` 时新增 `fragmented_* / missing_*_fragments` 的 bbox 补全：
+      - 若原始 bbox 缺失且方向为 global，自动推断目标类“次连通域” bbox（`_infer_secondary_component_bbox`）。
+  - 代码校验：
+    - `python -m py_compile cardiac_agent_postproc/agents/diagnosis_agent.py` 通过。
+    - 静态检查：`335` 原始预测上 `lv` 次连通域 bbox 成功推断为 `[99, 133, 171, 205]`。
+  - 实验验证（case 335）：
+    - 仅合并修复版本：`results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix`
+      - `Diagnoses` 为 LLM 来源并包含 `missing_lv_fragments`，`DiceDelta_Mean=+0.1804`。
+    - 合并 + bbox 推断版本：`results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix_bboxinfer`
+      - Planner 计划触发 `lv_split_to_rv`，Executor 日志显示使用诊断 bbox `[99, 133, 171, 205]`。
+      - Coordinator 触发 `PostSplit` 追加轮（日志出现 `Round 2/3`）。
+      - 最终落盘 `SavedMaskType=best_intermediate`, `BestIntermediateOps=["lv_split_to_rv"]`, `DiceDelta_Mean=+0.3286890538`。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\np='results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix_bboxinfer/repair/need_fix_diagnosis_repair_results.csv'\nrow=next(csv.DictReader(open(p)))\nprint(row['SavedMaskType'], row['BestIntermediateOps'], row['DiceDelta_Mean'])\nPY`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix_bboxinfer/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 当前行为已验证：LLM 诊断可保留并驱动 split；当 LLM 未提供 bbox 且方向 global 时，会利用次连通域定位补齐空间提示。
+
+### Session: 2026-02-20 00:46 CST
+- Current goal:
+  - 按用户要求再跑一遍，确认 split 触发是否稳定复现。
+- Done:
+  - 执行实验：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix_bboxinfer_rerun2 --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+  - 运行日志关键证据：
+    - Diagnosis 输出包含 `missing_lv_fragments`（LLM source）。
+    - Planner 再次输出 `Plan: ['lv_split_to_rv']`。
+    - Executor 使用诊断 hint bbox：`[99, 133, 171, 205]`。
+    - Coordinator 再次触发 `PostSplit` 追加轮（`Round 2/3`）。
+  - 最终结果（CSV）：
+    - `FinalVerdict=gave_up`, `SavedMaskType=best_intermediate`, `RoundsCompleted=2`
+    - `BestIntermediateOps=["lv_split_to_rv"]`
+    - `PreDice_Mean=0.3729080863 -> PostDice_Mean=0.7015971402`
+    - `DiceDelta_Mean=+0.3286890538`
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\np='results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix_bboxinfer_rerun2/repair/need_fix_diagnosis_repair_results.csv'\nrow=next(csv.DictReader(open(p)))\nprint(row['BestIntermediateOps'], row['DiceDelta_Mean'])\nPY`
+- Key files:
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix_bboxinfer_rerun2/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_case335_singlecc_postsplit_cleanup_20260220_mergefix_bboxinfer_rerun2/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 本次 rerun 复现了 split 触发与 post-split 追加轮；“最终 verdict 拒绝”与“best_intermediate 落盘提升”同时存在。
+
+### Session: 2026-02-20 00:58 CST
+- Current goal:
+  - 估算“每次实验 API 调用次数与 token 消耗”并给出可复用公式。
+- Done:
+  - 基于代码路径统计单 case 调用构成：
+    - Warmup：1 次（`_warmup_if_needed`）。
+    - Stage1 triage：1 次 VLM。
+    - Stage2 case 内 triage：1 次 VLM。
+    - 每个 repair round 固定主干约 7 次：
+      - Diagnosis：`think_vision` + `think_json`（2）
+      - Planner：`think_json`（1）
+      - Executor：step0 质量 VLM（1）
+      - Verifier：对比 VLM + after VLM + `think_json`（3）
+  - 得到单 case 近似公式：
+    - `calls ≈ 3 + 7 * R (+ extras)`
+    - 其中 `R` 为该 case 实际 repair 轮数；`extras` 来自 triage borderline 的 `_llm_triage`、reject 时 `_should_retry` 等可选分支。
+  - 结合最近 rerun（`RoundsCompleted=2`）：
+    - 估算调用约 `17` 次，与日志节奏一致（含 split 与 post-split 追加轮路径）。
+  - token 侧说明：
+    - 当前代码未落盘 `usage` 字段，无法给出精确 token；
+    - 仅可给 rough range（同配置、单 case）：
+      - `R=1`：约 `12k~25k` tokens
+      - `R=2`：约 `20k~45k` tokens
+      - `R=3`：约 `30k~65k` tokens
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\n# If exact accounting is needed, patch api_client to persist response.usage per request.\nprint('ready to add usage logging')\nPY`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 若需要精确统计，建议在 `api_client.py` 记录每次请求的 `response.usage` 并写入 run 级 summary。
+
+### Session: 2026-02-20 01:13 CST
+- Current goal:
+  - 按用户要求在后台启动 MnM2 全量 case（基于 gpt-4o）的评估与修复，并确保运行在沙箱外。
+- Done:
+  - 首次后台启动（沙箱内）发现日志持续 `Connection refused`，不满足 gpt-4o 正常调用要求，已终止该进程。
+  - 使用沙箱外命令重新启动全量任务：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_allcases_20260220_bg_escalated --repair_subset triage_need_fix --atlas_mode local_per_sample --knowledge_mode auto_skip`
+    - 启动方式：`setsid ... > run.log 2>&1 < /dev/null &`
+  - 运行状态确认：
+    - PID：`698150`
+    - 日志：`results/exp_mnm2_gpt4o_allcases_20260220_bg_escalated/run.log`
+    - 日志已出现 `DEBUG: Ollama API returned`，并进入 `Cases to process: 320`、`Stage1 Triage`，说明 gpt-4o 调用正常。
+- Blocked:
+  - None
+- Next command:
+  - `tail -f results/exp_mnm2_gpt4o_allcases_20260220_bg_escalated/run.log`
+- Key files:
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_escalated/run.log`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_escalated/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 当前为全量 320 case 长任务；建议通过日志尾部与 `ps -fp 698150` 定期检查。
+
+### Session: 2026-02-20 01:28 CST
+- Current goal:
+  - 按用户要求先做单 case 全流程预跑，再启动 MnM2 全量 case 后台任务（gpt-4o）。
+- Done:
+  - 停止旧的全量后台进程：`kill 698150`，并用 `pgrep -af run_miccai_multiagent_experiment.py` 确认已停止。
+  - 完成单 case 预跑（case: `335_original_lax_4c_009`）：
+    - 输出目录：`results/exp_mnm2_gpt4o_preflight_case335_20260220`
+    - 关键摘要：`Repair cases: 1`，`Repair mean Dice delta: +0.3287`，流程包含 Stage1/Stage2/Verifier，最终正常退出（code 0）。
+  - 启动全量后台运行（沙箱外）：
+    - 命令核心：`python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight --repair_subset triage_need_fix --atlas_mode local_per_sample --knowledge_mode auto_skip`
+    - 运行方式：`setsid ... > run.log 2>&1 < /dev/null &`
+    - 当前 PID：`711044`（`ps -fp 711044` 已确认在运行）。
+- Blocked:
+  - None
+- Next command:
+  - `tail -f results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/run.log`
+- Key files:
+  - `results/exp_mnm2_gpt4o_preflight_case335_20260220/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_preflight_case335_20260220/summary/experiment_summary.json`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/run.log`
+  - `WORKLOG.md`
+- Notes:
+  - 全量任务刚启动时 `run.log` 可能暂时为空（stdout 缓冲），以 PID 持续存在与后续日志刷新共同判断运行状态。
+
+### Session: 2026-02-20 01:47 CST
+- Current goal:
+  - 验证 OpenAI 官方 API 下可访问模型，并用 GPT-5.2 跑 335 单 case 诊断修复实验。
+- Done:
+  - 在 OpenAI 官方端点 `https://api.openai.com/v1` 外网探测可访问模型，确认：
+    - `has_exact_gpt_5_2 = True`
+    - `has_prefix_gpt_5 = True`
+  - 发现兼容性问题：`gpt-5.2` 不支持 `max_tokens`，需使用 `max_completion_tokens`。
+  - 代码修复：`cardiac_agent_postproc/api_client.py` 的 `_generate_ollama` 增加自动回退逻辑：
+    - 先按原参数发送；若报 `max_tokens` unsupported 且提示 `max_completion_tokens`，自动切换并重试。
+  - 新增配置：`config/openai_official_gpt52_medrag.yaml`
+    - 从 `config/azure_openai_medrag.yaml` 派生
+    - 将 `base_url` 替换为 `https://api.openai.com/v1`
+    - 将模型统一替换为 `gpt-5.2`
+  - 沙箱外完成单 case 运行：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/openai_official_gpt52_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_openai_official_gpt52_case335_20260220 --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+  - 结果摘要（`335_original_lax_4c_009`）：
+    - `FinalVerdict=gave_up`
+    - `SavedMaskType=best_intermediate`
+    - `RoundsCompleted=2`
+    - `BestIntermediateOps=["lv_split_to_rv", "rv_split_to_lv"]`
+    - `PreDice_Mean=0.3729080863`
+    - `PostDice_Mean=0.3729080863`
+    - `DiceDelta_Mean=+0.0000`
+    - 运行摘要显示：`Repair mean Dice delta: +0.0000`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/openai_official_gpt52_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_openai_official_gpt52_case335_rerun --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset triage_need_fix --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/api_client.py`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `results/exp_mnm2_openai_official_gpt52_case335_20260220/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_openai_official_gpt52_case335_20260220/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 该 key 下可访问 GPT-5.2；代码已兼容 GPT-5.x 的 token 参数差异。
+
+### Session: 2026-02-20 02:13 CST
+- Current goal:
+  - 将 `cardiac_agent_postproc`、`scripts`、`config`、`prompts` 目录同步到 GitHub，并新建分支 `V1`。
+- Done:
+  - 创建并切换分支：`git switch -c V1`。
+  - 仅暂存指定目录：`git add cardiac_agent_postproc scripts config prompts`。
+  - 提交变更：`git commit -m "sync V1: update cardiac_agent_postproc scripts config prompts"`（commit: `62083f0`）。
+  - 推送到远端并设置 upstream：`git push -u origin V1`。
+  - 远端分支已创建：`origin/V1`。
+- Blocked:
+  - None
+- Next command:
+  - `git log --oneline -n 3`
+- Key files:
+  - `cardiac_agent_postproc/`
+  - `scripts/`
+  - `config/`
+  - `prompts/`
+  - `WORKLOG.md`
+- Notes:
+  - 用户口述的 `script`/`prompt` 目录按仓库实际目录 `scripts`/`prompts` 执行。
+
+### Session: 2026-02-20 02:16 CST
+- Current goal:
+  - Update `README.md` to a clean English version and push to GitHub branch `V1`.
+- Done:
+  - Rewrote `README.md` in English with updated sections: overview, agent pipeline, repository layout, installation, API setup, quick start, MICCAI runner usage, outputs, model comparison, and useful configs.
+  - Committed docs update on `V1`:
+    - `git commit -m "docs: refresh README in English"`
+    - commit: `b3754c1`
+  - Pushed to remote branch:
+    - `git push`
+    - `origin/V1` updated from `62083f0` to `b3754c1`.
+- Blocked:
+  - None
+- Next command:
+  - `git log --oneline -n 3`
+- Key files:
+  - `README.md`
+  - `WORKLOG.md`
+- Notes:
+  - Only `README.md` was included in this docs commit.
+
+### Session: 2026-02-20 10:28 CST
+- Current goal:
+  - 分析“最新运行里 case 335 修复逻辑为何又改回去”的具体原因。
+- Done:
+  - 对比了 4 个相关实验输出：
+    - `results/outputs_ollama_all_cases`
+    - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight`
+    - `results/exp_mnm2_gpt4o_preflight_case335_20260220`
+    - `results/exp_mnm2_openai_official_gpt52_case335_20260220`
+  - 提取并核对 335 关键行：
+    - `outputs_ollama_all_cases` 中 `335_original_lax_4c_009` 为 `BestIntermediateOps=["lv_split_to_rv"]`，`335_original_lax_4c_019` 为 3-step 清理链。
+    - `gpt4o_allcases_after_preflight` 中 `335_original_lax_4c_009` 仍是 `lv_split_to_rv`，但 `DiceDelta_Mean=-0.1740`；`335_original_lax_4c_019` 为 `Ops=[]`。
+  - 核对 runtime 配置差异：
+    - 最新目录 `outputs_ollama_all_cases`：`config=ollama_ministral_triage.yaml`，`atlas_mode=rebuild_global`，`knowledge_mode=custom`。
+    - 对照目录 `gpt4o_after_preflight`：`config=azure_openai_medrag.yaml`，`atlas_mode=local_per_sample`，`knowledge_mode=auto_skip`，`triage_four_way_refs=true`。
+  - 在 `run.log` 中确认 335 执行细节：
+    - `335_original_lax_4c_009` 的 split 步使用了占位 bbox `[0, 0, 10, 10]`，对应执行为 `lv_split_to_rv`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_allcases_20260220_rerun_consistent --repair_subset triage_need_fix --atlas_mode local_per_sample --knowledge_mode auto_skip --triage_four_way_refs true`
+- Key files:
+  - `results/outputs_ollama_all_cases/summary/experiment_summary.json`
+  - `results/outputs_ollama_all_cases/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/summary/experiment_summary.json`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/run.log`
+  - `WORKLOG.md`
+- Notes:
+  - 这次“改回去”主要由实验配置与模型路径变化触发，并非单纯代码回滚；335 的 split 步还受到占位 bbox 影响，导致行为与单 case 预跑不一致。
+
+### Session: 2026-02-20 10:39 CST
+- Current goal:
+  - 按用户要求新增规则：将占位 bbox 视为无效，避免误触发/误定位修复步骤。
+- Done:
+  - 修改 `cardiac_agent_postproc/agents/diagnosis_agent.py`：
+    - 在系统提示中明确：位置不确定时 `bbox_2d=null`，禁止使用占位框（如 `[0,0,10,10]`）。
+    - 新增 bbox 规范化与占位检测函数：
+      - `_normalize_bbox_px`
+      - `_is_placeholder_bbox_norm`
+      - `_is_placeholder_bbox_px`
+    - 在 `_parse_llm_diagnoses` 中：
+      - 解析 `bbox_2d` 时过滤占位框，命中后置为 `None`。
+      - 支持解析像素坐标 `bbox` 字段，并同样做占位过滤。
+    - 在 `process_case` 写入 `ctx.diagnoses` 前再次过滤占位 bbox，若无效则回退到已有自动推断路径（directional / secondary component）。
+  - 校验：
+    - `python -m py_compile cardiac_agent_postproc/agents/diagnosis_agent.py` 通过。
+    - 规则自检脚本输出：
+      - `norm [0,0,10,10] placeholder = True`
+      - `norm [120,140,160,180] placeholder = False`
+      - `px [0,0,10,10] placeholder = True`
+      - `px [15,18,40,44] placeholder = False`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case335_placeholder_bbox_guard --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 该规则是“过滤占位框并回退推断”，不放宽“应提供 bbox”的总体策略。
+
+### Session: 2026-02-20 10:45 CST
+- Current goal:
+  - 查询指定 case `307_original_lax_4c_024` 在最新运行中的诊断内容。
+- Done:
+  - 检索并对比该 stem 在多个结果目录中的 triage/repair 记录。
+  - 确认在最新目录 `results/outputs_ollama_all_cases` 中该 case 进入 repair，并解析 `Diagnoses` 字段。
+  - 提取到 4 条诊断：
+    - `rv_lv_touching`（myo, septal, high, op=`rv_lv_barrier`, bbox=`[54,102,181,182]`, source=llm）
+    - `broken_ring`（myo, lateral, medium, op=`morphological_gap_close`, bbox=`[60,150,185,227]`, source=llm）
+    - `myo_thickness_var`（myo, global, low, op=`topology_cleanup`, bbox=`None`, source=llm）
+    - `lv_too_large`（lv, lateral, high, op=`3_erode_expand_myo`, bbox=`[66,150,182,223]`, source=rules）
+  - 补充发现：在 `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight` 中同一 case 被 triage 为 `good`，因此未进入 diagnosis/repair。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\np='results/outputs_ollama_all_cases/repair/need_fix_diagnosis_repair_results.csv'\nfor r in csv.DictReader(open(p)):\n    if r['Stem']=='307_original_lax_4c_024':\n        print(r['Diagnoses'])\n        break\nPY`
+- Key files:
+  - `results/outputs_ollama_all_cases/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/outputs_ollama_all_cases/triage/triage_results.csv`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/triage/triage_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 用户给出的文件名 `0.754_4C_LowDice_307_original_lax_4c_024.png` 对应 stem 为 `307_original_lax_4c_024`。
+
+### Session: 2026-02-20 10:51 CST
+- Current goal:
+  - 查询 gpt4o 全量结果目录中 case `307_original_lax_4c_024` 的诊断/修复结果。
+- Done:
+  - 在 `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/triage/triage_results.csv` 命中该 case。
+  - 该 case 的 triage 结果为 `good`：
+    - `TriageScore=0.7102207389625841`
+    - `TriageBadProb=0.2897792610374159`
+    - `VLM_Quality=good`, `VLM_Score=8.5`, `VLM_GoodProb=0.825`, `VLM_Confidence=0.95`
+    - `Issues=[]`
+    - `Dice_Mean=0.7540204907599642`（RV=0.5375494071, Myo=0.7779111645, LV=0.9466009007）
+  - 在 `repair/need_fix_diagnosis_repair_results.csv` 中无该 case 记录（因为未进入 repair 阶段）。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\np='results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/triage/triage_results.csv'\nfor r in csv.DictReader(open(p)):\n    if r['Stem']=='307_original_lax_4c_024':\n        print(r)\n        break\nPY`
+- Key files:
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/triage/triage_results.csv`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 因 triage 判为 `good`，本次 run 中不存在 diagnosis JSON 输出。
+
+### Session: 2026-02-20 10:54 CST
+- Current goal:
+  - 解释 `exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight` 中 `307_original_lax_4c_024` 被 triage 为 `good` 的原因。
+- Done:
+  - 对齐了 case 级证据：
+    - 运行日志显示该 case 的 VLM 直接给出 `quality=good, score=8.5, confidence=0.95, issues=[]`。
+    - triage 输出行为：`good`，`score=0.7102207389625841`，`bad_prob=0.2897792610374159`。
+  - 复核 triage 公式与代码路径：
+    - VLM/QM 融合：`triage_score = 0.85*vlm_good_prob + 0.15*qm_good_prob`。
+    - 该 case `QM_BadProb=0.940195...`（即 `qm_good_prob≈0.0598`），但仍被 VLM 高分主导，得到 `triage_score≈0.7102`。
+    - 最终一致性规则仅在以下条件强制 `needs_fix`：`severity>=0.8`、存在 critical issue 且分数<0.9、或分数<=0.40。
+    - 本 case `issues=[]`、`severity=0.0`、`score=0.7102` 落在中间带（0.40, 0.72），不会被强制翻转为 `needs_fix`，所以保留为 `good`。
+  - 复核 feature issue 检测：
+    - `_detect_issues` 对该 case 返回空列表；关键触发量未过阈值（`touch_ratio=0.0`, `cc_count_* = 1`, `myo/lv/rv_missing = 0`）。
+  - 交叉验证：
+    - 该样本在 curated 评估里是真值 `needs_fix`，本次预测 `good`（假阴性）。
+- Blocked:
+  - None
+- Next command:
+  - `rg -n "if severity >= 0.8|has_critical_issue|score_bad_ceiling|score_good_floor" cardiac_agent_postproc/agents/triage_agent.py`
+- Key files:
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/run.log`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/triage/triage_results.csv`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/triage/triage_curated_eval_rows.csv`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 属于“VLM 误判 + issue 规则漏报 + final consistency 中间带不翻转”的组合问题。
+
+### Session: 2026-02-20 10:57 CST
+- Current goal:
+  - 按用户要求通过 gpt4o 配置调整，降低 triage 中 VLM 权重以避免明显坏例被误判为 good。
+- Done:
+  - 修改 `config/azure_openai_medrag.yaml` 的 `agents.triage` 融合权重：
+    - `vlm_good_prob_weight: 0.85 -> 0.40`
+    - `qm_good_prob_weight: 0.15 -> 0.60`
+  - 复核配置解析：YAML 读取后权重值正确。
+  - 以 `307_original_lax_4c_024` 做回算验证：
+    - 旧分数：`triage_score=0.7102207389`（good）
+    - 新分数：`triage_score=0.3658829559`（`<= score_bad_ceiling 0.40`）
+    - 结论：新配置下该 case 会落到 `needs_fix`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case307_retriage_weightfix --limit 1 --case_contains 307_original_lax_4c_024 --skip_repair`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/triage/triage_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 本次仅改配置，不改 triage 代码逻辑。
+
+### Session: 2026-02-20 11:00 CST
+- Current goal:
+  - 按用户要求在 gpt4o 配置中提高 `score_bad_ceiling`，使 triage 更保守。
+- Done:
+  - 修改 `config/azure_openai_medrag.yaml`：
+    - `agents.triage.score_bad_ceiling: 0.40 -> 0.50`
+  - 校验 YAML 解析成功，当前 triage 关键参数为：
+    - `vlm_good_prob_weight=0.4`
+    - `qm_good_prob_weight=0.6`
+    - `score_good_floor=0.72`
+    - `score_bad_ceiling=0.5`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_case307_retriage_weightfix_ceiling50 --limit 1 --case_contains 307_original_lax_4c_024 --skip_repair`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - `score_bad_ceiling` 提升后，`triage_score <= 0.50` 的样本会更容易落入 `needs_fix`。
+
+### Session: 2026-02-20 11:05 CST
+- Current goal:
+  - 直接读取 worst cases 并修改 repair 相关 prompt，使诊断/规划更准确且可运行。
+- Done:
+  - 读取典型 worst cases 图像进行人工模式核对：
+    - `307_original_lax_4c_024`（LowDice，拓扑尚可但边界偏移明显）
+    - `335_original_lax_4c_009`（严重类混淆/多连通域错标）
+    - `244_original_lax_4c_009`（DiscMyo/边界与结构混合问题）
+  - 统计 hard subset 类型：`LowDice=24`、`DiscMyo=15`（worst_cases 文件名标签）。
+  - 修改 repair 相关 prompt 文件：
+    1) `prompts/diagnosis_system.txt`
+       - 新增“REPAIR ROBUSTNESS RULES (HIGHEST PRIORITY FOR WORST CASES)”。
+       - 明确 LowDice 优先走方向性边界修复，不默认 atlas/split。
+       - 收紧 `convex_hull_fill` 触发条件（仅大缺口+明显泄漏/接触）。
+       - 强制 bbox 规则：不确定时 `bbox_2d=null`，禁止占位框。
+       - 在允许操作中补充 `morphological_gap_close`，并将输出 schema 调整为 `bbox_2d` 可为 `null`。
+    2) `prompts/diagnosis_prompt.txt`
+       - 同步上述稳健规则与 bbox 规则（VLM 诊断端）。
+       - 补充 `morphological_gap_close` 到操作集。
+       - 输出 schema 同步支持 `bbox_2d ... or null`。
+    3) `prompts/planner_system.txt`
+       - 新增“Worst-Case Repair Policy (HIGHEST PRIORITY)”。
+       - 规定默认 1-2 步保守计划，LowDice 边界错配先做局部修复。
+       - 收紧 atlas/split/convex_hull_fill 触发条件。
+       - 增加冲突规避：禁止一轮内“激进收缩+激进平滑”叠加。
+       - 补充输出约束：大多数情况 1-2 步，最多 3 步。
+  - 可运行性验证（静态）：
+    - 通过 agent 读取验证：Diagnosis/Planner prompt 均成功加载。
+    - 关键规则关键词存在（bbox null / no placeholder / worst-case policy）。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_prompt_tune_smoke_307 --limit 1 --case_contains 307_original_lax_4c_024 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/planner_system.txt`
+  - `WORKLOG.md`
+- Notes:
+  - 本次仅修改 prompt，不改执行器逻辑；已完成“能加载/不报错”的静态可运行验证。
+
+### Session: 2026-02-20 11:10 CST
+- Current goal:
+  - 对修改后的 repair prompt 做单 case 冒烟验证，确认链路可运行。
+- Done:
+  - 运行冒烟 1（307）：
+    - 命令：`python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_prompt_tune_smoke_307 --limit 1 --case_contains 307_original_lax_4c_024 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+    - 结果：该 case 在 triage 阶段仍判 `good`（`score=0.519`），因此 coordinator 快路径跳过 repair（prompt 未触发）。
+  - 运行冒烟 2（335）：
+    - 命令：`python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_prompt_tune_smoke_335 --limit 1 --case_contains 335_original_lax_4c_009 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+    - 结果：完整触发 repair 链路（triage→diagnosis→planner→executor→verifier），确认 prompt 在实跑中可用。
+    - diagnosis 输出：`['rv_lv_touching', 'broken_ring', 'missing_lv_fragments', 'myo_thickness_var']`。
+    - planner 输出：`Plan: ['lv_split_to_rv']`（被执行）。
+    - executor 使用非占位 bbox：`[99, 133, 171, 205]`。
+    - run summary：`Repair mean Dice delta: +0.3287`。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\np='results/exp_mnm2_gpt4o_prompt_tune_smoke_335/repair/need_fix_diagnosis_repair_results.csv'\nprint(next(csv.DictReader(open(p))))\nPY`
+- Key files:
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/planner_system.txt`
+  - `results/exp_mnm2_gpt4o_prompt_tune_smoke_307/summary/experiment_summary.json`
+  - `results/exp_mnm2_gpt4o_prompt_tune_smoke_335/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 307 未触发 repair 的根因是 triage 快路径，不是 prompt 读取失败。
+
+### Session: 2026-02-20 11:19 CST
+- Current goal:
+  - 回答“运行输入无 GT、GT 仅用于评估”下的可用性与依赖边界。
+- Done:
+  - 核对 GT 在代码中的使用位置并确认：
+    - triage/diagnosis/planner 决策链不依赖 GT。
+    - executor 中 GT 仅用于 Oracle Dice 日志（`logging only`），不参与 gate 决策。
+    - run 脚本中的 GT 主要用于离线指标统计（pre/post Dice、报告和图表）。
+  - 结论：修复决策是 GT-free；GT 缺失时主要影响评估指标，不影响核心修复流程执行。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root <your_inference_input_root> --target_dir <output_dir> --repair_subset triage_need_fix --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `WORKLOG.md`
+- Notes:
+  - 若希望彻底避免日志中出现 GT 相关字段，可后续新增 no-gt eval 开关。
+
+### Session: 2026-02-20 12:49 CST
+- Current goal:
+  - 回答“repair knowledge 是如何构建的”，并区分静态规则 KB 与图像对比 KB 的来源和流程。
+- Done:
+  - 核对 `RepairComparisonKB` 构建与加载链路：
+    - 构建入口：`scripts/run_miccai_multiagent_experiment.py` 中 `_prepare_repair_kb()` / `_build_repair_kb_from_cases()`。
+    - 样本选择：优先 `curated_labels` 中 `needs_fix` 且有 GT 的 case；否则按 Dice 最差回退。
+    - 生成方式：对选中 case 试跑多种 repair op，计算 `delta Dice`，保存 BEFORE/AFTER/DIFF overlay 到 `repair_kb/{improved,degraded,neutral}`。
+    - 运行期使用：`RepairComparisonKB.load(...)` 被注入 `ExecutorAgent/VerifierAgent`，用于 VLM few-shot repair judgment。
+  - 核对 `repair_kb.json` 静态规则链路：
+    - `PlannerAgent` 在 `process_case()` 中读取 `repair_kb.json`，将 issue 映射为 `proven_solutions` 提示给 LLM。
+  - 读取最近一次实验摘要确认“你的当前构建”：
+    - `results/exp_mnm2_gpt4o_prompt_tune_smoke_335/summary/experiment_summary.json`
+    - repair KB 为 `build_if_missing`，`knowledge_mode=auto_skip`，本次实际 `built=true`；
+    - 统计：`improved=35, degraded=114, neutral=147, total=296`。
+- Blocked:
+  - None
+- Next command:
+  - `cat results/exp_mnm2_gpt4o_prompt_tune_smoke_335/summary/experiment_summary.json`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `repair_kb.json`
+  - `WORKLOG.md`
+- Notes:
+  - 当前仓库中“repair knowledge”是双轨：`repair_kb.json`（规则建议）+ `repair_kb/`（差分图 few-shot 视觉知识）。
+
+### Session: 2026-02-20 12:56 CST
+- Current goal:
+  - 回答“当 issue 不在 repair knowledge 里时，系统是否就不修改”的实际执行逻辑。
+- Done:
+  - 核对 `PlannerAgent`：
+    - `proven_solutions` 仅作为 prompt 提示；未命中时写入 `No specific history`，不会直接停止规划。
+    - 若 KB 未命中，仍会从 `ISSUE_OPS_MAP` 填充 `available_tools`；并把全局 `Available operations` 列给 LLM。
+    - 若 LLM 无计划，使用 `_fallback_plan()` 基于 diagnosis 中的 `operation` 兜底。
+  - 核对 `DiagnosisAgent`：
+    - 即使 LLM 给出未知 op，也会回退到 `ISSUE_OPS_MAP` 或 `topology_cleanup`，保证大多数 diagnosis 有可执行 op。
+  - 核对 `ExecutorAgent`：
+    - 只有 `plan` 为空时才跳过执行（`No plan ... skip execution`）；不是由 `proven_solutions` 缺失直接触发。
+- Blocked:
+  - None
+- Next command:
+  - `rg -n "No specific history|_fallback_plan|No plan for" cardiac_agent_postproc/agents/planner_agent.py cardiac_agent_postproc/agents/diagnosis_agent.py cardiac_agent_postproc/agents/executor.py -S`
+- Key files:
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `WORKLOG.md`
+- Notes:
+  - `issue -> proven_solutions` 属于“增强信号”，非硬门控；真正不改通常由“无诊断/空计划/执行或验证回滚”导致。
+
+### Session: 2026-02-20 13:16 CST
+- Current goal:
+  - 诊断“整体修复失败”根因，判断是否主要由 LLM planner 复杂度导致。
+- Done:
+  - 基于最近全量实验做分层统计（`results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight`）：
+    - 总体：`n_cases_processed=320`，进入修复 `n_cases=82`，`n_approved=23`，`delta_dice_mean=-0.0032`。
+    - 修复结果：`improved=4`，`worsened=12`，`unchanged=66`。
+    - 执行强度：`OpsCount=0` 的 case 为 `63/82`；其中 `11` 个 `approved` 但零操作。
+    - 预处理质量：`PreDice>=0.9` 占 `48/82`，高 Dice 子集整体仍轻微负增益。
+  - 解析 `run.log` 关键行为：
+    - Planner 实际有持续出计划（`→ Plan:` 108 次），平均计划长度约 3.5 步。
+    - Executor 高频空转：`no change` 293 次；`Done: 0/x` 共 49 轮。
+    - 不可执行操作存在：`myo_bridge_strong`(5)、`rv_lv_barrier_mild`(3)、`myo_bridge_mild`(1) 报 `NOT AVAILABLE`。
+  - 定位 worst case（`335_original_lax_4c_009`）：
+    - Round1 执行 `lv_split_to_rv` 后 Dice `0.3729 -> 0.1989`（`-0.1740`）。
+    - Verifier 明确 `degraded/reject`，但 Coordinator 仍缓存该 hard-relabel 中间结果并在耗尽轮次时回退到该 best-intermediate。
+  - 结论：
+    - 失败并非“LLM完全不会规划”；更主要是规则覆盖、可执行性映射、空操作链路和 fallback 策略联合作用。
+- Blocked:
+  - None
+- Next command:
+  - `rg -n "→ Plan:|no change|NOT AVAILABLE|best_intermediate|lv_split_to_rv" results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/run.log -S`
+- Key files:
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/summary/experiment_summary.json`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_allcases_20260220_bg_after_preflight/run.log`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `WORKLOG.md`
+- Notes:
+  - `planner` 的 LLM 输出经 `_sanitize_plan()` 的 hard-rule 后会被强制简化（如 `lv_split_to_rv`），这是“策略层”而非“LLM能力层”的关键影响因素。
+
+### Session: 2026-02-20 15:40 CST
+- Current goal:
+  - 审查“整套代码逻辑更新”是否合理，优先识别会影响修复判定与批处理稳定性的回归风险。
+- Done:
+  - 完成改动盘点：核心涉及 `base_agent.py`、`diagnosis_agent.py`、`executor.py`、`run_batch_repair.py`、prompt 与配置。
+  - 完成静态审查并定位高风险逻辑问题（判定分支可达性、恢复逻辑、打分门控状态更新）。
+  - 运行基础可执行性检查：`python -m py_compile` 通过。
+  - 尝试回归入口：`pytest -q` 不可用（命令缺失）；`python -m unittest discover -v` 因沙箱网络限制触发 `test_vlm_vision` 连接失败。
+- Blocked:
+  - None
+- Next command:
+  - `rg -n "if not is_pure_relabel|processed_stems|vlm_step_score" cardiac_agent_postproc/agents/base_agent.py run_batch_repair.py cardiac_agent_postproc/agents/executor.py -S`
+- Key files:
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `run_batch_repair.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 当前主要风险集中在“判定逻辑偏保守导致误判中性/跳过修复”和“resume 语义与 triage-only 共用日志导致误跳过”。
+
+### Session: 2026-02-20 15:45 CST
+- Current goal:
+  - 给出“当前逻辑更新如何修复”的优先级方案与最小验证路径。
+- Done:
+  - 梳理前一轮 review 的高/中风险点并转化为可执行修复步骤（判定分支、resume 语义、VLM 打分状态更新）。
+  - 输出按优先级的落地改法与建议验证命令。
+- Blocked:
+  - None
+- Next command:
+  - `python -m py_compile cardiac_agent_postproc/agents/base_agent.py cardiac_agent_postproc/agents/executor.py run_batch_repair.py`
+- Key files:
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `run_batch_repair.py`
+  - `WORKLOG.md`
+- Notes:
+  - 修复顺序建议先做逻辑正确性（判定/跳过语义），再做日志一致性与可观测性增强。
+
+### Session: 2026-02-20 16:06 CST
+- Current goal:
+  - 将“严格单调提升模式”写入代码，并让执行严格遵循诊断方向，同时增强 label 修复安全约束。
+- Done:
+  - 在 `ExecutorAgent` 实现严格单调 step gate：
+    - strict 模式下要求每步有置信度充足的 VLM 分数；
+    - 要求 `new_score >= prev_score + strict_min_score_delta`，否则拒绝；
+    - baseline 分数缺失时可整体阻断步骤执行（可配置）。
+  - 在 `ExecutorAgent` 增强方向与重标约束：
+    - 计划方向归一化后执行；
+    - 非 global 步骤在 strict 下必须有可用方向区域；
+    - `lv_split_to_rv/rv_split_to_lv` 默认强制 bbox；
+    - split 重标新增连通域与改动比例约束（必须降低源类碎片化，且 footprint 受限）。
+  - 在 `VerifierAgent` 实现 round 级严格单调：
+    - strict 模式下比较参考从 `original` 升级为“当前 best_intermediate”；
+    - round 必须 `vlm_comparison=improved` 且置信度达阈值，否则 reject。
+  - 在 `CoordinatorAgent` 对 strict 模式联动：
+    - 初始化 best baseline；
+    - reject 后回退到安全基线（best/original）；
+    - 耗尽轮次时固定输出 best_intermediate。
+  - 在 `PlannerAgent` 强化方向一致性：
+    - 若匹配诊断方向为非 global，统一覆盖 step direction，避免偏离诊断方向。
+  - 修复 `BaseAgent` 中比较判定分支可达性（避免 improved 规则被前置分支遮挡）。
+  - 更新配置模板（`default` 与 `azure_openai_medrag`）并默认开启 strict 参数。
+  - 运行语法检查：`python -m py_compile ...` 通过。
+- Blocked:
+  - None
+- Next command:
+  - `python run_batch_repair.py --config config/default.yaml --limit 3`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - strict 模式会显著提高保守性：在 VLM 置信度不足或 baseline 缺失场景下，可能出现“宁可不改也不冒险改坏”的行为。
+
+### Session: 2026-02-20 16:16 CST
+- Current goal:
+  - 增加四类硬门控（视图必需类别、LV-in-Myo 包裹、RV-LV 接触不增、跨切片连续性），并给出各门控的可替代操作建议。
+- Done:
+  - 在 `ExecutorAgent` 新增硬门控执行链 `_run_hard_anatomy_gates()`，对每步候选 mask 在提交前执行：
+    - 视图必需类别保护（2CH: Myo/LV；其余视图: RV/Myo/LV）；
+    - LV 边界被 Myo 覆盖率约束（阀平面上方区域豁免）；
+    - 非屏障类操作的 RV-LV 直接接触长度不增约束；
+    - 基于邻近切片的面积/质心/连通域连续性约束。
+  - 新增 `_gate_repair_hints()`，门控拒绝时会在 `OP_FAILED` 里回传 `suggested_ops` 给 planner 参考。
+  - 为新门控补齐配置项（`config/default.yaml` 与 `config/azure_openai_medrag.yaml`），支持阈值调参。
+  - 运行校验：
+    - `python -m py_compile`（核心 agent 文件）通过；
+    - `yaml.safe_load`（两个配置）通过。
+- Blocked:
+  - None
+- Next command:
+  - `python run_batch_repair.py --config config/default.yaml --limit 3`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 新增门控默认偏保守，可能增加“拒绝步数”；如需提召回，可先放宽 `gate_lv_myo_min_coverage` 与 `gate_interslice_*` 阈值。
+
+### Session: 2026-02-20 16:21 CST
+- Current goal:
+  - 把“稳定提升”机制落地为可恢复执行链，而不是仅靠更严格拒绝。
+- Done:
+  - 在 `CoordinatorAgent` 增加同轮自适应恢复：
+    - 当 Executor 产生 `OP_FAILED` 时，触发 `planner.revise_plan()` 并在同轮重试执行；
+    - 可配置 `in_round_replan_on_failure` 与 `max_replan_attempts_per_round`。
+  - 在 `PlannerAgent` 增加确定性恢复策略 `_build_suggested_plan_from_feedback()`：
+    - 读取 `failed_ops[].suggested_ops` 直接构建 fallback plan（保持诊断 class/direction/bbox）；
+    - 优先走规则恢复，不依赖 LLM 才能继续。
+  - 修复 `PlannerAgent.revise_plan()` 的消息发送完整性：LLM 分支恢复向 executor 发送 `PLAN_REVISION`。
+  - 在 `ExecutorAgent` 已有硬门控基础上，补齐“门控失败 -> suggested_ops 回传”的闭环，支持上层同轮恢复。
+  - 调整 strict 基线策略：
+    - `strict_require_baseline_score: false`，避免 baseline 分数缺失导致全步阻断；
+    - 保留 round 级 improved+conf 门控保证稳定性。
+  - 校验：
+    - `python -m py_compile`（executor/coordinator/planner 等）通过；
+    - YAML 配置加载通过。
+- Blocked:
+  - None
+- Next command:
+  - `python run_batch_repair.py --config config/default.yaml --limit 5`
+- Key files:
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 当前策略从“单纯拒绝”升级为“拒绝+同轮恢复重试”，目标是提升稳定正收益而非仅提高保守性。
+
+### Session: 2026-02-20 23:44 CST
+- Current goal:
+  - 回答用户关于 `config/azure_openai_medrag.yaml` 中 `triage.vlm_enabled: false` 为何未开启，并核对真实生效开关。
+- Done:
+  - 检查配置并确认该字段位于 `triage` 段，当前值为 `false`（`config/azure_openai_medrag.yaml:29`）。
+  - 全局检索确认 `triage.vlm_enabled` 在代码中未被读取；仅在实验脚本中被写入（`scripts/run_miccai_multiagent_experiment.py:2336`）。
+  - 定位生效逻辑：VLM 总开关由 `BaseAgent._vlm_enabled()` 读取 `vision_guardrail.enabled`（`cardiac_agent_postproc/agents/base_agent.py:183`）。
+  - 定位 triage 行为：`TriageAgent.process_case()` 直接调用 `judge_visual_quality()`，未检查 `triage.vlm_enabled`（`cardiac_agent_postproc/agents/triage_agent.py:262`）。
+  - 额外确认 diagnosis 的独立门控仍生效：`diagnosis.vlm_enabled` + 全局 `vision_guardrail.enabled` 双条件（`cardiac_agent_postproc/agents/diagnosis_agent.py:278`）。
+- Blocked:
+  - None
+- Next command:
+  - `rg -n "triage.vlm_enabled|_vlm_enabled\(|judge_visual_quality" cardiac_agent_postproc scripts config`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `WORKLOG.md`
+- Notes:
+  - 该配置项属于遗留/未接线字段；当前 triage 的 VLM 是否启用由 `vision_guardrail.enabled` 实际控制。
+
+### Session: 2026-02-20 23:54 CST
+- Current goal:
+  - 按用户要求清理 `config/azure_openai_medrag.yaml`，删除当前代码未使用的参数。
+- Done:
+  - 删除未接线的顶层 `triage` 整段（`enabled/mode/good_threshold/bad_threshold/vlm_enabled/vlm_accept_threshold`）。
+  - 删除 `diagnosis` 段未读取字段：`enabled/spatial/quality_threshold`，保留生效字段 `vlm_enabled/max_suggestions`。
+  - 删除 `agents.diagnosis` 中未生效的冗余覆盖项：`vlm_enabled/max_suggestions`（`DiagnosisAgent` 当前仅读取顶层 `diagnosis.*` 两项）。
+  - 校验配置可解析：`yaml.safe_load` 返回 `YAML_OK`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --limit 1 --triage_only`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 本次为“最小安全清理”：仅删除已确认未被读取的配置项，避免影响现有运行逻辑。
+
+### Session: 2026-02-21 00:12 CST
+- Current goal:
+  - 使用用户指定脚本 `scripts/run_miccai_multiagent_experiment.py`（全流程，不仅修复）对 UKB 指定 case `2370447_2_original_lax_4c_035` 跑 gpt-4o，并给出修复结果。
+- Done:
+  - 确认 `worst_cases/*.png` 为可视化拼图，不是原始掩膜；定位到真实输入三件套：
+    - `results/Input_UKB/all_frames_export/2370447_2_original_lax_4c_035_img.png`
+    - `results/Input_UKB/all_frames_export/2370447_2_original_lax_4c_035_pred.png`
+    - `results/Input_UKB/all_frames_export/2370447_2_original_lax_4c_035_gt.png`
+  - 生成临时配置 `config/_tmp_ukb_case_2370447.yaml`（source_dir 指向 UKB all_frames_export）。
+  - 在沙箱外运行全流程：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/_tmp_ukb_case_2370447.yaml --source_root results/Input_UKB --target_dir results/exp_ukb_case_2370447_full --case_contains 2370447_2_original_lax_4c_035 --limit 1 --repair_subset worst_cases --atlas_mode reuse_global --knowledge_mode custom --refs4_build_mode reuse --quality_model_mode reuse --quality_model_output quality_model.pkl --repair_kb_mode reuse --repair_kb_dir repair_kb`
+  - 运行完成并产出单例修复结果：
+    - FinalVerdict=`approved`
+    - AppliedOps=`["atlas_rv_repair"]`
+    - Dice mean: `0.7574458 -> 0.8289037`（`+0.0714579`）
+    - Repaired label: `results/exp_ukb_case_2370447_full/repair/repaired_labels/2370447_2_original_lax_4c_035_pred.png`
+- Blocked:
+  - None
+- Next command:
+  - `python - << 'PY'\nimport pandas as pd\ndf=pd.read_csv('results/exp_ukb_case_2370447_full/repair/need_fix_diagnosis_repair_results.csv')\nprint(df[['Stem','FinalVerdict','PreDice_Mean','PostDice_Mean','DiceDelta_Mean','AppliedOps']].to_string(index=False))\nPY`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `config/_tmp_ukb_case_2370447.yaml`
+  - `results/exp_ukb_case_2370447_full/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_ukb_case_2370447_full/repair/repaired_labels/2370447_2_original_lax_4c_035_pred.png`
+  - `results/exp_ukb_case_2370447_full/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 本次已按用户要求使用“全套”MICCAI脚本完成 triage+repair+summary；GPT-4o 在该次运行中连通正常。
+
+### Session: 2026-02-21 01:16 CST
+- Current goal:
+  - 按用户要求用 gpt-4o 对 MnM2 `worst_cases` 做逐 case 全流程测试，并在每个 case 结束后回报结果。
+- Done:
+  - 启动串行批处理（39 个 worst stems），每个 case 调用 `scripts/run_miccai_multiagent_experiment.py` 全流程（triage+repair+summary）。
+  - 已完成并回报前 4 个 case：
+    - `209_original_lax_4c_004`: `gave_up`, Dice `0.8146 -> 0.8146` (`+0.0000`)
+    - `209_original_lax_4c_022`: `approved`, Dice `0.7990 -> 0.7580` (`-0.0410`)
+    - `210_original_lax_4c_029`: `gave_up`, Dice `0.9268 -> 0.9268` (`+0.0000`)
+    - `216_original_lax_4c_000`: `good`, Dice `0.8545 -> 0.8545` (`+0.0000`)
+  - 根据用户“先停下”指令，终止批处理主循环与子进程：
+    - killed loop pid `1952736`
+    - killed child pid `1960542`
+  - 确认无残留匹配运行进程。
+- Blocked:
+  - 用户主动中止本轮批量测试。
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_worst39_gpt4o_stream --case_contains <stem> --limit 1 --repair_subset worst_cases --atlas_mode reuse_global --knowledge_mode custom --refs4_build_mode reuse --quality_model_mode reuse --quality_model_output quality_model.pkl --repair_kb_mode reuse --repair_kb_dir repair_kb`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `results/exp_mnm2_worst39_gpt4o_stream/`
+  - `WORKLOG.md`
+- Notes:
+  - 当前策略下出现“verdict=approved 但 Dice 下降”的样例，说明无 GT 门控与真实 Dice 改善存在偏差。

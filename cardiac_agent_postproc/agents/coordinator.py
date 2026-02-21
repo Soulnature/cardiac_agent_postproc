@@ -67,6 +67,8 @@ class CoordinatorAgent(BaseAgent):
         Returns the final verdict: 'good', 'approved', 'rejected', 'gave_up'.
         """
         self.log(f"━━ Case {ctx.stem} ━━")
+        ex_cfg = self.cfg.get("executor", {})
+        strict_monotonic_mode = bool(ex_cfg.get("strict_monotonic_mode", False))
         try:
             # Step 1: Triage
             triage = agents["triage"]
@@ -95,8 +97,29 @@ class CoordinatorAgent(BaseAgent):
             self.log(f"  Triaged as GOOD — skip optimization")
             return "good"
 
+        # Initialize best-intermediate baseline (original prediction).
+        if ctx.original_mask is not None and ctx.best_intermediate_mask is None:
+            ctx.best_intermediate_mask = ctx.original_mask.copy()
+            ctx.best_intermediate_score = 0.0
+            ctx.best_intermediate_round = 0
+            ctx.best_intermediate_verdict = "baseline_original"
+            ctx.best_intermediate_reason = "initial prediction baseline"
+            ctx.best_intermediate_ops = []
+            ctx.best_intermediate_is_original = True
+
         # Step 2-5: Diagnosis → Plan → Execute → Verify loop
         max_rounds = max(1, int(max_rounds))
+        replan_on_failure = bool(
+            self.cfg.get("multi_agent", {}).get("in_round_replan_on_failure", True)
+        )
+        max_replan_attempts = max(
+            0,
+            int(
+                self.cfg.get("multi_agent", {}).get(
+                    "max_replan_attempts_per_round", 1
+                )
+            ),
+        )
         hard_split_ops = {"lv_split_to_rv", "rv_split_to_lv"}
         post_split_cleanup_pending = False
         post_split_cleanup_consumed = False
@@ -135,6 +158,45 @@ class CoordinatorAgent(BaseAgent):
                 str(op.get("name", "")).strip() in hard_split_ops for op in new_ops
             )
 
+            # In-round adaptive recovery:
+            # if executor reports hard-gate failures, ask planner for a revision and retry.
+            if replan_on_failure and max_replan_attempts > 0:
+                for attempt in range(max_replan_attempts):
+                    failed_msgs = planner.receive_messages(
+                        msg_type=MessageType.OP_FAILED,
+                        case_id=ctx.case_id,
+                    )
+                    if not failed_msgs:
+                        break
+                    failed_payload = failed_msgs[-1].content or {}
+                    failed_ops = failed_payload.get("failed_ops", [])
+                    if not failed_ops:
+                        break
+                    self.log(
+                        "  [Replan] Executor reported failed ops; "
+                        f"attempt {attempt + 1}/{max_replan_attempts}"
+                    )
+                    planner.revise_plan(
+                        ctx,
+                        {
+                            "stage": "executor_hard_gate",
+                            "round": int(round_num + 1),
+                            "failed_ops": failed_ops,
+                            "applied_ops": [op.get("name", "") for op in (ctx.applied_ops or [])],
+                        },
+                    )
+                    prev_retry_count = len(ctx.applied_ops or [])
+                    executor.process_case(ctx)
+                    retry_new_ops = (ctx.applied_ops or [])[prev_retry_count:]
+                    if retry_new_ops:
+                        split_relabel_applied = split_relabel_applied or any(
+                            str(op.get("name", "")).strip() in hard_split_ops
+                            for op in retry_new_ops
+                        )
+                    if not retry_new_ops:
+                        # Avoid extra loops when revision still cannot pass hard gates.
+                        break
+
             # Verification
             verifier = agents["verifier"]
             verifier.process_case(ctx)
@@ -171,13 +233,20 @@ class CoordinatorAgent(BaseAgent):
                         # Keep current mask for one follow-up round to repair
                         # side effects introduced by split relabel.
                     else:
-                        # Revert to original mask
-                        self.log(f"  ✗ Rejected — reverting to original")
+                        # Revert to a safe baseline (original or current best intermediate).
+                        self.log(f"  ✗ Rejected — reverting to safe baseline")
                         action = "retry"
                         can_retry = (round_num + 1) < max_rounds
                         if can_retry:
                             action = self._should_retry(ctx, verify_content)
-                        ctx.current_mask = ctx.original_mask.copy()
+                        fallback_mask = ctx.original_mask
+                        if (
+                            strict_monotonic_mode
+                            and ctx.best_intermediate_mask is not None
+                        ):
+                            fallback_mask = ctx.best_intermediate_mask
+                        if fallback_mask is not None:
+                            ctx.current_mask = fallback_mask.copy()
                         ctx.applied_ops = []
                         ctx.rqs_history = []
 
@@ -217,6 +286,8 @@ class CoordinatorAgent(BaseAgent):
                     f"(round={ctx.best_intermediate_round}, "
                     f"score={ctx.best_intermediate_score:.3f})"
                 )
+            if strict_monotonic_mode and ctx.best_intermediate_mask is not None:
+                ctx.current_mask = ctx.best_intermediate_mask.copy()
             self.log(f"  Exhausted {ctx.rounds_completed} rounds")
             return "gave_up"
 
@@ -341,24 +412,43 @@ class CoordinatorAgent(BaseAgent):
         """
         if ctx.current_mask is None:
             return
+        ex_cfg = self.cfg.get("executor", {})
+        strict_monotonic_mode = bool(ex_cfg.get("strict_monotonic_mode", False))
+        strict_round_min_compare_conf = float(
+            ex_cfg.get("strict_round_min_compare_confidence", 0.60)
+        )
+        strict_round_score_delta = float(ex_cfg.get("strict_round_score_delta", 1e-3))
         hard_relabel_ops = {"lv_split_to_rv", "rv_split_to_lv"}
         has_hard_relabel = any(
             str(op.get("name", "")).strip() in hard_relabel_ops
             for op in (ctx.applied_ops or [])
         )
 
-        if not has_hard_relabel and not self._is_best_candidate(verify_content):
-            return
+        if strict_monotonic_mode:
+            cmp_obj = verify_content.get("vlm_comparison", {}) or {}
+            cmp_v = str(cmp_obj.get("verdict", "")).lower()
+            cmp_conf = self._clip01(cmp_obj.get("confidence", 0.0), default=0.0)
+            if cmp_v != "improved" or cmp_conf < strict_round_min_compare_conf:
+                return
+            if not self._is_best_candidate(verify_content):
+                return
+        else:
+            if not has_hard_relabel and not self._is_best_candidate(verify_content):
+                return
 
         candidate_score = self._score_verifier_snapshot(verify_content)
         best_score = float(getattr(ctx, "best_intermediate_score", 0.0))
         # Hard relabel snapshots should be preserved once for fallback even when
         # verifier is conservative, because this path is user-forced policy.
         has_only_baseline = bool(getattr(ctx, "best_intermediate_is_original", False))
-        if has_hard_relabel and has_only_baseline:
-            candidate_score = max(candidate_score, best_score + 1e-3)
-        elif candidate_score <= best_score + 1e-6:
-            return
+        if strict_monotonic_mode:
+            if candidate_score <= best_score + strict_round_score_delta:
+                return
+        else:
+            if has_hard_relabel and has_only_baseline:
+                candidate_score = max(candidate_score, best_score + 1e-3)
+            elif candidate_score <= best_score + 1e-6:
+                return
 
         ctx.best_intermediate_mask = ctx.current_mask.copy()
         ctx.best_intermediate_score = candidate_score

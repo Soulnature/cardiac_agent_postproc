@@ -317,10 +317,13 @@ class BaseAgent(ABC):
 
     _JUDGE_PROMPT = (
         "You are a cardiac MRI segmentation quality judge.\n"
-        "I will show GOOD and BAD reference overlays, then one TARGET overlay.\n\n"
+        "I will show REFERENCE and BAD reference overlays, then one TARGET overlay.\n\n"
+        "Images labeled [REFERENCE: SCORE 10/10] are curated best cases representing perfect quality. "
+        "Calibrate your scores relative to these anchors.\n\n"
         "All images are SINGLE-PANEL overlays on raw MRI.\n"
         "Color legend: RV=red/cyan, Myocardium ring=green/yellow, LV=blue/red-brown.\n\n"
         "Task: classify TARGET as 'good', 'borderline', or 'bad'.\n"
+        "The REFERENCE images are 10/10; score the TARGET relative to them.\n"
         "Judge by morphology only (do NOT guess exact Dice from appearance).\n\n"
         "Scoring checklist (0-10 each):\n"
         "- ring_integrity: Is the Myo ring complete and closed around LV?\n"
@@ -426,7 +429,7 @@ class BaseAgent(ABC):
                 n_refs, n_refs, view_type=view_type, seed=seed
             )
             for i, ex in enumerate(good_refs):
-                image_labels.append(f"[GOOD EXAMPLE {i+1}] Dice={ex.dice:.3f}")
+                image_labels.append(f"[REFERENCE: SCORE 10/10 #{i+1}] Dice={ex.dice:.3f}")
                 image_paths.append(ex.path)
 
             for i, ex in enumerate(bad_refs):
@@ -509,7 +512,7 @@ class BaseAgent(ABC):
         if self.visual_kb and self.visual_kb.good_examples:
             good_ref = self.visual_kb.get_good_examples(1)[0]
             image_paths.insert(0, good_ref.path)
-            image_labels.insert(0, f"[REFERENCE - good quality] Dice={good_ref.dice:.3f}")
+            image_labels.insert(0, f"[REFERENCE: SCORE 10/10] Dice={good_ref.dice:.3f}")
 
         self.log(f"VLM comparison: before={before_path} vs after={after_path}")
 
@@ -656,35 +659,48 @@ class BaseAgent(ABC):
                 
                 # Check for Class-Swapping Operations
                 is_swapper = False
-                swapper_ops = ["erode_expand_myo", "neighbor_repair", "neighbor_rv_repair", "neighbor_myo_repair", "atlas", "1_erode_expand_myo", "3_erode_expand_myo"]
+                swapper_ops = ["erode_expand_myo", "neighbor_repair", "neighbor_rv_repair", "neighbor_myo_repair", "atlas", "1_erode_expand_myo", "3_erode_expand_myo", "lv_split_to_rv", "rv_split_to_lv"]
                 if applied_ops:
                     for op in applied_ops:
                         if any(s in op for s in swapper_ops):
                             is_swapper = True
                             break
                 
+                # Special case: pure relabel ops (split_to_rv/lv) produce
+                # +0 -0 ~N — all changes are class swaps, which is expected.
+                is_pure_relabel = (
+                    is_swapper
+                    and n_add <= 10
+                    and n_rem <= 10
+                    and n_chg > 0
+                )
+
                 # Rule 1: Degradation (Strict safety check)
                 # If removing significantly more than adding (net loss)
-                if n_rem > n_add + 50:
+                if n_rem > n_add + 50 and not is_pure_relabel:
                     calc_verdict = "degraded"
-                
+
                 # If massive class confusion
                 # RELAXATION: If known class-swapper, tolerate much higher class changes
-                limit_chg = n_add + 500 if is_swapper else n_add + 200
-                if n_chg > limit_chg:
+                # EXEMPTION: Pure relabel ops are never penalized for class changes
+                elif not is_pure_relabel and n_chg > (n_add + (500 if is_swapper else 200)):
                     calc_verdict = "degraded"
                 
-                # Rule 2: Improvement (Massive repair)
+                # Rule 2: Pure relabel (split ops) — class changes are the intended fix
+                elif is_pure_relabel and n_chg > 50:
+                    calc_verdict = "improved"
+
+                # Rule 3: Improvement (Massive repair)
                 # If adding way more than removing (ratio > 2), it's a fill operation
                 elif n_add > 2 * n_rem and n_add > 50:
                     calc_verdict = "improved"
-                
-                # Rule 3: Improvement (Clean gap fill)
+
+                # Rule 4: Improvement (Clean gap fill)
                 # If adding something and removing almost nothing
                 elif n_add > 0 and n_rem < 30:
                     calc_verdict = "improved"
-                
-                # Rule 4: Neutral check
+
+                # Rule 5: Neutral check
                 elif (n_add + n_rem + n_chg) < 30:
                     calc_verdict = "neutral"
                 

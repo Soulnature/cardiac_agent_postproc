@@ -249,7 +249,10 @@ class DiagnosisAgent(BaseAgent):
             '   "description": "RV contacting LV", '
             '   "bbox_2d": [200, 200, 250, 250]}'
             ']}\n'
-            "IMPORTANT: For spatial defects (broken_ring, holes, extra blobs), YOU MUST PROVIDE 'bbox_2d' [ymin, xmin, ymax, xmax] (0-1000 scale). Missing bbox will cause repair failure."
+            "IMPORTANT: For spatial defects (broken_ring, holes, extra blobs), YOU MUST PROVIDE "
+            "'bbox_2d' [ymin, xmin, ymax, xmax] (0-1000 scale). "
+            "If location is uncertain, set bbox_2d=null; NEVER output placeholder boxes "
+            "like [0,0,10,10]."
         )
         return self._prompt_with_fallback("diagnosis_system.txt", fallback)
 
@@ -348,6 +351,8 @@ class DiagnosisAgent(BaseAgent):
         ctx.diagnoses = []
         for d in final_diagnoses:
             bbox = d.bbox
+            if self._is_placeholder_bbox_px(bbox, ctx.mask.shape):
+                bbox = None
             if bbox is None and str(d.direction).strip().lower() != "global":
                 bbox = self._infer_directional_bbox(
                     ctx.mask, d.affected_class, d.direction
@@ -406,6 +411,80 @@ class DiagnosisAgent(BaseAgent):
         if ymax <= ymin or xmax <= xmin:
             return None
         return [ymin, xmin, ymax, xmax]
+
+    @staticmethod
+    def _normalize_bbox_px(
+        bbox: Any,
+        shape: tuple[int, int],
+    ) -> Optional[List[int]]:
+        if not (isinstance(bbox, list) and len(bbox) == 4):
+            return None
+        H, W = int(shape[0]), int(shape[1])
+        try:
+            ymin, xmin, ymax, xmax = [int(round(float(v))) for v in bbox]
+        except Exception:
+            return None
+        ymin = max(0, min(ymin, H))
+        xmin = max(0, min(xmin, W))
+        ymax = max(0, min(ymax, H))
+        xmax = max(0, min(xmax, W))
+        if ymax <= ymin or xmax <= xmin:
+            return None
+        return [ymin, xmin, ymax, xmax]
+
+    @staticmethod
+    def _is_placeholder_bbox_norm(bbox_2d: Any) -> bool:
+        """
+        Detect typical LLM placeholder boxes in normalized [0,1000] space.
+        """
+        if not (isinstance(bbox_2d, list) and len(bbox_2d) == 4):
+            return False
+        try:
+            ymin, xmin, ymax, xmax = [float(v) for v in bbox_2d]
+        except Exception:
+            return True
+        if not np.isfinite([ymin, xmin, ymax, xmax]).all():
+            return True
+
+        h = ymax - ymin
+        w = xmax - xmin
+        if h <= 0 or w <= 0:
+            return True
+
+        corner_tl = ymin <= 2 and xmin <= 2
+        corner_tr = ymin <= 2 and xmax >= 998
+        corner_bl = ymax >= 998 and xmin <= 2
+        corner_br = ymax >= 998 and xmax >= 998
+        near_corner = corner_tl or corner_tr or corner_bl or corner_br
+        tiny = h <= 20 and w <= 20
+        return bool(near_corner and tiny)
+
+    @classmethod
+    def _is_placeholder_bbox_px(
+        cls,
+        bbox: Any,
+        shape: tuple[int, int],
+    ) -> bool:
+        """
+        Detect tiny corner boxes in pixel space (e.g. [0,0,10,10]) that are
+        usually placeholders and unsafe for split/localized ops.
+        """
+        bb = cls._normalize_bbox_px(bbox, shape)
+        if bb is None:
+            return False
+        H, W = int(shape[0]), int(shape[1])
+        ymin, xmin, ymax, xmax = bb
+        h = ymax - ymin
+        w = xmax - xmin
+        area_ratio = (h * w) / float(max(1, H * W))
+        tiny_h = h <= max(10, int(round(H * 0.08)))
+        tiny_w = w <= max(10, int(round(W * 0.08)))
+        corner_tl = ymin <= 2 and xmin <= 2
+        corner_tr = ymin <= 2 and xmax >= (W - 2)
+        corner_bl = ymax >= (H - 2) and xmin <= 2
+        corner_br = ymax >= (H - 2) and xmax >= (W - 2)
+        near_corner = corner_tl or corner_tr or corner_bl or corner_br
+        return bool(near_corner and tiny_h and tiny_w and area_ratio <= 0.03)
 
     @classmethod
     def _infer_directional_bbox(
@@ -889,23 +968,25 @@ class DiagnosisAgent(BaseAgent):
             bbox = None
             if bbox_2d and isinstance(bbox_2d, list) and len(bbox_2d) == 4 and img_shape:
                 H, W = img_shape[0], img_shape[1]
-                # Default assume 0-1000 scale normalization
                 try:
-                    ymin = int(float(bbox_2d[0]) / 1000.0 * H)
-                    xmin = int(float(bbox_2d[1]) / 1000.0 * W)
-                    ymax = int(float(bbox_2d[2]) / 1000.0 * H)
-                    xmax = int(float(bbox_2d[3]) / 1000.0 * W)
-                    # Add margin? No, trust VLM or executor adds margin. 
-                    # Executor doesn't add margin in `_apply_local_op` unless we changed it.
-                    # Best to add margin here or there. 
-                    # Let's add 10px margin here to be safe
-                    margin = 10
-                    ymin = max(0, ymin - margin)
-                    xmin = max(0, xmin - margin)
-                    ymax = min(H, ymax + margin)
-                    xmax = min(W, xmax + margin)
-                    bbox = [ymin, xmin, ymax, xmax]
+                    if not self._is_placeholder_bbox_norm(bbox_2d):
+                        ymin = int(float(bbox_2d[0]) / 1000.0 * H)
+                        xmin = int(float(bbox_2d[1]) / 1000.0 * W)
+                        ymax = int(float(bbox_2d[2]) / 1000.0 * H)
+                        xmax = int(float(bbox_2d[3]) / 1000.0 * W)
+                        margin = 10
+                        bbox = self._normalize_bbox_px(
+                            [ymin - margin, xmin - margin, ymax + margin, xmax + margin],
+                            (H, W),
+                        )
+                        if self._is_placeholder_bbox_px(bbox, (H, W)):
+                            bbox = None
                 except Exception:
+                    bbox = None
+            elif isinstance(item.get("bbox"), list) and len(item.get("bbox")) == 4 and img_shape:
+                H, W = img_shape[0], img_shape[1]
+                bbox = self._normalize_bbox_px(item.get("bbox"), (H, W))
+                if self._is_placeholder_bbox_px(bbox, (H, W)):
                     bbox = None
 
             # Normalize issue names from potential Triage/LLM hallucinations

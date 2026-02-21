@@ -12,6 +12,7 @@ import shutil
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from scipy import ndimage as ndi
 
 from ..io_utils import read_image
 from ..ops import (
@@ -34,7 +35,7 @@ from ..slice_consistency import (
 from ..vlm_guardrail import create_overlay
 from .base_agent import BaseAgent
 from .message_bus import CaseContext, MessageBus, MessageType
-from .diagnosis_agent import compute_region_mask
+from .diagnosis_agent import compute_region_mask, normalize_direction_hint
 from .visual_knowledge import VisualKnowledgeBase
 
 
@@ -68,6 +69,122 @@ def _is_high_impact_op(op_name: str) -> bool:
     if op_name.endswith("_large"):
         return True
     return False
+
+
+def _component_count(class_mask: np.ndarray) -> int:
+    """Count connected components in a binary class mask."""
+    if class_mask is None or int(np.count_nonzero(class_mask)) == 0:
+        return 0
+    _, n_comp = ndi.label(class_mask.astype(np.uint8))
+    return int(n_comp)
+
+
+_CLASS_NAME_BY_ID = {1: "rv", 2: "myo", 3: "lv"}
+_CLASS_ID_BY_NAME = {"rv": 1, "myo": 2, "lv": 3}
+_CONTACT_INCREASE_ALLOWED_OPS = {
+    "rv_lv_barrier",
+    "rv_lv_barrier_mild",
+    "rv_lv_barrier_strong",
+    "myo_bridge",
+    "myo_bridge_mild",
+    "myo_bridge_strong",
+    "neighbor_myo_repair",
+    "atlas_myo_repair",
+    "morphological_gap_close",
+    "convex_hull_fill",
+}
+
+
+def _required_class_ids_for_view(view_type: str) -> set[int]:
+    v = str(view_type or "").strip().lower()
+    if "2ch" in v:
+        return {2, 3}
+    return {1, 2, 3}
+
+
+def _class_area(mask: np.ndarray, class_id: int) -> int:
+    return int(np.count_nonzero(mask == int(class_id)))
+
+
+def _class_centroid(mask: np.ndarray, class_id: int) -> Optional[tuple[float, float]]:
+    ys, xs = np.where(mask == int(class_id))
+    if ys.size == 0:
+        return None
+    return float(np.mean(ys)), float(np.mean(xs))
+
+
+def _euclid(a: Optional[tuple[float, float]], b: Optional[tuple[float, float]]) -> Optional[float]:
+    if a is None or b is None:
+        return None
+    dy = float(a[0]) - float(b[0])
+    dx = float(a[1]) - float(b[1])
+    return float(np.sqrt(dy * dy + dx * dx))
+
+
+def _rv_lv_contact_len(mask: np.ndarray) -> int:
+    rv = (mask == 1)
+    lv = (mask == 3)
+    if int(np.count_nonzero(rv)) == 0 or int(np.count_nonzero(lv)) == 0:
+        return 0
+    rv_edge = rv & (~ndi.binary_erosion(rv, iterations=1))
+    lv_dil = ndi.binary_dilation(lv, iterations=1)
+    return int(np.count_nonzero(rv_edge & lv_dil))
+
+
+def _lv_myo_coverage(mask: np.ndarray, valve_y: Optional[int], valve_margin_px: int = 6) -> float:
+    lv = (mask == 3)
+    myo = (mask == 2)
+    if int(np.count_nonzero(lv)) == 0:
+        return 1.0
+    lv_edge = lv & (~ndi.binary_erosion(lv, iterations=1))
+    if valve_y is not None:
+        h = int(mask.shape[0])
+        cut = int(max(0, min(h, int(round(float(valve_y))) + int(valve_margin_px))))
+        valid = np.ones_like(lv_edge, dtype=bool)
+        valid[:cut, :] = False
+        filtered = lv_edge & valid
+        if int(np.count_nonzero(filtered)) >= 12:
+            lv_edge = filtered
+    n_edge = int(np.count_nonzero(lv_edge))
+    if n_edge == 0:
+        return 1.0
+    myo_band = ndi.binary_dilation(myo, iterations=1)
+    covered = int(np.count_nonzero(lv_edge & myo_band))
+    return float(covered) / float(max(1, n_edge))
+
+
+def _neighbor_stats_for_class(
+    neighbor_masks: Dict[int, np.ndarray],
+    class_id: int,
+    min_area_px: int = 25,
+) -> Optional[Dict[str, Any]]:
+    if not neighbor_masks:
+        return None
+    areas: List[float] = []
+    ccs: List[float] = []
+    centroids: List[tuple[float, float]] = []
+    for nb in neighbor_masks.values():
+        area = _class_area(nb, class_id)
+        if area < int(min_area_px):
+            continue
+        areas.append(float(area))
+        ccs.append(float(_component_count(nb == int(class_id))))
+        c = _class_centroid(nb, class_id)
+        if c is not None:
+            centroids.append(c)
+    if not areas:
+        return None
+    centroid_mean: Optional[tuple[float, float]] = None
+    if centroids:
+        ys = [c[0] for c in centroids]
+        xs = [c[1] for c in centroids]
+        centroid_mean = (float(np.mean(ys)), float(np.mean(xs)))
+    return {
+        "mean_area": float(np.mean(areas)),
+        "mean_cc": float(np.mean(ccs)) if ccs else 0.0,
+        "centroid": centroid_mean,
+        "n": int(len(areas)),
+    }
 
 
 def _build_op_fn(mask, view, cfg, E, vy, atlas=None, neighbor_masks=None, neighbor_img_paths=None, target_img=None, diagnosis_issues=None):
@@ -331,6 +448,7 @@ class ExecutorAgent(BaseAgent):
 
         # Initialize VLM baseline score (optional; some VLMs do not output numeric score)
         ctx.current_score = None
+        ctx.score_history = []
         if ctx.img_path and self.visual_kb:
             try:
                 step0_overlay = ctx.debug_img_path("_step0_overlay.png")
@@ -341,6 +459,7 @@ class ExecutorAgent(BaseAgent):
                     base_score = float(v0.get("score", 0) or 0)
                     if base_score > 0:
                         ctx.current_score = base_score
+                        ctx.score_history.append(base_score)
                         self.log(f"  [Init] Baseline Score: {ctx.current_score:.2f}")
                     else:
                         self.log(
@@ -350,9 +469,39 @@ class ExecutorAgent(BaseAgent):
             except Exception as e:
                 self.log(f"  [Init] Baseline VLM check failed: {e}")
 
+        # Per-step VLM scoring and strict monotonic config
+        ex_cfg = self.cfg.get("executor", {})
+        vlm_per_step = bool(ex_cfg.get("vlm_per_step_scoring", False))
+        vlm_score_tol = float(ex_cfg.get("vlm_score_tolerance", 0.3))
+        vlm_min_conf = float(ex_cfg.get("vlm_score_min_confidence", 0.4))
+        strict_monotonic_mode = bool(ex_cfg.get("strict_monotonic_mode", False))
+        strict_min_score_delta = float(ex_cfg.get("strict_min_score_delta", 0.05))
+        strict_step_min_conf = float(
+            ex_cfg.get("strict_step_min_confidence", max(0.55, vlm_min_conf))
+        )
+        strict_reject_low_conf = bool(ex_cfg.get("strict_reject_low_confidence", True))
+        strict_require_baseline = bool(ex_cfg.get("strict_require_baseline_score", True))
+        enforce_directional_execution = bool(ex_cfg.get("enforce_directional_execution", True))
+        split_relabel_require_bbox = bool(ex_cfg.get("split_relabel_require_bbox", True))
+        split_relabel_topology_gate = bool(ex_cfg.get("split_relabel_topology_gate", True))
+        split_relabel_max_change_ratio = float(
+            ex_cfg.get("split_relabel_max_change_ratio", 0.06)
+        )
+        strict_no_baseline_block = bool(
+            strict_monotonic_mode
+            and vlm_per_step
+            and strict_require_baseline
+            and (ctx.current_score is None or float(ctx.current_score) <= 0.0)
+        )
+        if strict_no_baseline_block:
+            self.log(
+                "  [StrictMonotonic] Baseline VLM score unavailable; "
+                "rejecting all planned steps for safety."
+            )
+
         for step_idx, step in enumerate(plan):
             op_name = step.get("operation", "")
-            direction = step.get("direction", "global")
+            direction = normalize_direction_hint(str(step.get("direction", "global")))
             affected_class = step.get("affected_class", "myo")
             bbox = step.get("bbox", None)
             if not (isinstance(bbox, list) and len(bbox) == 4):
@@ -363,6 +512,18 @@ class ExecutorAgent(BaseAgent):
                 and str(op_name).startswith("atlas_")
             )
             is_hard_split_relabel = op_name in {"lv_split_to_rv", "rv_split_to_lv"}
+
+            if strict_no_baseline_block:
+                reason = "strict_monotonic_requires_baseline_score"
+                self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
+                ops_failed.append({"operation": op_name, "reason": reason})
+                continue
+
+            if is_hard_split_relabel and split_relabel_require_bbox and bbox is None:
+                reason = "split_relabel_requires_bbox"
+                self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
+                ops_failed.append({"operation": op_name, "reason": reason})
+                continue
 
             # ── Smart Global Repair: Infer bbox from direction if missing ──
             if not bbox and direction != "global" and direction:
@@ -462,6 +623,11 @@ class ExecutorAgent(BaseAgent):
                 merged[merge_region] = result[merge_region]
                 if is_valid_candidate(merged):
                     result = merged
+            elif enforce_directional_execution and (direction != "global") and (not is_hard_split_relabel):
+                reason = "directional_execution_region_missing"
+                self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
+                ops_failed.append({"operation": op_name, "reason": reason})
+                continue
 
             # Check pixel change
             px_changed = int(np.sum(result != ctx.current_mask))
@@ -471,6 +637,31 @@ class ExecutorAgent(BaseAgent):
             total_px = max(1, int(ctx.current_mask.size))
             change_ratio = float(px_changed) / float(total_px)
             is_high_impact = _is_high_impact_op(op_name)
+
+            # Label-repair safeguards for split relabel ops:
+            # require true fragmentation and enforce localized edits.
+            if is_hard_split_relabel and split_relabel_topology_gate:
+                source_class = 3 if op_name == "lv_split_to_rv" else 1
+                before_cc = _component_count(ctx.current_mask == source_class)
+                after_cc = _component_count(result == source_class)
+                if before_cc <= 1:
+                    reason = f"split_source_not_fragmented (cc_before={before_cc})"
+                    self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
+                    ops_failed.append({"operation": op_name, "reason": reason})
+                    continue
+                if after_cc >= before_cc:
+                    reason = f"split_fragmentation_not_reduced ({before_cc}->{after_cc})"
+                    self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
+                    ops_failed.append({"operation": op_name, "reason": reason})
+                    continue
+                if change_ratio > split_relabel_max_change_ratio:
+                    reason = (
+                        f"split_change_ratio {change_ratio:.4f} exceeds "
+                        f"max {split_relabel_max_change_ratio:.4f}"
+                    )
+                    self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
+                    ops_failed.append({"operation": op_name, "reason": reason})
+                    continue
 
             # Oracle Dice Check (Logging Only)
             oracle_delta = 0.0
@@ -484,7 +675,6 @@ class ExecutorAgent(BaseAgent):
                     pass
 
             # Trust-region guard: reject oversized edits before VLM gating.
-            ex_cfg = self.cfg.get("executor", {})
             max_high_ratio = float(ex_cfg.get("max_high_impact_change_ratio", 0.20))
             max_normal_ratio = float(ex_cfg.get("max_step_change_ratio", 0.12))
             forced_atlas_max_ratio = float(
@@ -612,13 +802,129 @@ class ExecutorAgent(BaseAgent):
                 ops_failed.append({"operation": op_name, "reason": gate_reason})
                 continue
 
-            # Remove RQS logic entirely as requested
-            # ctx.rqs_history.append(current_rqs) <-- REMOVED
+            hard_gate_ok, hard_gate_reason, hard_gate_suggestions = self._run_hard_anatomy_gates(
+                before_mask=ctx.current_mask,
+                after_mask=result,
+                op_name=op_name,
+                affected_class=affected_class,
+                direction=direction,
+                view_type=ctx.view_type,
+                neighbor_masks=ctx.neighbor_masks,
+                valve_y=vy,
+                ex_cfg=ex_cfg,
+            )
+            if not hard_gate_ok:
+                self.log(f"  [{step_idx}] {op_name}: REJECTED ({hard_gate_reason})")
+                fail_item: Dict[str, Any] = {"operation": op_name, "reason": hard_gate_reason}
+                if hard_gate_suggestions:
+                    fail_item["suggested_ops"] = [
+                        s for s in hard_gate_suggestions if s in op_fns
+                    ]
+                ops_failed.append(fail_item)
+                continue
 
-            # Accept the step since it passed greedy check
+            # ── Per-step VLM scoring gate ──
+            vlm_step_score = 0.0
+            vlm_step_score_prev = ctx.current_score or 0.0
+            vlm_step_conf = 0.0
+            vlm_step_has_confident_score = False
+            vlm_score_rejected = False
+            vlm_reject_reason = "VLM score gate failed"
+
+            if vlm_per_step and ctx.img_path and self.visual_kb:
+                try:
+                    step_score_overlay = ctx.debug_img_path(f"_step{step_idx}_score.png")
+                    if create_overlay(ctx.img_path, result, step_score_overlay):
+                        vs = self.judge_visual_quality(step_score_overlay)
+                        if isinstance(vs, dict):
+                            vlm_step_verdict = dict(vs)
+                        new_score = float(vs.get("score", 0) or 0)
+                        new_conf = float(vs.get("confidence", 0) or 0)
+                        vlm_step_score = new_score
+                        vlm_step_conf = new_conf
+                        conf_threshold = max(vlm_min_conf, strict_step_min_conf if strict_monotonic_mode else vlm_min_conf)
+                        vlm_step_has_confident_score = bool(
+                            new_score > 0 and new_conf >= conf_threshold
+                        )
+
+                        if strict_monotonic_mode and strict_reject_low_conf and not vlm_step_has_confident_score:
+                            vlm_score_rejected = True
+                            vlm_reject_reason = (
+                                f"strict_low_confidence_score "
+                                f"(score={new_score:.2f}, conf={new_conf:.2f}, min_conf={conf_threshold:.2f})"
+                            )
+                            self.log(f"  [{step_idx}] {op_name}: REJECTED ({vlm_reject_reason})")
+                        elif (
+                            vlm_step_has_confident_score
+                            and ctx.current_score is not None
+                            and ctx.current_score > 0
+                            and strict_monotonic_mode
+                            and new_score < ctx.current_score + strict_min_score_delta
+                        ):
+                            vlm_score_rejected = True
+                            vlm_reject_reason = (
+                                f"strict_non_monotonic "
+                                f"({ctx.current_score:.2f}->{new_score:.2f}, "
+                                f"need +{strict_min_score_delta:.2f}, conf={new_conf:.2f})"
+                            )
+                            self.log(f"  [{step_idx}] {op_name}: REJECTED ({vlm_reject_reason})")
+                        elif (
+                            vlm_step_has_confident_score
+                            and ctx.current_score is not None
+                            and ctx.current_score > 0
+                            and (not strict_monotonic_mode)
+                            and new_score < ctx.current_score - vlm_score_tol
+                        ):
+                            vlm_score_rejected = True
+                            vlm_reject_reason = (
+                                f"score_drop {ctx.current_score:.2f}->{new_score:.2f} "
+                                f"(tol={vlm_score_tol:.2f}, conf={new_conf:.2f})"
+                            )
+                            self.log(
+                                f"  [{step_idx}] {op_name}: VLM SCORE REJECTED "
+                                f"({ctx.current_score:.1f} -> {new_score:.1f}, "
+                                f"tol={vlm_score_tol}, conf={new_conf:.2f})"
+                            )
+                        elif vlm_step_has_confident_score:
+                            # Valid score: update tracking
+                            if (
+                                strict_monotonic_mode
+                                and (ctx.current_score is None or ctx.current_score <= 0)
+                            ):
+                                self.log(
+                                    f"  [{step_idx}] {op_name}: strict baseline established "
+                                    f"at {new_score:.1f} (conf={new_conf:.2f})"
+                                )
+                            else:
+                                self.log(
+                                    f"  [{step_idx}] {op_name}: VLM score "
+                                    f"{ctx.current_score or 0:.1f} -> {new_score:.1f} "
+                                    f"(conf={new_conf:.2f})"
+                                )
+                        else:
+                            self.log(
+                                f"  [{step_idx}] {op_name}: VLM score low-confidence "
+                                f"(score={new_score:.2f}, conf={new_conf:.2f})"
+                            )
+                except Exception as e:
+                    self.log(f"  [{step_idx}] {op_name}: VLM per-step scoring failed: {e}")
+                    if strict_monotonic_mode:
+                        vlm_score_rejected = True
+                        vlm_reject_reason = f"strict_vlm_scoring_failed: {e}"
+
+            if vlm_score_rejected:
+                ops_failed.append({"operation": op_name, "reason": vlm_reject_reason})
+                continue
+
+            # Accept the step
             ctx.current_mask = result
             if gt_mask is not None:
                 current_dice = new_dice
+
+            # Update VLM score tracking
+            if vlm_per_step and vlm_step_has_confident_score:
+                ctx.current_score = vlm_step_score
+                ctx.score_history.append(vlm_step_score)
 
             # RQS removed. Defaulting values for backward compatibility in logs/CSV.
             current_rqs = 0.0
@@ -631,8 +937,9 @@ class ExecutorAgent(BaseAgent):
                 "rqs_after": 0.0,
                 "rqs_delta": 0.0,
                 "vlm_verdict": vlm_step_verdict.get("quality", "N/A"),
-                "vlm_score": vlm_step_verdict.get("score", 0),
-                "vlm_confidence": vlm_step_verdict.get("confidence", 0.0),
+                "vlm_score": vlm_step_score,
+                "vlm_score_prev": vlm_step_score_prev,
+                "vlm_confidence": vlm_step_conf,
                 "vlm_compare_verdict": "N/A",
                 "vlm_compare_confidence": 0.0,
                 "change_ratio": round(change_ratio, 6),
@@ -690,3 +997,159 @@ class ExecutorAgent(BaseAgent):
             },
             case_id=ctx.case_id,
         )
+
+    @staticmethod
+    def _gate_repair_hints(
+        reason: str,
+        affected_class: str,
+        direction: str,
+        view_type: str,
+    ) -> List[str]:
+        r = str(reason or "").lower()
+        cls = str(affected_class or "myo").strip().lower()
+        if "required_class" in r or "optional_class" in r:
+            if cls == "rv":
+                return ["neighbor_rv_repair", "atlas_rv_repair", "expand_rv_intensity", "1_dilate"]
+            if cls == "lv":
+                return ["neighbor_lv_repair", "atlas_lv_repair", "expand_lv_intensity", "3_dilate"]
+            return ["neighbor_myo_repair", "atlas_myo_repair", "expand_myo_intensity", "2_dilate"]
+        if "lv_myo_containment" in r:
+            return ["myo_bridge", "morphological_gap_close", "2_dilate", "topology_cleanup"]
+        if "rv_lv_contact_increase" in r:
+            return ["rv_lv_barrier", "neighbor_myo_repair", "myo_bridge"]
+        if "interslice_" in r:
+            return ["neighbor_shape_prior", "neighbor_centroid_align", "neighbor_area_consistency", "smooth_morph"]
+        if "split_" in r:
+            return ["lv_split_to_rv", "rv_split_to_lv", "atlas_rv_repair", "atlas_lv_repair"]
+        return []
+
+    def _run_hard_anatomy_gates(
+        self,
+        before_mask: np.ndarray,
+        after_mask: np.ndarray,
+        op_name: str,
+        affected_class: str,
+        direction: str,
+        view_type: str,
+        neighbor_masks: Dict[int, np.ndarray],
+        valve_y: Optional[int],
+        ex_cfg: Dict[str, Any],
+    ) -> tuple[bool, str, List[str]]:
+        """
+        Hard anatomy gates that enforce clinically meaningful constraints.
+        Returns (accepted, reason, suggested_ops).
+        """
+        required_ids = _required_class_ids_for_view(view_type)
+        optional_min_area = int(ex_cfg.get("gate_optional_disappear_min_area_px", 120))
+        for cid in (1, 2, 3):
+            before_area = _class_area(before_mask, cid)
+            after_area = _class_area(after_mask, cid)
+            cname = _CLASS_NAME_BY_ID.get(cid, str(cid))
+            if cid in required_ids:
+                if before_area > 0 and after_area == 0:
+                    reason = f"required_class_{cname}_disappeared"
+                    return False, reason, self._gate_repair_hints(reason, cname, direction, view_type)
+            else:
+                if before_area >= optional_min_area and after_area == 0:
+                    reason = f"optional_class_{cname}_hard_drop ({before_area}->0)"
+                    return False, reason, self._gate_repair_hints(reason, cname, direction, view_type)
+
+        lv_myo_gate = bool(ex_cfg.get("gate_lv_myo_enable", True))
+        if lv_myo_gate and 3 in required_ids:
+            valve_margin = int(ex_cfg.get("gate_valve_exempt_margin_px", 6))
+            min_cov = float(ex_cfg.get("gate_lv_myo_min_coverage", 0.70))
+            allow_drop = float(ex_cfg.get("gate_lv_myo_allow_drop", 0.03))
+            cov_before = _lv_myo_coverage(before_mask, valve_y=valve_y, valve_margin_px=valve_margin)
+            cov_after = _lv_myo_coverage(after_mask, valve_y=valve_y, valve_margin_px=valve_margin)
+            if cov_after < min_cov and cov_after < (cov_before - allow_drop):
+                reason = f"lv_myo_containment_drop {cov_before:.3f}->{cov_after:.3f}"
+                return False, reason, self._gate_repair_hints(reason, "myo", direction, view_type)
+
+        contact_gate = bool(ex_cfg.get("gate_rv_lv_contact_enable", True))
+        if contact_gate and str(op_name).strip() not in _CONTACT_INCREASE_ALLOWED_OPS:
+            allow_inc = int(ex_cfg.get("gate_rv_lv_contact_allow_increase_px", 2))
+            c_before = _rv_lv_contact_len(before_mask)
+            c_after = _rv_lv_contact_len(after_mask)
+            if c_after > (c_before + allow_inc):
+                reason = f"rv_lv_contact_increase {c_before}->{c_after}"
+                return False, reason, self._gate_repair_hints(reason, "myo", direction, view_type)
+
+        interslice_gate = bool(ex_cfg.get("gate_interslice_enable", True))
+        if interslice_gate and neighbor_masks:
+            min_nb_area = int(ex_cfg.get("gate_interslice_min_neighbor_area_px", 25))
+            area_dev_max = float(ex_cfg.get("gate_interslice_area_dev_max", 1.20))
+            area_worsen_tol = float(ex_cfg.get("gate_interslice_area_dev_worsen_tol", 0.12))
+            centroid_max = float(ex_cfg.get("gate_interslice_centroid_max_shift_px", 35.0))
+            centroid_worsen = float(ex_cfg.get("gate_interslice_centroid_worsen_tol_px", 5.0))
+            cc_dev_max = float(ex_cfg.get("gate_interslice_cc_max_dev", 2.0))
+            cc_worsen = float(ex_cfg.get("gate_interslice_cc_worsen_tol", 1.0))
+
+            cls_id = _CLASS_ID_BY_NAME.get(str(affected_class).strip().lower())
+            class_ids = set(required_ids)
+            if cls_id is not None:
+                class_ids.add(int(cls_id))
+            for cid in sorted(class_ids):
+                nb_stats = _neighbor_stats_for_class(
+                    neighbor_masks=neighbor_masks,
+                    class_id=cid,
+                    min_area_px=min_nb_area,
+                )
+                if not nb_stats:
+                    continue
+
+                cname = _CLASS_NAME_BY_ID.get(cid, str(cid))
+                nb_area = float(nb_stats.get("mean_area", 0.0))
+                before_area = float(_class_area(before_mask, cid))
+                after_area = float(_class_area(after_mask, cid))
+                if nb_area > 0:
+                    area_dev_before = abs(before_area - nb_area) / max(1.0, nb_area)
+                    area_dev_after = abs(after_area - nb_area) / max(1.0, nb_area)
+                    if (
+                        area_dev_after > area_dev_max
+                        and area_dev_after > area_dev_before + area_worsen_tol
+                    ):
+                        reason = (
+                            f"interslice_area_jump_{cname} "
+                            f"{area_dev_before:.2f}->{area_dev_after:.2f}"
+                        )
+                        return (
+                            False,
+                            reason,
+                            self._gate_repair_hints(reason, cname, direction, view_type),
+                        )
+
+                nb_centroid = nb_stats.get("centroid")
+                before_centroid = _class_centroid(before_mask, cid)
+                after_centroid = _class_centroid(after_mask, cid)
+                dist_before = _euclid(before_centroid, nb_centroid)
+                dist_after = _euclid(after_centroid, nb_centroid)
+                if dist_after is not None:
+                    db = dist_before if dist_before is not None else dist_after
+                    if dist_after > centroid_max and dist_after > db + centroid_worsen:
+                        reason = (
+                            f"interslice_centroid_shift_{cname} "
+                            f"{db:.1f}->{dist_after:.1f}px"
+                        )
+                        return (
+                            False,
+                            reason,
+                            self._gate_repair_hints(reason, cname, direction, view_type),
+                        )
+
+                before_cc = float(_component_count(before_mask == cid))
+                after_cc = float(_component_count(after_mask == cid))
+                nb_cc = float(nb_stats.get("mean_cc", 0.0))
+                cc_dev_before = abs(before_cc - nb_cc)
+                cc_dev_after = abs(after_cc - nb_cc)
+                if cc_dev_after > cc_dev_max and cc_dev_after > cc_dev_before + cc_worsen:
+                    reason = (
+                        f"interslice_cc_jump_{cname} "
+                        f"{cc_dev_before:.1f}->{cc_dev_after:.1f}"
+                    )
+                    return (
+                        False,
+                        reason,
+                        self._gate_repair_hints(reason, cname, direction, view_type),
+                    )
+
+        return True, "", []

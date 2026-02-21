@@ -185,8 +185,25 @@ def main(config_path="config/default.yaml", case_filter=None, limit=None):
         with open(csv_path, "w") as f:
             csv.writer(f).writerow(["Stem", "Verdict", "Ops", "Atlas", "Pre", "Post", "Delta"])
 
+    # Resume: Load existing processed stems from triage log
+    processed_stems = set()
+    triage_log_path = os.path.join(BATCH_OUT_DIR, "pipeline_triage_log.csv")
+    if os.path.exists(triage_log_path):
+        try:
+            with open(triage_log_path, "r") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Skip header
+                for row in reader:
+                    if row:
+                        processed_stems.add(row[0])
+            print(f"INFO: Found {len(processed_stems)} already processed cases. Resuming...", flush=True)
+        except Exception as e:
+            print(f"WARN: Failed to read existing log for resume: {e}")
+
     # Loop
     for ctx in tqdm(queue):
+        if ctx.stem in processed_stems:
+            continue
         print(f"Processing {ctx.stem}...", flush=True)
         print(f"DEBUG: Registering case {ctx.stem} with bus...", flush=True)
         bus.register_case(ctx)
@@ -201,20 +218,55 @@ def main(config_path="config/default.yaml", case_filter=None, limit=None):
             ctx.gt_path = gt_path
             dice_pre = compute_dice(ctx.mask, read_mask(gt_path))["Mean"]
             
-        # Fast Path Check
-        threshold = cfg["multi_agent"]["fast_path_threshold"]
-        if dice_pre >= threshold:
-            print(f"  [FastPath] Skipping {ctx.stem} (Dice {dice_pre:.4f} >= {threshold})", flush=True)
-            bus.register_case(ctx) # Register mostly for stats if needed, or skip?
-            # Log to CSV as skipped/good
-            with open(csv_path, "a") as f:
-                csv.writer(f).writerow([ctx.stem, "skipped_good", 0, False, f"{dice_pre:.4f}", f"{dice_pre:.4f}", "0.0000"])
+        # Run triage on every case (no Dice gating — LLM+rule decides)
+        print(f"DEBUG: Running TriageAgent for {ctx.stem} (Dice={dice_pre:.4f})...", flush=True)
+        agents["triage"].process_case(ctx)
+        
+        # Extract VLM info for logging from Context (Clean Interface)
+        vlm_quality = getattr(ctx, "vlm_quality", "N/A")
+        
+        # Get confidence from verdict data if available
+        vlm_data = getattr(ctx, "vlm_verdict_data", {}) or {}
+        vlm_conf = vlm_data.get("confidence", 0.0)
+        
+        # Log Result
+        triage_log_path = os.path.join(BATCH_OUT_DIR, "pipeline_triage_log.csv")
+        if not os.path.exists(triage_log_path):
+             with open(triage_log_path, "w") as f:
+                 csv.writer(f).writerow(["Stem", "TriageCategory", "TriageScore", "VLM_Quality", "VLM_Confidence", "Issues"])
+        
+        with open(triage_log_path, "a") as f:
+             csv.writer(f).writerow([
+                 ctx.stem, 
+                 ctx.triage_category, 
+                 f"{ctx.triage_score:.4f}", 
+                 vlm_quality, 
+                 f"{vlm_conf:.4f}", 
+                 json.dumps(ctx.triage_issues)
+             ])
+             
+        # Gating Logic (The Interface)
+        triage_gating = cfg.get("triage", {}).get("enabled", True)
+        if triage_gating and ctx.triage_category == "good":
+            print(f"  [Triage Interface] 🛑 STOP. VLM Verdict: {vlm_quality} (Conf {vlm_conf}). Case {ctx.stem} is GOOD. Skipping repair.", flush=True)
             continue
-        # Run
+            
+        print(f"  [Triage Interface] ▶️ PROCEED. VLM Verdict: {vlm_quality} (Conf {vlm_conf}). Case {ctx.stem} NEEDS FIX. Proceeding to Coordinator.", flush=True)
+
+        if args.triage_only:
+             print(f"  [Triage Only Mode] Stopping after triage as requested. moving to next case.", flush=True)
+             continue
+
+        # Run Coordinator (Repair Flow)
         try:
             print(f"DEBUG: Calling coordinator.orchestrate_case for {ctx.stem}...", flush=True)
+            # flag ctx as triaged so coordinator specifically knows if needed (though we handle itlogic wise)
             verdict = agents["coordinator"].orchestrate_case(ctx, agents, max_rounds=3)
             print(f"DEBUG: orchestrate_case returned verdict: {verdict}", flush=True)
+
+            # --- AUDIT LOGGING DONE ABOVE ---
+
+
         except Exception as e:
             print(f"CRITICAL Error ({ctx.stem}): {e}", flush=True)
             import traceback
@@ -272,6 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="config/default.yaml", help="Path to config file")
     parser.add_argument("--case", type=str, default=None, help="Filter to specific case stem")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of cases processed")
+    parser.add_argument("--triage_only", action="store_true", help="Run only triage classification and exit")
     args = parser.parse_args()
     
     # Global overrides (hacky but effective for this script structure)

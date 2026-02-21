@@ -240,6 +240,24 @@ class PlannerAgent(BaseAgent):
         """
         self.log(f"Revising plan for {ctx.stem} based on feedback")
 
+        suggested_plan = self._build_suggested_plan_from_feedback(feedback, ctx.diagnoses)
+        if suggested_plan:
+            strategy = "Deterministic fallback from executor hard-gate suggested_ops"
+            revision_content = {"plan": suggested_plan, "strategy": strategy}
+            self.send_message(
+                recipient="coordinator",
+                msg_type=MessageType.PLAN_REVISION,
+                content=revision_content,
+                case_id=ctx.case_id,
+            )
+            self.send_message(
+                recipient="executor",
+                msg_type=MessageType.PLAN_REVISION,
+                content=revision_content,
+                case_id=ctx.case_id,
+            )
+            return
+
         prompt = (
             f"The current repair plan for {ctx.stem} needs revision.\n\n"
             f"Feedback: {json.dumps(feedback, indent=2, default=str)}\n"
@@ -266,6 +284,88 @@ class PlannerAgent(BaseAgent):
             content=revision_content,
             case_id=ctx.case_id,
         )
+
+    def _build_suggested_plan_from_feedback(
+        self,
+        feedback: Dict[str, Any],
+        diagnoses: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Build a deterministic fallback plan from executor-provided suggested_ops
+        so we can recover within the same round without relying on LLM.
+        """
+        if not isinstance(feedback, dict):
+            return []
+        failed_ops = feedback.get("failed_ops", [])
+        if not isinstance(failed_ops, list) or not failed_ops:
+            return []
+
+        all_known_ops = set()
+        for ops in ISSUE_OPS_MAP.values():
+            all_known_ops.update(ops)
+
+        plan: List[Dict[str, Any]] = []
+        seen = set()
+        max_steps = 3
+
+        def _find_diag_for_failed(op_name: str) -> Dict[str, Any]:
+            op_name = str(op_name or "").strip()
+            for d in diagnoses:
+                if not isinstance(d, dict):
+                    continue
+                if str(d.get("operation", "")).strip() == op_name:
+                    return d
+            # fallback: first non-global direction diagnosis if available
+            for d in diagnoses:
+                if not isinstance(d, dict):
+                    continue
+                direction = normalize_direction_hint(str(d.get("direction", "global")))
+                if direction != "global":
+                    return d
+            return diagnoses[0] if diagnoses else {}
+
+        for fo in failed_ops:
+            if not isinstance(fo, dict):
+                continue
+            failed_name = str(fo.get("operation", "")).strip()
+            suggested_ops = fo.get("suggested_ops", [])
+            if not isinstance(suggested_ops, list):
+                continue
+
+            diag = _find_diag_for_failed(failed_name)
+            d_cls = str(diag.get("affected_class", "myo")).strip().lower() or "myo"
+            d_dir = normalize_direction_hint(str(diag.get("direction", "global")))
+            d_bbox = diag.get("bbox")
+            if not (isinstance(d_bbox, list) and len(d_bbox) == 4):
+                d_bbox = None
+
+            for sop in suggested_ops:
+                op_name = str(sop).strip()
+                if (not op_name) or (op_name not in all_known_ops):
+                    continue
+                key = (op_name, d_cls, d_dir)
+                if key in seen:
+                    continue
+                step: Dict[str, Any] = {
+                    "operation": op_name,
+                    "affected_class": d_cls,
+                    "direction": d_dir,
+                    "reason": (
+                        f"Executor gate fallback for {failed_name}: "
+                        f"{fo.get('reason', 'unknown')}"
+                    ),
+                    "risk": "medium",
+                }
+                if d_bbox is not None:
+                    step["bbox"] = d_bbox
+                plan.append(step)
+                seen.add(key)
+                if len(plan) >= max_steps:
+                    break
+            if len(plan) >= max_steps:
+                break
+
+        return self._sanitize_plan(plan, diagnoses)
 
     def _fallback_plan(self, diagnoses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Create a simple plan from diagnoses when LLM fails."""
@@ -764,7 +864,7 @@ class PlannerAgent(BaseAgent):
                     str(best_diag.get("direction", "global")),
                     description=str(best_diag.get("description", "")),
                 )
-                if step_dir == "global" and diag_dir != "global":
+                if diag_dir != "global" and step_dir != diag_dir:
                     step["direction"] = diag_dir
 
             # Coupled-op policy:

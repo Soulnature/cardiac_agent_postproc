@@ -50,3 +50,8 @@ Pipeline per case: **Triage → Diagnosis → Plan → Execute → Verify**, wit
 - Python ≥ 3.10, type hints everywhere
 - `black` + `isort` for formatting
 - All agents register with `MessageBus` and communicate via `AgentMessage`
+
+## Workflow Convention
+- After every completed task, append a new session entry to `WORKLOG.md`.
+- Minimum required fields per entry: `Current goal`, `Done`, `Blocked`, `Next command`, `Key files`, `Notes`.
+- If no blocker exists, explicitly write `Blocked: None` to keep logs consistent.

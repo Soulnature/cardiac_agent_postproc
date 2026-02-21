@@ -1,0 +1,184 @@
+agents:
+  diagnosis:
+    image_detail: auto
+    max_suggestions: 4
+    model: ministral-3:14b
+    provider: ollama
+    vlm_enabled: true
+  planner:
+    chain_of_thought: true
+    model: ministral-3:14b
+    provider: ollama
+  triage:
+    image_detail: low
+    model: ministral-3:14b
+    provider: ollama
+    quality_model:
+      enabled: true
+      path: quality_model.pkl
+    vlm_n_refs: 2
+    vlm_ref_match_view: true
+  verifier:
+    image_detail: auto
+    model: ministral-3:14b
+    provider: ollama
+diagnosis:
+  enabled: true
+  max_suggestions: 5
+  quality_threshold: 0.8
+  spatial: true
+  vlm_enabled: true
+edge:
+  overlap_target: 0.55
+  sobel_percentile: 85
+executor:
+  allow_borderline_on_same: true
+  max_high_impact_change_ratio: 0.08
+  max_step_change_ratio: 0.1
+  same_verdict_max_change_ratio: 0.03
+  same_verdict_min_compare_confidence: 0.7
+  vlm_per_step_scoring: true
+  vlm_score_min_confidence: 0.4
+  vlm_score_tolerance: 0.3
+llm:
+  api_key: ollama
+  base_url: http://localhost:11434/v1
+  enabled: true
+  max_tokens: 8192
+  model: ministral-3:14b
+  provider: ollama
+  temperature: 0.15
+multi_agent:
+  agent_temperature: 0.2
+  batch_summary: true
+  enable_negotiation: true
+  fast_path_threshold: 0.925
+  max_rounds_per_case: 2
+ops:
+  dilation_iterations: 1
+  erosion_iterations: 1
+  island_frac: 0.02
+  max_erosion_loss: 0.25
+  morph_kernel3: 3
+  small_component_floor: 20
+  small_component_frac: 0.002
+  smooth:
+    contour_epsilon: 1.5
+    gaussian_sigma: 1.0
+    morph_r: 1
+paths:
+  atlas_path: shape_atlas.pkl
+  runs_subdir: run_v31_coupled_erosion
+  source_dir: /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export
+  target_dir: /data484_5/xzhao14/cardiac_agent_postproc/results/outputs
+quality_model:
+  bad_threshold: 0.93
+  blend_alpha: 0.5
+  blend_mode: replace
+  enabled: true
+  log_features: false
+  path: quality_model.pkl
+revision:
+  enabled: True
+  max_revisions: 30
+  stall_max_hd95_delta: 0.1
+  stall_min_dice_delta: 0.001
+  stall_rounds: 5
+  stop_max_hd95: 4.0
+  stop_min_dice: 0.9
+reward_weights:
+  P_atlas_lv_mismatch: 8.0
+  P_atlas_mismatch: 20.0
+  P_components: 18.0
+  P_double_cavity: 30.0
+  P_edge_misalignment: 4.0
+  P_holes: 10.0
+  P_islands: 20.0
+  P_lv_shape: 8.0
+  P_shape_prior: 1.0
+  P_size_drift: 2.0
+  P_slice_consistency: 5.0
+  P_touch: 50.0
+  P_valve_leak: 5.0
+  R_enclosure: 5.0
+  R_shape_match: 15.0
+  surrogate_path: surrogate_model.pkl
+  use_surrogate: false
+shape_atlas:
+  enabled: true
+  kmeans_max: 4
+  kmeans_min: 2
+  min_samples_for_clustering: 5
+  per_view_divisor: 15
+  target_diag: 128
+solver:
+  atlas_builder_min_rqs: 80.0
+  max_inner: 15
+  max_outer: 10
+  min_delta: 0.5
+  min_quality_delta: 0.01
+  patience: 10
+  skip_good_rqs_threshold: 75.0
+  stop_min_rqs: 90.0
+  stop_min_rqs_delta: 0.2
+  stop_min_rqs_stagnant_rounds: 2
+  topk_frac: 0.25
+  topk_max: 200
+  topk_min: 20
+targets:
+- 209_original_lax_4c_004
+- 209_original_lax_4c_022
+- 210_original_lax_4c_029
+- 216_original_lax_4c_000
+- 223_original_lax_4c_024
+- 231_original_lax_4c_015
+- 234_original_lax_4c_014
+- 239_original_lax_4c_001
+- 239_original_lax_4c_006
+- 244_original_lax_4c_000
+- 244_original_lax_4c_009
+- 245_original_lax_4c_001
+- 279_original_lax_4c_008
+- 284_original_lax_4c_003
+- 284_original_lax_4c_011
+- 289_original_lax_4c_003
+- 294_original_lax_4c_003
+- 303_original_lax_4c_009
+- 303_original_lax_4c_021
+- 307_original_lax_4c_010
+- 307_original_lax_4c_024
+- 309_original_lax_4c_024
+- 317_original_lax_4c_008
+- 319_original_lax_4c_007
+- 321_original_lax_4c_028
+- 325_original_lax_4c_007
+- 328_original_lax_4c_008
+- 330_original_lax_4c_008
+- 333_original_lax_4c_024
+- 335_original_lax_4c_009
+- 335_original_lax_4c_019
+- 347_original_lax_4c_023
+- 348_original_lax_4c_011
+- 348_original_lax_4c_024
+- 349_original_lax_4c_008
+- 349_original_lax_4c_024
+- 356_original_lax_4c_009
+- 357_original_lax_4c_015
+- 359_original_lax_4c_014
+triage:
+  bad_threshold: 0.7
+  enabled: false   # disabled: all 39 cases are known-bad, bypass triage gate
+  good_threshold: 0.92
+  mode: classifier
+  vlm_accept_threshold: 70
+  vlm_enabled: true
+view_inference:
+  rv_ratio_2ch_threshold: 0.02
+  rv_ratio_rv_optional_threshold: 0.005
+vision_guardrail:
+  api_key: ollama
+  base_url: http://localhost:11434/v1
+  enabled: true
+  model: ministral-3:14b
+  provider: ollama
+  threshold: 40

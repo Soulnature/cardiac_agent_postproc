@@ -99,6 +99,8 @@ class CaseContext:
     # Execution
     applied_ops: List[Dict[str, Any]] = field(default_factory=list)
     rqs_history: List[float] = field(default_factory=list)
+    score_history: List[float] = field(default_factory=list)
+    current_score: Optional[float] = None
     rounds_completed: int = 0
 
     # Verification

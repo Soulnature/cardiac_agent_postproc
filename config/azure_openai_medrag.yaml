@@ -21,14 +21,6 @@ solver:
   skip_good_rqs_threshold: 75.0
   atlas_builder_min_rqs: 80.0
 
-triage:
-  enabled: true
-  mode: "classifier"          # "classifier" (trained model) or "heuristic" (feature-based)
-  good_threshold: 0.92        # only used in heuristic mode
-  bad_threshold: 0.70         # only used in heuristic mode
-  vlm_enabled: false           # DISABLED: currently broken (returns 0)
-  vlm_accept_threshold: 70
-
 view_inference:
   rv_ratio_2ch_threshold: 0.02
   rv_ratio_rv_optional_threshold: 0.005
@@ -116,10 +108,7 @@ quality_model:
   log_features: false
 
 diagnosis:
-  enabled: true
   vlm_enabled: true            # ENABLED: VLM spatial diagnosis
-  spatial: true                # NEW: enable spatial output format
-  quality_threshold: 0.8
   max_suggestions: 4           # reduced: focus on top issues
 
 # ── Multi-Agent System ──
@@ -129,6 +118,8 @@ multi_agent:
   agent_temperature: 0.2      # LLM temperature for agent reasoning
   enable_negotiation: true     # allow agents to challenge each other
   batch_summary: true          # cross-case learning after each batch
+  in_round_replan_on_failure: true   # executor gate失败时，同轮触发一次重规划重试
+  max_replan_attempts_per_round: 1
 
 # ── Executor Safety Gates ──
 executor:
@@ -137,6 +128,35 @@ executor:
   same_verdict_max_change_ratio: 0.03 # if VLM says "same", only allow small low-impact edits
   same_verdict_min_compare_confidence: 0.70
   allow_borderline_on_same: true
+  vlm_per_step_scoring: true           # VLM scores each step
+  vlm_score_tolerance: 0.3             # used only when strict_monotonic_mode=false
+  vlm_score_min_confidence: 0.4        # base confidence threshold
+  strict_monotonic_mode: true          # each accepted step/round must be confidently improved
+  strict_min_score_delta: 0.05         # step gate: new_score >= prev_score + delta
+  strict_step_min_confidence: 0.55     # stricter confidence threshold for step-level score gates
+  strict_reject_low_confidence: true   # reject low-confidence per-step score in strict mode
+  strict_require_baseline_score: false # allow progress when numeric baseline missing; round gate still enforces improved
+  strict_round_min_compare_confidence: 0.60  # verifier comparison confidence floor in strict mode
+  strict_round_score_delta: 0.001      # best-intermediate update margin in coordinator scoring
+  enforce_directional_execution: true  # non-global plan steps are constrained to diagnosed direction
+  split_relabel_require_bbox: true     # lv_split_to_rv / rv_split_to_lv must have bbox
+  split_relabel_topology_gate: true    # relabel must reduce source-class fragmentation
+  split_relabel_max_change_ratio: 0.06 # cap relabel footprint to avoid global relabel accidents
+  gate_optional_disappear_min_area_px: 120 # optional class disappearance is blocked if area is large
+  gate_lv_myo_enable: true             # enforce LV boundary covered by Myo (valve region exempt)
+  gate_valve_exempt_margin_px: 6       # top valve-plane margin exempt from LV-Myo coverage check
+  gate_lv_myo_min_coverage: 0.70       # minimum LV-edge coverage by Myo outside valve region
+  gate_lv_myo_allow_drop: 0.03         # reject when coverage drops more than this and below min
+  gate_rv_lv_contact_enable: true      # non-barrier ops cannot increase RV-LV direct contact
+  gate_rv_lv_contact_allow_increase_px: 2
+  gate_interslice_enable: true         # enforce inter-slice continuity vs neighbors
+  gate_interslice_min_neighbor_area_px: 25
+  gate_interslice_area_dev_max: 1.20   # |area-mean_nb|/mean_nb upper bound
+  gate_interslice_area_dev_worsen_tol: 0.12
+  gate_interslice_centroid_max_shift_px: 35.0
+  gate_interslice_centroid_worsen_tol_px: 5.0
+  gate_interslice_cc_max_dev: 2.0      # max allowed deviation from neighbor mean cc count
+  gate_interslice_cc_worsen_tol: 1.0
 
 
 # ---- Agent-specific overrides ----
@@ -150,10 +170,12 @@ agents:
     vlm_ref_match_view: true
     vlm_four_way_refs: true
     vlm_ref_categories: ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"]
-    vlm_good_prob_weight: 0.85
-    qm_good_prob_weight: 0.15
+    # Be more conservative on "good": downweight VLM optimism and
+    # rely more on quality-model bad-probability for triage gating.
+    vlm_good_prob_weight: 0.60
+    qm_good_prob_weight: 0.40
     score_good_floor: 0.72
-    score_bad_ceiling: 0.40
+    score_bad_ceiling: 0.60
     quality_model:
       enabled: true
       path: "quality_model.pkl"
@@ -163,8 +185,6 @@ agents:
     base_url: "https://med-rag-openai.openai.azure.com/openai/v1"
     model: "gpt-4o"
     image_detail: "auto"
-    vlm_enabled: true
-    max_suggestions: 4
 
   planner:
     provider: "ollama"

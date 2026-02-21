@@ -69,12 +69,24 @@ class VerifierAgent(BaseAgent):
         self.log(f"Verifying {ctx.stem}")
 
         # Step 1: VLM visual comparison (PRIMARY decision signal)
+        ex_cfg = self.cfg.get("executor", {})
+        strict_monotonic_mode = bool(ex_cfg.get("strict_monotonic_mode", False))
+        strict_round_min_compare_conf = float(
+            ex_cfg.get("strict_round_min_compare_confidence", 0.60)
+        )
+
         vlm_comparison = {}
         before_overlay = ""
         after_overlay = ""
+        comparison_reference = "original"
 
         if ctx.img_path and ctx.original_mask is not None and self.visual_kb:
-            vlm_comparison, before_overlay, after_overlay = self._vlm_compare(ctx)
+            (
+                vlm_comparison,
+                before_overlay,
+                after_overlay,
+                comparison_reference,
+            ) = self._vlm_compare(ctx)
 
         # Step 2: VLM quality judgment on the AFTER image
         vlm_quality = {}
@@ -88,6 +100,7 @@ class VerifierAgent(BaseAgent):
         prompt = (
             f"Verify the repair of case {ctx.stem} (view: {ctx.view_type}).\n\n"
             f"**Operations applied**: {json.dumps([op['name'] for op in ctx.applied_ops])}\n"
+            f"**Comparison reference**: {comparison_reference}\n"
         )
 
         if vlm_comparison:
@@ -189,6 +202,28 @@ class VerifierAgent(BaseAgent):
                 f"Original: {reasoning}"
             )
 
+        if strict_monotonic_mode:
+            cmp_v = str(vlm_comparison.get("verdict", "")).lower()
+            cmp_conf = float(vlm_comparison.get("confidence", 0.0) or 0.0)
+            if not vlm_comparison:
+                verdict = "reject"
+                reasoning = (
+                    "Strict monotonic mode: missing VLM comparison signal; "
+                    "rejecting round for safety."
+                )
+            elif cmp_v != "improved":
+                verdict = "reject"
+                reasoning = (
+                    f"Strict monotonic mode: comparison vs {comparison_reference} "
+                    f"is '{cmp_v or 'unknown'}' (must be 'improved')."
+                )
+            elif cmp_conf < strict_round_min_compare_conf:
+                verdict = "reject"
+                reasoning = (
+                    "Strict monotonic mode: improvement confidence too low "
+                    f"({cmp_conf:.2f} < {strict_round_min_compare_conf:.2f})."
+                )
+
         confidence = max(0.0, min(1.0, confidence))
         if verdict == "needs_more_work" and not remaining:
             remaining = ["residual_issue_needs_refinement"]
@@ -213,6 +248,7 @@ class VerifierAgent(BaseAgent):
                 "metrics": metrics,
                 "vlm_comparison": vlm_comparison,
                 "vlm_quality": vlm_quality,
+                "comparison_reference": comparison_reference,
             },
             case_id=ctx.case_id,
         )
@@ -261,20 +297,34 @@ class VerifierAgent(BaseAgent):
         (single 3-panel image). Otherwise falls back to the old
         separate-image comparison.
 
-        Returns (comparison_result, before_overlay_path, after_overlay_path).
+        Returns (comparison_result, before_overlay_path, after_overlay_path, reference_tag).
         """
         try:
+            ex_cfg = self.cfg.get("executor", {})
+            strict_monotonic_mode = bool(ex_cfg.get("strict_monotonic_mode", False))
+            reference_mask = ctx.original_mask
+            reference_tag = "original"
+            if (
+                strict_monotonic_mode
+                and getattr(ctx, "best_intermediate_mask", None) is not None
+                and not bool(getattr(ctx, "best_intermediate_is_original", True))
+            ):
+                reference_mask = ctx.best_intermediate_mask
+                reference_tag = "best_intermediate"
+            if reference_mask is None:
+                reference_mask = ctx.original_mask if ctx.original_mask is not None else ctx.current_mask
+
             # Create individual overlays for before and after (always, for debugging)
             before_overlay = ctx.debug_img_path("_verify_before.png")
             after_overlay = ctx.debug_img_path("_verify_after.png")
-            create_overlay(ctx.img_path, ctx.original_mask, before_overlay)
+            create_overlay(ctx.img_path, reference_mask, before_overlay)
             create_overlay(ctx.img_path, ctx.current_mask, after_overlay)
 
             # NEW: Use diff-overlay approach with repair KB
             if self.repair_kb is not None:
                 diff_path = ctx.debug_img_path("_verify_diff.png")
                 create_diff_overlay(
-                    ctx.img_path, ctx.original_mask, ctx.current_mask, diff_path
+                    ctx.img_path, reference_mask, ctx.current_mask, diff_path
                 )
                 result = self.judge_repair_comparison(
                     diff_path, 
@@ -284,15 +334,17 @@ class VerifierAgent(BaseAgent):
                 v = result.get("verdict", "neutral")
                 mapped = {"improved": "improved", "degraded": "worse", "neutral": "same"}
                 result["verdict"] = mapped.get(v, "same")
-                return result, before_overlay, after_overlay
+                result["reference"] = reference_tag
+                return result, before_overlay, after_overlay, reference_tag
 
             # Fallback: old approach
             result = self.judge_visual_comparison(before_overlay, after_overlay)
-            return result, before_overlay, after_overlay
+            result["reference"] = reference_tag
+            return result, before_overlay, after_overlay, reference_tag
 
         except Exception as e:
             self.log(f"VLM comparison failed: {e}")
-            return {}, "", ""
+            return {}, "", "", "unknown"
 
     def evaluate_batch(
         self,

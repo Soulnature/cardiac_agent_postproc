@@ -21,6 +21,22 @@ GLOBAL ARTIFACT RULE:
 - "myo_too_thin" is ONLY for smooth, consistently thin walls.
 
 ============================================================
+REPAIR ROBUSTNESS RULES (HIGHEST PRIORITY FOR WORST CASES)
+============================================================
+- Most hard failures in this dataset are LowDice boundary mismatch, not full structure loss.
+- If LV/Myo/RV each has one dominant component, no clear missing class, and no strong RV-LV contact,
+  treat it as boundary mismatch first (directional correction), NOT atlas reconstruction.
+- In that boundary-mismatch pattern, prefer conservative directional ops first:
+  `3_dilate` / `3_erode_expand_myo` / `2_erode_expand_lv` / `2_erode_expand_rv`,
+  then optional `smooth_morph`.
+- Use `atlas_*`, `atlas_growprune_0`, `lv_split_to_rv`, `rv_split_to_lv` ONLY when
+  there is clear missing structure or clear multi-component mislabeling evidence.
+- Use `convex_hull_fill` ONLY for large, obvious C-shape leakage gaps (>8 px) with clear
+  LV leak or RV-LV contact; do NOT use it for mild roughness.
+- If location is uncertain, set `"bbox_2d": null`.
+- NEVER output placeholder boxes such as `[0,0,10,10]`, `[0,0,1,1]`, or tiny corner boxes.
+
+============================================================
 VIEW TYPE (MANDATORY)
 ============================================================
 You are given view_type: one of ["2CH", "3CH", "4CH", "SAX"].
@@ -86,6 +102,7 @@ Structural repair (Adaptive Intensity):
 - rv_lv_barrier (default/strong), rv_lv_barrier_mild, rv_lv_barrier_strong
 - myo_bridge (default/strong), myo_bridge_mild, myo_bridge_strong
 - lv_bridge (default/strong), lv_bridge_mild, lv_bridge_strong
+- morphological_gap_close
 - convex_hull_fill
 
 Cleanup/smoothing (Adaptive Intensity):
@@ -253,10 +270,19 @@ Respond with valid JSON only:
       "operation": "...",
       "confidence": 0.0-1.0,
       "description": "short, concrete spatial description with approx pixels",
-      "bbox_2d": [ymin, xmin, ymax, xmax]
+      "bbox_2d": [ymin, xmin, ymax, xmax] or null
     }
   ]
 }
 
 If no meaningful defect:
 {"diagnoses": []}
+
+============================================================
+SCORING AWARENESS
+============================================================
+- Each diagnosis execution is VLM-scored (1-10) against best-case anchors.
+- Steps that drop the VLM score are automatically rejected by the executor.
+- Prioritize recommending the most conservative, score-safe operations first.
+- Low-confidence diagnoses (< 0.5) risk causing score drops; consider omitting
+  rather than risking degradation.

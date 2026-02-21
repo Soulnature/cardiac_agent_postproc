@@ -1,0 +1,159 @@
+paths:
+  source_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export"
+  target_dir: "/data484_5/xzhao14/cardiac_agent_postproc/results/outputs"
+  runs_subdir: "run_v31_coupled_erosion"
+  atlas_path: "shape_atlas.pkl"
+
+solver:
+  max_outer: 10
+  topk_frac: 0.25
+  topk_min: 20
+  topk_max: 200
+  max_inner: 15
+  min_delta: 0.5
+  min_quality_delta: 0.01
+  patience: 10
+  stop_min_rqs: 90.0
+  stop_min_rqs_delta: 0.2
+  stop_min_rqs_stagnant_rounds: 2
+  skip_good_rqs_threshold: 75.0
+  atlas_builder_min_rqs: 80.0
+
+triage:
+  enabled: true
+  mode: "classifier"
+  good_threshold: 0.92
+  bad_threshold: 0.70
+  vlm_enabled: false
+  vlm_accept_threshold: 70
+
+view_inference:
+  rv_ratio_2ch_threshold: 0.02
+  rv_ratio_rv_optional_threshold: 0.005
+
+edge:
+  sobel_percentile: 85
+  overlap_target: 0.55
+
+shape_atlas:
+  enabled: true
+  target_diag: 128
+  kmeans_max: 4
+  kmeans_min: 2
+  per_view_divisor: 15
+  min_samples_for_clustering: 5
+
+reward_weights:
+  use_surrogate: false
+  surrogate_path: "surrogate_model.pkl"
+  P_touch: 50.0
+  P_edge_misalignment: 4.0
+  P_components: 18.0
+  P_islands: 20.0
+  P_valve_leak: 5.0
+  P_double_cavity: 30.0
+  P_holes: 10.0
+  P_size_drift: 2.0
+  P_atlas_mismatch: 20.0
+  P_atlas_lv_mismatch: 8.0
+  P_lv_shape: 8.0
+  P_shape_prior: 1.0
+  P_slice_consistency: 5.0
+  R_enclosure: 5.0
+  R_shape_match: 15.0
+
+ops:
+  small_component_floor: 20
+  small_component_frac: 0.002
+  island_frac: 0.02
+  erosion_iterations: 1
+  dilation_iterations: 1
+  max_erosion_loss: 0.25
+  morph_kernel3: 3
+  smooth:
+    contour_epsilon: 1.5
+    gaussian_sigma: 1.0
+    morph_r: 1
+
+revision:
+  enabled: false
+
+# LLM (text reasoning) — ministral for planning/diagnosis
+llm:
+  enabled: true
+  provider: "ollama"
+  base_url: "http://localhost:11434/v1"
+  model: "ministral-3:14b"
+  api_key: "ollama"
+  temperature: 0.15
+  max_tokens: 8192
+
+# VLM (vision) — llava-llama3 for image understanding
+vision_guardrail:
+  enabled: true
+  provider: "ollama"
+  base_url: "http://localhost:11434/v1"
+  model: "llava-llama3:latest"
+  api_key: "ollama"
+  threshold: 40
+
+quality_model:
+  enabled: true
+  path: "quality_model.pkl"
+  blend_mode: "replace"
+  blend_alpha: 0.5
+  bad_threshold: 0.93
+  log_features: false
+
+diagnosis:
+  enabled: true
+  vlm_enabled: true
+  spatial: true
+  quality_threshold: 0.8
+  max_suggestions: 4
+
+multi_agent:
+  max_rounds_per_case: 2
+  fast_path_threshold: 0.925
+  agent_temperature: 0.2
+  enable_negotiation: true
+  batch_summary: true
+
+executor:
+  max_high_impact_change_ratio: 0.08
+  max_step_change_ratio: 0.10
+  same_verdict_max_change_ratio: 0.03
+  same_verdict_min_compare_confidence: 0.70
+  allow_borderline_on_same: true
+  vlm_per_step_scoring: true
+  vlm_score_tolerance: 0.3
+  vlm_score_min_confidence: 0.4
+
+# Agent-specific overrides
+agents:
+  triage:
+    provider: "ollama"
+    model: "ministral-3:14b"
+    image_detail: "low"
+    vlm_n_refs: 2
+    vlm_ref_match_view: true
+    quality_model:
+      enabled: true
+      path: "quality_model.pkl"
+
+  diagnosis:
+    provider: "ollama"
+    model: "llava-llama3:latest"
+    image_detail: "auto"
+    vlm_enabled: true
+    max_suggestions: 4
+
+  planner:
+    provider: "ollama"
+    model: "ministral-3:14b"
+    chain_of_thought: true
+
+  verifier:
+    provider: "ollama"
+    model: "llava-llama3:latest"
+    image_detail: "auto"

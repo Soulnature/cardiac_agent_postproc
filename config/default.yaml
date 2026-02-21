@@ -46,7 +46,7 @@ shape_atlas:
   min_samples_for_clustering: 5
 
 reward_weights:
-  use_surrogate: false
+  use_surrogate: True
   surrogate_path: "surrogate_model.pkl"
   # Kept for atlas_builder and optional logging, NOT used in optimizer decisions
   P_touch: 50.0
@@ -95,7 +95,7 @@ llm:
   base_url: "http://localhost:11434/v1"  # only needed for ollama
   model: "ministral-3:14b"
   api_key: "ollama"             # set to real key when using remote providers
-  temperature: 0.15
+  temperature: 0.10
   max_tokens: 8192
 
 # Visual-Language Model (using Gemini multimodal)
@@ -129,6 +129,8 @@ multi_agent:
   agent_temperature: 0.2      # LLM temperature for agent reasoning
   enable_negotiation: true     # allow agents to challenge each other
   batch_summary: true          # cross-case learning after each batch
+  in_round_replan_on_failure: true   # executor gate失败时，同轮触发一次重规划重试
+  max_replan_attempts_per_round: 1
 
 # ── Executor Safety Gates ──
 executor:
@@ -137,6 +139,35 @@ executor:
   same_verdict_max_change_ratio: 0.03 # if VLM says "same", only allow small low-impact edits
   same_verdict_min_compare_confidence: 0.70
   allow_borderline_on_same: true
+  vlm_per_step_scoring: true           # VLM scores each step
+  vlm_score_tolerance: 0.3             # used only when strict_monotonic_mode=false
+  vlm_score_min_confidence: 0.4        # base confidence threshold
+  strict_monotonic_mode: true          # each accepted step/round must be confidently improved
+  strict_min_score_delta: 0.05         # step gate: new_score >= prev_score + delta
+  strict_step_min_confidence: 0.55     # stricter confidence threshold for step-level score gates
+  strict_reject_low_confidence: true   # reject low-confidence per-step score in strict mode
+  strict_require_baseline_score: false # allow progress when numeric baseline missing; round gate still enforces improved
+  strict_round_min_compare_confidence: 0.60  # verifier comparison confidence floor in strict mode
+  strict_round_score_delta: 0.001      # best-intermediate update margin in coordinator scoring
+  enforce_directional_execution: true  # non-global plan steps are constrained to diagnosed direction
+  split_relabel_require_bbox: true     # lv_split_to_rv / rv_split_to_lv must have bbox
+  split_relabel_topology_gate: true    # relabel must reduce source-class fragmentation
+  split_relabel_max_change_ratio: 0.06 # cap relabel footprint to avoid global relabel accidents
+  gate_optional_disappear_min_area_px: 120 # optional class disappearance is blocked if area is large
+  gate_lv_myo_enable: true             # enforce LV boundary covered by Myo (valve region exempt)
+  gate_valve_exempt_margin_px: 6       # top valve-plane margin exempt from LV-Myo coverage check
+  gate_lv_myo_min_coverage: 0.70       # minimum LV-edge coverage by Myo outside valve region
+  gate_lv_myo_allow_drop: 0.03         # reject when coverage drops more than this and below min
+  gate_rv_lv_contact_enable: true      # non-barrier ops cannot increase RV-LV direct contact
+  gate_rv_lv_contact_allow_increase_px: 2
+  gate_interslice_enable: true         # enforce inter-slice continuity vs neighbors
+  gate_interslice_min_neighbor_area_px: 25
+  gate_interslice_area_dev_max: 1.20   # |area-mean_nb|/mean_nb upper bound
+  gate_interslice_area_dev_worsen_tol: 0.12
+  gate_interslice_centroid_max_shift_px: 35.0
+  gate_interslice_centroid_worsen_tol_px: 5.0
+  gate_interslice_cc_max_dev: 2.0      # max allowed deviation from neighbor mean cc count
+  gate_interslice_cc_worsen_tol: 1.0
 
 
 # ---- Agent-specific overrides ----
@@ -147,6 +178,14 @@ agents:
     image_detail: "low"
     vlm_n_refs: 2
     vlm_ref_match_view: true
+    # Conservative thresholds: local model (ministral-3:14b) tends to score
+    # bad segmentations as 5.5-7/10 ("borderline"), which the default config
+    # auto-promotes to "good". These settings force borderline cases into LLM
+    # reasoning instead of auto-skipping.
+    vlm_good_min_score: 8.0          # VLM score must be >=9 to pass as good (unchanged)
+    vlm_good_min_conf: 0.90          # require high confidence for VLM-good path
+    borderline_auto_good_max_severity: 0.0   # never auto-good on borderline; always go to LLM
+    score_good_floor: 0.80          # composite score floor (was 0.72, too permissive)
     quality_model:
       enabled: true
       path: "quality_model.pkl"
