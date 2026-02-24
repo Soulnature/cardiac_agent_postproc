@@ -18,6 +18,7 @@ Main outputs (target_dir):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -25,7 +26,7 @@ import re
 import shutil
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -124,6 +125,154 @@ def _parse_optional_bool(value: Optional[str]) -> Optional[bool]:
     raise ValueError(f"Invalid boolean value: {value}")
 
 
+def _normalize_view_for_thresholds(view_type: Optional[str]) -> str:
+    token = re.sub(r"[^a-z0-9]", "", str(view_type or "").strip().lower())
+    if token in {"2c", "2ch"}:
+        return "2CH"
+    if token in {"3c", "3ch"}:
+        return "3CH"
+    if token in {"4c", "4ch"}:
+        return "4CH"
+    return token.upper() if token else "ANY"
+
+
+def _verifier_thresholds_snapshot(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    verifier_cfg = cfg.get("verifier", {}) if isinstance(cfg.get("verifier"), dict) else {}
+    agent_cfg = (
+        cfg.get("agents", {}).get("verifier", {})
+        if isinstance(cfg.get("agents", {}).get("verifier"), dict)
+        else {}
+    )
+    base_thr = verifier_cfg.get("thresholds", {}) if isinstance(verifier_cfg.get("thresholds"), dict) else {}
+    ag_thr = agent_cfg.get("thresholds", {}) if isinstance(agent_cfg.get("thresholds"), dict) else {}
+
+    reject_th = float(base_thr.get("reject", 45.0))
+    approve_th = float(base_thr.get("approve", 65.0))
+    if "reject" in ag_thr:
+        reject_th = float(ag_thr["reject"])
+    if "approve" in ag_thr:
+        approve_th = float(ag_thr["approve"])
+    if approve_th < reject_th:
+        approve_th = reject_th
+
+    per_view: Dict[str, Dict[str, float]] = {}
+    for view in ["2CH", "3CH", "4CH"]:
+        view_cfg: Dict[str, Any] = {}
+        base_per = base_thr.get("per_view", {}) if isinstance(base_thr, dict) else {}
+        ag_per = ag_thr.get("per_view", {}) if isinstance(ag_thr, dict) else {}
+        if isinstance(base_per, dict):
+            view_cfg.update(base_per.get(view, {}) or {})
+            view_cfg.update(base_per.get(view.lower(), {}) or {})
+        if isinstance(ag_per, dict):
+            view_cfg.update(ag_per.get(view, {}) or {})
+            view_cfg.update(ag_per.get(view.lower(), {}) or {})
+        v_reject = float(view_cfg.get("reject", reject_th))
+        v_approve = float(view_cfg.get("approve", approve_th))
+        if v_approve < v_reject:
+            v_approve = v_reject
+        per_view[view] = {"reject": v_reject, "approve": v_approve}
+
+    return {
+        "reject": float(reject_th),
+        "approve": float(approve_th),
+        "per_view": per_view,
+    }
+
+
+def _score_bin_table(
+    repair_df: pd.DataFrame,
+    score_col: str = "online_score",
+) -> pd.DataFrame:
+    if repair_df.empty or score_col not in repair_df.columns:
+        return pd.DataFrame()
+
+    work = repair_df.copy()
+    work["score_num"] = pd.to_numeric(work[score_col], errors="coerce")
+    work["dice_delta_num"] = pd.to_numeric(work["DiceDelta_Mean"], errors="coerce")
+    work = work[np.isfinite(work["score_num"].to_numpy()) & np.isfinite(work["dice_delta_num"].to_numpy())]
+    if work.empty:
+        return pd.DataFrame()
+
+    bins = np.arange(0, 110, 10)
+    labels = [f"{int(bins[i])}-{int(bins[i+1]-1)}" for i in range(len(bins) - 1)]
+    work["score_bin"] = pd.cut(
+        work["score_num"],
+        bins=bins,
+        labels=labels,
+        include_lowest=True,
+        right=False,
+    )
+
+    grp = (
+        work.groupby("score_bin", observed=False)
+        .agg(
+            n=("dice_delta_num", "count"),
+            mean_delta=("dice_delta_num", "mean"),
+            median_delta=("dice_delta_num", "median"),
+            improved_rate=("dice_delta_num", lambda s: float((s > 0).mean()) if len(s) else float("nan")),
+            degradation_rate=("dice_delta_num", lambda s: float((s < 0).mean()) if len(s) else float("nan")),
+        )
+        .reset_index()
+    )
+    grp["score_bin"] = grp["score_bin"].astype(str)
+    return grp
+
+
+def _recommend_thresholds_from_bins(
+    calib_df: pd.DataFrame,
+    default_reject: float,
+    default_approve: float,
+) -> Dict[str, Any]:
+    if calib_df.empty:
+        return {
+            "recommended_reject": float(default_reject),
+            "recommended_approve": float(default_approve),
+            "reason": "no calibration rows",
+        }
+
+    # approve: first bin with positive mean delta and low degradation risk.
+    approve = float(default_approve)
+    for _, row in calib_df.iterrows():
+        n = int(row.get("n", 0) or 0)
+        if n < 3:
+            continue
+        mean_delta = _safe_float(row.get("mean_delta", float("nan")))
+        deg_rate = _safe_float(row.get("degradation_rate", float("nan")))
+        bin_txt = str(row.get("score_bin", ""))
+        m = re.match(r"^(\d+)-(\d+)$", bin_txt)
+        if not m:
+            continue
+        lo = float(m.group(1))
+        if _is_finite(mean_delta) and _is_finite(deg_rate) and mean_delta > 0 and deg_rate <= 0.20:
+            approve = lo
+            break
+
+    # reject: last clearly negative bin before approve.
+    reject = float(default_reject)
+    for _, row in calib_df.iterrows():
+        n = int(row.get("n", 0) or 0)
+        if n < 3:
+            continue
+        mean_delta = _safe_float(row.get("mean_delta", float("nan")))
+        bin_txt = str(row.get("score_bin", ""))
+        m = re.match(r"^(\d+)-(\d+)$", bin_txt)
+        if not m:
+            continue
+        hi = float(m.group(2))
+        if hi >= approve:
+            break
+        if _is_finite(mean_delta) and mean_delta < 0:
+            reject = hi + 1.0
+
+    if approve < reject:
+        approve = reject
+    return {
+        "recommended_reject": float(reject),
+        "recommended_approve": float(approve),
+        "reason": "bin reliability heuristic",
+    }
+
+
 def _view_key(stem: str) -> str:
     parts = stem.rsplit("_", 1)
     if len(parts) == 2 and parts[1].isdigit():
@@ -193,6 +342,245 @@ def _compute_dice(mask: Optional[np.ndarray], gt_path: str) -> Dict[str, float]:
         "Dice_Myo": float(d_myo),
         "Dice_LV": float(d_lv),
     }
+
+
+def _compute_anatomy_score_for_mask(ctx: Any, mask: Optional[np.ndarray]) -> float:
+    """
+    Compute anatomy no-GT score (view-aware) for a candidate mask.
+    Returns NaN when prerequisites are missing.
+    """
+    if mask is None:
+        return float("nan")
+    if getattr(ctx, "image", None) is None:
+        return float("nan")
+    stats_dict = getattr(ctx, "anatomy_stats", None)
+    if not isinstance(stats_dict, dict):
+        return float("nan")
+    try:
+        from cardiac_agent_postproc.anatomy_score import compute_anatomy_score, _normalize_view
+
+        view = _normalize_view(getattr(ctx, "view_type", "") or "")
+        stats = stats_dict.get(view)
+        if stats is None:
+            return float("nan")
+        score, _ = compute_anatomy_score(mask, ctx.image, view, stats)
+        return float(score)
+    except Exception:
+        return float("nan")
+
+
+def _blend_approved_pick_score(
+    llm_score: float,
+    anatomy_score: float,
+    cfg: Dict[str, Any],
+) -> float:
+    """
+    Final no-GT score used for approved-case mask selection.
+    Blends verifier online score (LLM/VLM-driven) and anatomy score.
+    """
+    ma_cfg = cfg.get("multi_agent", {}) if isinstance(cfg, dict) else {}
+    w_llm = _safe_float(ma_cfg.get("approved_pick_llm_weight", 0.60), 0.60)
+    w_anatomy = _safe_float(ma_cfg.get("approved_pick_anatomy_weight", 0.40), 0.40)
+    w_llm = max(0.0, w_llm)
+    w_anatomy = max(0.0, w_anatomy)
+    w_sum = max(1e-6, w_llm + w_anatomy)
+
+    llm = llm_score if _is_finite(llm_score) else 50.0
+    anat = anatomy_score if _is_finite(anatomy_score) else 50.0
+    llm = float(max(0.0, min(100.0, llm)))
+    anat = float(max(0.0, min(100.0, anat)))
+    return float((w_llm * llm + w_anatomy * anat) / w_sum)
+
+
+def _estimate_original_online_score(ctx: Any) -> float:
+    """
+    Estimate a no-GT online quality score for the original mask from triage score.
+    """
+    triage_score = _safe_float(getattr(ctx, "triage_score", float("nan")))
+    if not _is_finite(triage_score):
+        return 50.0
+    if triage_score <= 1.0:
+        return float(max(0.0, min(100.0, triage_score * 100.0)))
+    return float(max(0.0, min(100.0, triage_score)))
+
+
+def _select_approved_final_mask(
+    ctx: Any,
+    cfg: Dict[str, Any],
+) -> Tuple[Optional[np.ndarray], str, Dict[str, Any]]:
+    """
+    For approved cases, choose between current_mask and best_intermediate_mask
+    using blended no-GT score = f(LLM online score, anatomy score).
+    """
+    current_mask = (
+        ctx.current_mask.copy() if getattr(ctx, "current_mask", None) is not None else None
+    )
+    best_mask = None
+    if (
+        getattr(ctx, "best_intermediate_mask", None) is not None
+        and not bool(getattr(ctx, "best_intermediate_is_original", True))
+    ):
+        best_mask = ctx.best_intermediate_mask.copy()
+
+    current_online = _safe_float(
+        (getattr(ctx, "last_verify_result", {}) or {}).get("online_score", float("nan"))
+    )
+    current_anatomy = _compute_anatomy_score_for_mask(ctx, current_mask)
+    current_blended = _blend_approved_pick_score(
+        llm_score=current_online,
+        anatomy_score=current_anatomy,
+        cfg=cfg,
+    )
+
+    best_online = _safe_float(
+        getattr(ctx, "best_intermediate_online_score", float("nan"))
+    )
+    if (not _is_finite(best_online)) and (
+        int(getattr(ctx, "best_intermediate_round", 0))
+        == int(getattr(ctx, "rounds_completed", 0))
+    ):
+        best_online = current_online
+    best_anatomy = _safe_float(
+        getattr(ctx, "best_intermediate_anatomy_score", float("nan"))
+    )
+    if not _is_finite(best_anatomy):
+        best_anatomy = _compute_anatomy_score_for_mask(ctx, best_mask)
+    best_blended = _blend_approved_pick_score(
+        llm_score=best_online,
+        anatomy_score=best_anatomy,
+        cfg=cfg,
+    )
+
+    margin = _safe_float(
+        (cfg.get("multi_agent", {}) or {}).get("approved_pick_min_margin", 1e-6),
+        1e-6,
+    )
+    pick_best = best_mask is not None and (best_blended > (current_blended + margin))
+    if pick_best:
+        selected_mask = best_mask
+        saved_mask_type = "best_intermediate"
+        selected_source = "best_intermediate"
+    else:
+        selected_mask = current_mask
+        saved_mask_type = "repaired"
+        selected_source = "current"
+
+    meta = {
+        "selected_source": selected_source,
+        "current_online_score": current_online,
+        "current_anatomy_score": current_anatomy,
+        "current_blended_score": current_blended,
+        "best_online_score": best_online,
+        "best_anatomy_score": best_anatomy,
+        "best_blended_score": best_blended,
+    }
+    return selected_mask, saved_mask_type, meta
+
+
+def _select_nonapproved_final_mask(
+    ctx: Any,
+    cfg: Dict[str, Any],
+) -> Tuple[Optional[np.ndarray], str, Dict[str, Any]]:
+    """
+    For non-approved outcomes (gave_up/reject/needs_more_work),
+    prioritize the intermediate with the largest anatomy-score improvement.
+    """
+    original_mask = None
+    if getattr(ctx, "original_mask", None) is not None:
+        original_mask = ctx.original_mask.copy()
+    elif getattr(ctx, "mask", None) is not None:
+        original_mask = ctx.mask.copy()
+
+    best_mask = None
+    best_source = "none"
+    if (
+        getattr(ctx, "best_anatomy_intermediate_mask", None) is not None
+        and not bool(getattr(ctx, "best_anatomy_intermediate_is_original", True))
+    ):
+        best_mask = ctx.best_anatomy_intermediate_mask.copy()
+        best_source = "best_anatomy_intermediate"
+    if (
+        best_mask is None
+        and getattr(ctx, "best_intermediate_mask", None) is not None
+        and not bool(getattr(ctx, "best_intermediate_is_original", True))
+    ):
+        best_mask = ctx.best_intermediate_mask.copy()
+        best_source = "best_intermediate"
+
+    original_online = _estimate_original_online_score(ctx)
+    original_anatomy = _safe_float(getattr(ctx, "anatomy_score_before", float("nan")))
+    if not _is_finite(original_anatomy):
+        original_anatomy = _compute_anatomy_score_for_mask(ctx, original_mask)
+    original_blended = _blend_approved_pick_score(
+        llm_score=original_online,
+        anatomy_score=original_anatomy,
+        cfg=cfg,
+    )
+
+    best_online = _safe_float(
+        getattr(ctx, "best_anatomy_intermediate_online_score", float("nan"))
+    )
+    if not _is_finite(best_online):
+        best_online = _safe_float(
+            getattr(ctx, "best_intermediate_online_score", float("nan"))
+        )
+    best_anatomy = _safe_float(
+        getattr(ctx, "best_anatomy_intermediate_score", float("nan"))
+    )
+    if not _is_finite(best_anatomy):
+        best_anatomy = _safe_float(
+            getattr(ctx, "best_intermediate_anatomy_score", float("nan"))
+        )
+    if not _is_finite(best_anatomy):
+        best_anatomy = _compute_anatomy_score_for_mask(ctx, best_mask)
+    best_blended = _blend_approved_pick_score(
+        llm_score=best_online,
+        anatomy_score=best_anatomy,
+        cfg=cfg,
+    )
+
+    ma_cfg = cfg.get("multi_agent", {}) if isinstance(cfg, dict) else {}
+    min_margin = _safe_float(ma_cfg.get("nonapproved_pick_min_margin", 0.25), 0.25)
+    min_online_gain = _safe_float(ma_cfg.get("nonapproved_pick_min_online_gain", 0.0), 0.0)
+    min_anatomy_gain = _safe_float(ma_cfg.get("nonapproved_pick_min_anatomy_gain", 0.0), 0.0)
+
+    online_gain_ok = _is_finite(best_online) and (
+        best_online >= (original_online + min_online_gain)
+    )
+    if _is_finite(best_anatomy) and _is_finite(original_anatomy):
+        anatomy_gain_ok = best_anatomy >= (original_anatomy + min_anatomy_gain)
+    else:
+        anatomy_gain_ok = _is_finite(best_anatomy)
+    blended_gain_ok = _is_finite(best_blended) and _is_finite(original_blended) and (
+        best_blended > (original_blended + min_margin)
+    )
+
+    # User policy: nonapproved path prioritizes anatomy-improvement maximum.
+    pick_best = best_mask is not None and anatomy_gain_ok
+
+    if pick_best:
+        selected_mask = best_mask
+        saved_mask_type = "best_intermediate"
+        selected_source = f"{best_source}_nonapproved_anatomy_priority"
+    else:
+        selected_mask = original_mask
+        saved_mask_type = "original"
+        selected_source = "original_nonapproved"
+
+    meta = {
+        "selected_source": selected_source,
+        "current_online_score": original_online,
+        "current_anatomy_score": original_anatomy,
+        "current_blended_score": original_blended,
+        "best_online_score": best_online,
+        "best_anatomy_score": best_anatomy,
+        "best_blended_score": best_blended,
+        "nonapproved_online_gain_ok": bool(online_gain_ok),
+        "nonapproved_anatomy_gain_ok": bool(anatomy_gain_ok),
+        "nonapproved_blended_gain_ok": bool(blended_gain_ok),
+        "nonapproved_policy": "anatomy_priority",
+    }
+    return selected_mask, saved_mask_type, meta
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -285,7 +673,6 @@ def _prepare_output_dirs(target_dir: Path) -> Dict[str, Path]:
         "repaired_labels": target_dir / "repair" / "repaired_labels",
         "artifacts": target_dir / "artifacts",
         "artifacts_atlas": target_dir / "artifacts" / "atlas",
-        "artifacts_refs4": target_dir / "artifacts" / "triage_4way_collections_gold",
         "artifacts_models": target_dir / "artifacts" / "models",
         "artifacts_repair_kb": target_dir / "artifacts" / "repair_kb",
         "artifacts_configs": target_dir / "artifacts" / "config",
@@ -391,196 +778,6 @@ def _materialize_overlay_for_stem(
         return ""
 
 
-def _build_four_way_ref_artifacts_from_curated(
-    source_root: Path,
-    all_frames_dir: Path,
-    refs4_artifact_dir: Path,
-    known_stems: List[str],
-    copy_mode: str = "symlink",
-    good_low_dice_max: float = 0.93,
-    bad_high_dice_min: float = 0.90,
-) -> Dict[str, Any]:
-    overlays_dir = refs4_artifact_dir / "overlays"
-    categories_root = refs4_artifact_dir / "categories"
-    for name in ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"]:
-        (categories_root / name).mkdir(parents=True, exist_ok=True)
-
-    rows: List[Dict[str, Any]] = []
-    unresolved: List[str] = []
-    category_counter: Counter[str] = Counter()
-
-    def _cat_from_label(label: str, mean_dice: float) -> str:
-        if label == "good":
-            if _is_finite(mean_dice) and mean_dice < good_low_dice_max:
-                return "02_good_low_dice"
-            return "01_good"
-        if _is_finite(mean_dice) and mean_dice > bad_high_dice_min:
-            return "03_bad_high_dice"
-        return "04_bad"
-
-    for folder_name, gold_label in [("best_cases", "good"), ("worst_cases", "bad")]:
-        folder = source_root / folder_name
-        if not folder.is_dir():
-            continue
-        for item in sorted(folder.iterdir()):
-            if not item.is_file():
-                continue
-            stem = _match_stem_from_filename(item.name, known_stems)
-            if stem is None:
-                unresolved.append(str(item))
-                continue
-
-            mean_dice = _extract_dice_prefix(item.name)
-            category = _cat_from_label(gold_label, mean_dice)
-            issue_type = _parse_issue_from_curated_filename(item.name)
-            overlay_path = _materialize_overlay_for_stem(
-                stem=stem,
-                source_root=source_root,
-                all_frames_dir=all_frames_dir,
-                overlays_dir=overlays_dir,
-                copy_mode=copy_mode,
-            )
-            if not overlay_path:
-                unresolved.append(str(item))
-                continue
-            cat_overlay = categories_root / category / f"{stem}_overlay.png"
-            _safe_link_or_copy(Path(overlay_path), cat_overlay, copy_mode=copy_mode)
-
-            view = _infer_view_from_stem(stem)
-            rows.append(
-                {
-                    "stem": stem,
-                    "category": category,
-                    "gold_label": gold_label,
-                    "issue_type": issue_type,
-                    "mean_dice": float(mean_dice) if _is_finite(mean_dice) else float("nan"),
-                    "was_disc_c2": bool("disc" in issue_type.lower()),
-                    "view": view,
-                    "img_path": str(all_frames_dir / f"{stem}_img.png"),
-                    "pred_path": str(all_frames_dir / f"{stem}_pred.png"),
-                    "gt_path": str(all_frames_dir / f"{stem}_gt.png"),
-                    "overlay_path": str(overlay_path),
-                    "category_overlay_path": str(cat_overlay),
-                }
-            )
-            category_counter[category] += 1
-
-    manifest_path = refs4_artifact_dir / "triage_4way_manifest.csv"
-    summary_path = refs4_artifact_dir / "triage_4way_summary.csv"
-    df = pd.DataFrame(rows)
-    df.to_csv(manifest_path, index=False)
-
-    if not df.empty:
-        summary = (
-            df.groupby("category", dropna=False)["stem"]
-            .count()
-            .reset_index()
-            .rename(columns={"stem": "n"})
-            .sort_values("category")
-        )
-    else:
-        summary = pd.DataFrame(columns=["category", "n"])
-    summary.to_csv(summary_path, index=False)
-
-    return {
-        "generated_manifest": True,
-        "manifest_path": str(manifest_path),
-        "summary_path": str(summary_path),
-        "n_rows": int(len(df)),
-        "category_counts": {k: int(v) for k, v in sorted(category_counter.items())},
-        "unresolved_files": unresolved,
-    }
-
-
-def _prepare_four_way_ref_artifacts(
-    source_root: Path,
-    all_frames_dir: Path,
-    known_stems: List[str],
-    refs4_artifact_dir: Path,
-    copy_mode: str = "symlink",
-    build_mode: str = "build_if_missing",
-    good_low_dice_max: float = 0.93,
-    bad_high_dice_min: float = 0.90,
-) -> Dict[str, Any]:
-    """
-    Prepare 4-way reference folders under artifacts.
-    Priority:
-      1) copy/symlink existing source_root/triage_4way_collections_gold
-      2) if missing (or forced), generate from best_cases/worst_cases
-      3) fallback: create empty 4-category folder skeleton.
-    """
-    refs4_artifact_dir.mkdir(parents=True, exist_ok=True)
-    src = source_root / "triage_4way_collections_gold"
-    used_existing = False
-    generated = False
-    generated_info: Dict[str, Any] = {}
-
-    # Clean previous contents for deterministic reruns.
-    _clear_dir(refs4_artifact_dir)
-
-    src_manifest = src / "triage_4way_manifest.csv"
-    can_reuse_existing = src.exists() and src.is_dir() and src_manifest.exists()
-
-    if build_mode in {"reuse", "build_if_missing"} and can_reuse_existing:
-        used_existing = True
-        if copy_mode == "copy":
-            shutil.copytree(src, refs4_artifact_dir, dirs_exist_ok=True)
-        else:
-            # Symlink all first-level children for lightweight artifact materialization.
-            for child in src.iterdir():
-                dst = refs4_artifact_dir / child.name
-                _safe_link_or_copy(child, dst, copy_mode=copy_mode)
-
-    need_generate = build_mode == "rebuild" or (
-        build_mode == "build_if_missing" and not used_existing
-    )
-    if need_generate:
-        generated_info = _build_four_way_ref_artifacts_from_curated(
-            source_root=source_root,
-            all_frames_dir=all_frames_dir,
-            refs4_artifact_dir=refs4_artifact_dir,
-            known_stems=known_stems,
-            copy_mode=copy_mode,
-            good_low_dice_max=good_low_dice_max,
-            bad_high_dice_min=bad_high_dice_min,
-        )
-        generated = bool(generated_info.get("n_rows", 0) > 0)
-
-    categories_root = refs4_artifact_dir / "categories"
-    for name in ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"]:
-        (categories_root / name).mkdir(parents=True, exist_ok=True)
-
-    manifest_path = refs4_artifact_dir / "triage_4way_manifest.csv"
-    if not manifest_path.exists():
-        pd.DataFrame(
-            columns=[
-                "stem",
-                "category",
-                "gold_label",
-                "issue_type",
-                "mean_dice",
-                "was_disc_c2",
-                "view",
-                "img_path",
-                "pred_path",
-                "gt_path",
-                "overlay_path",
-                "category_overlay_path",
-            ]
-        ).to_csv(manifest_path, index=False)
-
-    return {
-        "path": str(refs4_artifact_dir),
-        "categories_root": str(categories_root),
-        "used_existing_collections": used_existing,
-        "generated_from_curated": generated,
-        "generated_info": generated_info,
-        "build_mode": build_mode,
-        "copy_mode": copy_mode,
-        "manifest_path": str(manifest_path),
-    }
-
-
 def _repair_kb_counts(kb_dir: Path) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for cat in ["improved", "degraded", "neutral"]:
@@ -614,41 +811,276 @@ def _sanitize_mask(mask: Any) -> Optional[np.ndarray]:
     return out
 
 
-def _select_repair_kb_stems(
-    cases: List[Any],
-    curated_labels: Dict[str, str],
-    max_cases: int,
-) -> List[str]:
-    by_stem = {c.stem: c for c in cases}
-    curated_bad = [
-        s for s, lab in curated_labels.items() if lab == "needs_fix" and s in by_stem and by_stem[s].gt_path
-    ]
-    if curated_bad:
-        return sorted(curated_bad)[:max(1, max_cases)]
+def _normalize_issue_key(issue: Any) -> str:
+    token = re.sub(r"[^a-z0-9_]+", "_", str(issue or "").strip().lower())
+    token = re.sub(r"_+", "_", token).strip("_")
+    return token
 
-    scored: List[Tuple[float, str]] = []
+
+def _collect_case_dice_scores(cases: List[Any]) -> Dict[str, float]:
+    scores: Dict[str, float] = {}
     for ctx in cases:
         if not ctx.gt_path or not os.path.exists(ctx.gt_path):
             continue
         try:
             d = _compute_dice(ctx.mask, ctx.gt_path)["Dice_Mean"]
             if _is_finite(d):
-                scored.append((float(d), ctx.stem))
+                scores[ctx.stem] = float(d)
         except Exception:
             continue
-    scored.sort(key=lambda x: x[0])
-    return [stem for _, stem in scored[: max(1, max_cases)]]
+    return scores
 
+
+def _select_repair_kb_stems(
+    cases: List[Any],
+    curated_labels: Dict[str, str],
+    max_cases: int,
+    min_dice: float = 0.70,
+    max_dice: float = 0.90,
+    dice_scores: Optional[Dict[str, float]] = None,
+) -> List[str]:
+    max_cases = max(1, int(max_cases))
+    by_stem = {c.stem: c for c in cases}
+    if dice_scores is None:
+        dice_scores = _collect_case_dice_scores(cases)
+
+    scored: List[Tuple[float, str]] = [
+        (float(d), stem) for stem, d in dice_scores.items() if stem in by_stem
+    ]
+    scored.sort(key=lambda x: x[0])
+
+    if not scored:
+        return []
+
+    curated_bad = {
+        s
+        for s, lab in curated_labels.items()
+        if lab == "needs_fix" and s in by_stem and by_stem[s].gt_path
+    }
+    banded = [(d, stem) for d, stem in scored if float(min_dice) < d < float(max_dice)]
+
+    if banded:
+        selected: List[str] = []
+        banded_curated = [(d, stem) for d, stem in banded if stem in curated_bad]
+        selected.extend([stem for _, stem in banded_curated[:max_cases]])
+        if len(selected) < max_cases:
+            for _d, stem in banded:
+                if stem in selected:
+                    continue
+                selected.append(stem)
+                if len(selected) >= max_cases:
+                    break
+        return selected[:max_cases]
+
+    curated_scored = [(d, stem) for d, stem in scored if stem in curated_bad]
+    if curated_scored:
+        return [stem for _, stem in curated_scored[:max_cases]]
+
+    return [stem for _, stem in scored[:max_cases]]
+
+
+def _infer_case_issues_for_repair_kb(ctx: Any, diagnosis_agent: DiagnosisAgent) -> List[str]:
+    issues: List[str] = []
+    try:
+        feats = extract_quality_features(ctx.mask, ctx.image, ctx.view_type)
+        rule_diags = diagnosis_agent._diagnose_rules(
+            ctx.mask,
+            feats,
+            ctx.view_type,
+            triage_issues=["lowdice"],
+            neighbor_masks=ctx.neighbor_masks,
+        )
+        for d in rule_diags:
+            issue = _normalize_issue_key(getattr(d, "issue", ""))
+            if issue:
+                issues.append(issue)
+    except Exception:
+        issues = []
+
+    if not issues:
+        return ["generic_quality_issue"]
+
+    dedup: List[str] = []
+    seen = set()
+    for it in issues:
+        if it in seen:
+            continue
+        seen.add(it)
+        dedup.append(it)
+    return dedup
+
+
+def _new_op_stat_bucket() -> Dict[str, Any]:
+    return {
+        "trials": 0,
+        "improved": 0,
+        "degraded": 0,
+        "neutral": 0,
+        "delta_sum": 0.0,
+        "deltas": [],
+    }
+
+
+def _accumulate_issue_op_trial(
+    collector: Dict[str, Dict[str, Dict[str, Any]]],
+    issue: str,
+    op_name: str,
+    delta: float,
+    category: str,
+) -> None:
+    issue_key = _normalize_issue_key(issue)
+    if not issue_key:
+        return
+    op_key = str(op_name).strip()
+    if not op_key:
+        return
+    by_op = collector.setdefault(issue_key, {})
+    row = by_op.setdefault(op_key, _new_op_stat_bucket())
+    row["trials"] += 1
+    row["delta_sum"] += float(delta)
+    row["deltas"].append(float(delta))
+    if category in {"improved", "degraded", "neutral"}:
+        row[category] += 1
+
+
+def _finalize_issue_op_rankings(
+    collector: Dict[str, Dict[str, Dict[str, Any]]],
+    top_k: int = 12,
+) -> Dict[str, Dict[str, Any]]:
+    finalized: Dict[str, Dict[str, Any]] = {}
+    for issue, op_rows in collector.items():
+        ranked: List[Dict[str, Any]] = []
+        for op_name, row in op_rows.items():
+            trials = int(row.get("trials", 0))
+            if trials <= 0:
+                continue
+            deltas = row.get("deltas", [])
+            mean_delta = float(row.get("delta_sum", 0.0)) / float(trials)
+            median_delta = float(np.median(deltas)) if deltas else mean_delta
+            improved = int(row.get("improved", 0))
+            degraded = int(row.get("degraded", 0))
+            neutral = int(row.get("neutral", 0))
+            ranked.append(
+                {
+                    "op": op_name,
+                    "support": trials,
+                    "mean_delta": mean_delta,
+                    "median_delta": median_delta,
+                    "improved_count": improved,
+                    "degraded_count": degraded,
+                    "neutral_count": neutral,
+                    "improved_rate": float(improved) / float(trials),
+                    "degraded_rate": float(degraded) / float(trials),
+                    "neutral_rate": float(neutral) / float(trials),
+                }
+            )
+        ranked.sort(
+            key=lambda r: (
+                -float(r["mean_delta"]),
+                -float(r["improved_rate"]),
+                float(r["degraded_rate"]),
+                -int(r["support"]),
+                str(r["op"]),
+            )
+        )
+        finalized[issue] = {
+            "ops": ranked[: max(1, int(top_k))],
+            "n_ops_total": int(len(ranked)),
+            "n_trials_total": int(sum(int(x["support"]) for x in ranked)),
+        }
+    return finalized
+
+
+def _build_repair_kb_dataset_signature(
+    cases: List[Any],
+    curated_labels: Dict[str, str],
+    max_cases: int,
+    min_dice: float,
+    max_dice: float,
+) -> Dict[str, Any]:
+    dice_scores = _collect_case_dice_scores(cases)
+    selected_stems = _select_repair_kb_stems(
+        cases,
+        curated_labels,
+        max_cases=max_cases,
+        min_dice=min_dice,
+        max_dice=max_dice,
+        dice_scores=dice_scores,
+    )
+
+    by_stem = {c.stem: c for c in cases}
+    records: List[Dict[str, Any]] = []
+    for stem in selected_stems:
+        ctx = by_stem.get(stem)
+        if ctx is None:
+            continue
+        row: Dict[str, Any] = {
+            "stem": stem,
+            "dice": round(float(dice_scores[stem]), 6) if stem in dice_scores else None,
+        }
+        for key, path_str in [("pred", getattr(ctx, "pred_path", "")), ("gt", getattr(ctx, "gt_path", ""))]:
+            if not path_str:
+                continue
+            p = Path(path_str)
+            if not p.exists():
+                continue
+            st = p.stat()
+            row[f"{key}_size"] = int(st.st_size)
+            row[f"{key}_mtime_ns"] = int(st.st_mtime_ns)
+        records.append(row)
+
+    payload = {
+        "schema_version": 1,
+        "case_count": int(len(cases)),
+        "gt_case_count": int(len(dice_scores)),
+        "max_cases": int(max_cases),
+        "min_dice": float(min_dice),
+        "max_dice": float(max_dice),
+        "selected_stems": [str(x) for x in selected_stems],
+        "selected_records": records,
+        "all_stems_sha16": hashlib.sha256(
+            "|".join(sorted(str(c.stem) for c in cases)).encode("utf-8")
+        ).hexdigest()[:16],
+    }
+    payload_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    signature = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    return {"signature": signature, "payload": payload}
+
+
+def _read_existing_repair_kb_signature(kb_dir: Path) -> Dict[str, Any]:
+    sig_path = kb_dir / "repair_kb_dataset_signature.json"
+    if not sig_path.exists():
+        return {}
+    try:
+        with sig_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_repair_kb_signature(kb_dir: Path, signature_info: Dict[str, Any]) -> None:
+    sig_path = kb_dir / "repair_kb_dataset_signature.json"
+    payload = {
+        "schema_version": 1,
+        "signature": str(signature_info.get("signature", "")),
+        "payload": signature_info.get("payload", {}),
+        "written_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    with sig_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 def _build_repair_kb_from_cases(
     cases: List[Any],
     curated_labels: Dict[str, str],
     kb_dir: Path,
     cfg: Dict[str, Any],
-    max_cases: int = 24,
+    max_cases: int = 10,
     max_ops: int = 18,
     improved_thr: float = 0.005,
     degraded_thr: float = -0.02,
+    min_dice: float = 0.70,
+    max_dice: float = 0.90,
     atlas: Optional[dict] = None,
 ) -> Dict[str, Any]:
     kb_dir.mkdir(parents=True, exist_ok=True)
@@ -656,10 +1088,23 @@ def _build_repair_kb_from_cases(
     for cat in ["improved", "degraded", "neutral"]:
         (kb_dir / cat).mkdir(parents=True, exist_ok=True)
 
-    selected_stems = _select_repair_kb_stems(cases, curated_labels, max_cases=max_cases)
+    dice_scores = _collect_case_dice_scores(cases)
+    selected_stems = _select_repair_kb_stems(
+        cases,
+        curated_labels,
+        max_cases=max_cases,
+        min_dice=min_dice,
+        max_dice=max_dice,
+        dice_scores=dice_scores,
+    )
     by_stem = {c.stem: c for c in cases}
     groups = group_and_link_neighbors(cases)
     del groups  # group_and_link_neighbors mutates case contexts with neighbor maps
+
+    # Rule-only diagnosis for case-level issue tags used by dynamic Planner KB.
+    diagnosis_agent = DiagnosisAgent(cfg=cfg, bus=MessageBus())
+    issue_op_acc: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    view_issue_op_acc: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = defaultdict(dict)
 
     op_priority = [
         "myo_bridge",
@@ -691,6 +1136,7 @@ def _build_repair_kb_from_cases(
         "saved_examples": 0,
         "skipped_cases": 0,
         "errors": 0,
+        "issue_stats_entries": 0,
     }
 
     for stem in selected_stems:
@@ -707,6 +1153,8 @@ def _build_repair_kb_from_cases(
                 build_stats["skipped_cases"] += 1
                 continue
             dice_before = float(dice_macro(before, gt)[0])
+            case_issues = _infer_case_issues_for_repair_kb(ctx, diagnosis_agent=diagnosis_agent)
+            view_key = _normalize_view_for_thresholds(ctx.view_type)
             sobel_pct = float(cfg.get("edge", {}).get("sobel_percentile", 85.0))
             E = sobel_edges(ctx.image, percentile=sobel_pct)
             vy = valve_plane_y(before)
@@ -756,6 +1204,12 @@ def _build_repair_kb_from_cases(
                     else:
                         cat = "neutral"
 
+                    _accumulate_issue_op_trial(issue_op_acc, "global", op_name, delta, cat)
+                    for issue in case_issues:
+                        _accumulate_issue_op_trial(issue_op_acc, issue, op_name, delta, cat)
+                        per_view_issue = view_issue_op_acc.setdefault(view_key, {})
+                        _accumulate_issue_op_trial(per_view_issue, issue, op_name, delta, cat)
+
                     safe_op = re.sub(r"[^A-Za-z0-9_.-]+", "_", op_name)
                     fname = f"{delta:+.4f}_{safe_op}_{stem}.png"
                     out_path = kb_dir / cat / fname
@@ -769,11 +1223,79 @@ def _build_repair_kb_from_cases(
             build_stats["errors"] += 1
             continue
 
+    all_issue_stats = _finalize_issue_op_rankings(issue_op_acc, top_k=12)
+    global_ops = all_issue_stats.get("global", {}).get("ops", [])
+    issue_stats = {
+        issue: payload
+        for issue, payload in all_issue_stats.items()
+        if issue != "global"
+    }
+    view_issue_stats: Dict[str, Any] = {}
+    for view_key, per_view_collector in view_issue_op_acc.items():
+        view_issue_stats[str(view_key)] = _finalize_issue_op_rankings(
+            per_view_collector, top_k=12
+        )
+
+    issue_stats_payload = {
+        "schema_version": 1,
+        "built_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "selection": {
+            "selected_stems": selected_stems,
+            "selected_case_count": int(len(selected_stems)),
+            "max_cases": int(max_cases),
+        },
+        "thresholds": {
+            "min_dice": float(min_dice),
+            "max_dice": float(max_dice),
+            "improved_thr": float(improved_thr),
+            "degraded_thr": float(degraded_thr),
+        },
+        "global_ops": global_ops,
+        "issue_stats": issue_stats,
+        "view_issue_stats": view_issue_stats,
+    }
+    with (kb_dir / "issue_op_stats.json").open("w", encoding="utf-8") as f:
+        json.dump(issue_stats_payload, f, ensure_ascii=False, indent=2)
+
+    issue_rows: List[Dict[str, Any]] = []
+    for issue, payload in issue_stats.items():
+        for rank, row in enumerate(payload.get("ops", []), start=1):
+            issue_rows.append(
+                {
+                    "view_type": "ANY",
+                    "issue": issue,
+                    "rank": int(rank),
+                    **row,
+                }
+            )
+    for view_key, per_view_payload in view_issue_stats.items():
+        for issue, payload in per_view_payload.items():
+            for rank, row in enumerate(payload.get("ops", []), start=1):
+                issue_rows.append(
+                    {
+                        "view_type": str(view_key),
+                        "issue": issue,
+                        "rank": int(rank),
+                        **row,
+                    }
+                )
+    if issue_rows:
+        pd.DataFrame(issue_rows).to_csv(kb_dir / "issue_op_stats.csv", index=False)
+
+    build_stats["issue_stats_entries"] = int(len(issue_rows))
     counts = _repair_kb_counts(kb_dir)
     build_info = {
         **build_stats,
         "counts": counts,
         "selected_stems": selected_stems,
+        "dice_scores_selected": {
+            stem: round(float(dice_scores.get(stem, float("nan"))), 6)
+            for stem in selected_stems
+            if stem in dice_scores
+        },
+        "min_dice": float(min_dice),
+        "max_dice": float(max_dice),
+        "issue_op_stats_path": str(kb_dir / "issue_op_stats.json"),
         "usable": _repair_kb_usable(kb_dir),
     }
     with (kb_dir / "repair_kb_build_summary.json").open("w", encoding="utf-8") as f:
@@ -787,10 +1309,12 @@ def _prepare_repair_kb(
     cases: List[Any],
     curated_labels: Dict[str, str],
     cfg: Dict[str, Any],
-    max_cases: int = 24,
+    max_cases: int = 10,
     max_ops: int = 18,
     improved_thr: float = 0.005,
     degraded_thr: float = -0.02,
+    min_dice: float = 0.70,
+    max_dice: float = 0.90,
     atlas: Optional[dict] = None,
     skip_if_exists: bool = False,
 ) -> Dict[str, Any]:
@@ -798,6 +1322,18 @@ def _prepare_repair_kb(
     existing_counts = _repair_kb_counts(kb_dir)
     has_any_existing = _repair_kb_has_any(kb_dir)
     has_existing = _repair_kb_usable(kb_dir)
+    current_signature = _build_repair_kb_dataset_signature(
+        cases=cases,
+        curated_labels=curated_labels,
+        max_cases=max_cases,
+        min_dice=min_dice,
+        max_dice=max_dice,
+    )
+    existing_signature_data = _read_existing_repair_kb_signature(kb_dir)
+    existing_signature = str(existing_signature_data.get("signature", ""))
+    signature_match = bool(existing_signature) and existing_signature == str(
+        current_signature.get("signature", "")
+    )
 
     info: Dict[str, Any] = {
         "mode": mode,
@@ -809,6 +1345,12 @@ def _prepare_repair_kb(
         "usable_after": has_existing,
         "has_any_before": has_any_existing,
         "skip_if_exists": bool(skip_if_exists),
+        "dataset_signature": str(current_signature.get("signature", "")),
+        "existing_dataset_signature": existing_signature,
+        "signature_match": bool(signature_match),
+        "dataset_changed": bool(has_any_existing and not signature_match),
+        "min_dice": float(min_dice),
+        "max_dice": float(max_dice),
     }
 
     if mode == "disable":
@@ -820,11 +1362,11 @@ def _prepare_repair_kb(
         return info
 
     if mode == "build_if_missing":
-        if skip_if_exists and has_any_existing:
+        if skip_if_exists and has_any_existing and signature_match:
             info["used_existing"] = True
             info["usable_after"] = has_existing
             return info
-        if has_existing:
+        if has_existing and signature_match:
             info["used_existing"] = True
             info["usable_after"] = True
             return info
@@ -838,12 +1380,16 @@ def _prepare_repair_kb(
         max_ops=max_ops,
         improved_thr=improved_thr,
         degraded_thr=degraded_thr,
+        min_dice=min_dice,
+        max_dice=max_dice,
         atlas=atlas,
     )
+    _write_repair_kb_signature(kb_dir, current_signature)
     info["built"] = True
     info["build_info"] = build_info
     info["counts_after"] = _repair_kb_counts(kb_dir)
     info["usable_after"] = _repair_kb_usable(kb_dir)
+    info["signature_match_after_build"] = True
     return info
 
 
@@ -1188,7 +1734,9 @@ def _build_local_atlas_for_case(
     donor_stems: List[str] = []
 
     for c in donors:
-        m = c.current_mask if c.current_mask is not None else (c.original_mask if c.original_mask is not None else c.mask)
+        # Keep donor atlas stable across batch execution: always prefer
+        # original prediction instead of progressively repaired masks.
+        m = c.original_mask if c.original_mask is not None else c.mask
         if m is None:
             continue
         masks.append(m)
@@ -1231,6 +1779,7 @@ def _run_triage_stage(
     for ctx in tqdm(cases, desc="Stage1 Triage"):
         t0 = time.time()
         ctx.output_dir = str(triage_debug_dir)
+        triage_agent.reset_memory()
         bus.register_case(ctx)
 
         try:
@@ -1276,6 +1825,12 @@ def _run_triage_stage(
             }
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _reset_agents_memory(agents: Dict[str, Any]) -> None:
+    for agent in agents.values():
+        if hasattr(agent, "reset_memory"):
+            agent.reset_memory()
 
 
 def _evaluate_triage_curated(
@@ -1380,6 +1935,7 @@ def _reset_case_for_repair(ctx: Any, repair_debug_dir: Path) -> None:
     ctx.verifier_approved = False
     ctx.verifier_feedback = ""
     ctx.last_verify_result = {}
+    ctx.knowledge_trace = []
     ctx.executor_high_risk_unlock = False
     ctx.executor_high_risk_unlock_reason = ""
     ctx.executor_candidate_search_used = False
@@ -1393,6 +1949,20 @@ def _reset_case_for_repair(ctx: Any, repair_debug_dir: Path) -> None:
     ctx.best_intermediate_reason = "initial prediction baseline"
     ctx.best_intermediate_ops = []
     ctx.best_intermediate_is_original = True
+    ctx.best_intermediate_online_score = float("nan")
+    ctx.best_intermediate_anatomy_score = float("nan")
+    baseline_anatomy = _safe_float(getattr(ctx, "anatomy_score_before", float("nan")))
+    if _is_finite(baseline_anatomy) and baseline_anatomy < 0.0:
+        baseline_anatomy = float("nan")
+    ctx.best_anatomy_intermediate_mask = baseline.copy() if baseline is not None else None
+    ctx.best_anatomy_intermediate_score = baseline_anatomy
+    ctx.best_anatomy_intermediate_delta = 0.0 if _is_finite(baseline_anatomy) else float("nan")
+    ctx.best_anatomy_intermediate_round = 0
+    ctx.best_anatomy_intermediate_verdict = "baseline_original"
+    ctx.best_anatomy_intermediate_reason = "initial prediction baseline"
+    ctx.best_anatomy_intermediate_ops = []
+    ctx.best_anatomy_intermediate_is_original = True
+    ctx.best_anatomy_intermediate_online_score = float("nan")
     ctx.output_dir = str(repair_debug_dir)
 
 
@@ -1429,6 +1999,9 @@ def _run_repair_stage(
     if not queue:
         return pd.DataFrame()
 
+    share_repair_to_neighbors = bool(
+        cfg.get("multi_agent", {}).get("share_repair_to_neighbors", False)
+    )
     atlas_cases = atlas_source_cases if atlas_source_cases is not None else cases
     groups = group_and_link_neighbors(atlas_cases)
     rows: List[Dict[str, Any]] = []
@@ -1437,6 +2010,7 @@ def _run_repair_stage(
     global_atlas = executor._atlas
 
     for ctx in tqdm(queue, desc="Stage2 Repair"):
+        _reset_agents_memory(agents)
         _reset_case_for_repair(ctx, repair_debug_dir)
         bus.register_case(ctx)
 
@@ -1467,24 +2041,31 @@ def _run_repair_stage(
 
         pre = _compute_dice(ctx.original_mask if ctx.original_mask is not None else ctx.mask, ctx.gt_path)
         verdict = coordinator.orchestrate_case(ctx, agents, max_rounds=max_rounds)
+        pick_meta: Dict[str, Any] = {
+            "selected_source": "n/a",
+            "current_online_score": float("nan"),
+            "current_anatomy_score": float("nan"),
+            "current_blended_score": float("nan"),
+            "best_online_score": float("nan"),
+            "best_anatomy_score": float("nan"),
+            "best_blended_score": float("nan"),
+        }
 
         if verdict == "approved" and ctx.current_mask is not None:
-            final_mask = ctx.current_mask.copy()
-            saved_mask_type = "repaired"
-        elif (
-            getattr(ctx, "best_intermediate_mask", None) is not None
-            and not bool(getattr(ctx, "best_intermediate_is_original", True))
-        ):
-            final_mask = ctx.best_intermediate_mask.copy()
-            saved_mask_type = "best_intermediate"
+            final_mask, saved_mask_type, pick_meta = _select_approved_final_mask(
+                ctx=ctx,
+                cfg=cfg,
+            )
         else:
-            fallback = ctx.original_mask if ctx.original_mask is not None else ctx.mask
-            final_mask = fallback.copy() if fallback is not None else None
-            saved_mask_type = "original"
+            final_mask, saved_mask_type, pick_meta = _select_nonapproved_final_mask(
+                ctx=ctx,
+                cfg=cfg,
+            )
 
         if final_mask is not None:
             ctx.current_mask = final_mask.copy()
-        _update_neighbor_masks_for_group(ctx, groups)
+        if share_repair_to_neighbors:
+            _update_neighbor_masks_for_group(ctx, groups)
         out_pred_path = repaired_labels_dir / f"{ctx.stem}_pred.png"
         if final_mask is not None:
             write_mask(str(out_pred_path), final_mask)
@@ -1516,6 +2097,9 @@ def _run_repair_stage(
         last_verify = getattr(ctx, "last_verify_result", {}) or {}
         last_cmp = last_verify.get("vlm_comparison", {}) or {}
         last_proxy = last_verify.get("proxy_consensus", {}) or {}
+        online_matched_ids = last_verify.get("online_matched_example_ids", [])
+        if not isinstance(online_matched_ids, list):
+            online_matched_ids = []
         row = {
             "Stem": ctx.stem,
             "FinalVerdict": verdict,
@@ -1539,6 +2123,43 @@ def _run_repair_stage(
                 ],
                 ensure_ascii=False,
             ),
+            "BestIntermediateOnlineScore": _safe_float(
+                getattr(ctx, "best_intermediate_online_score", float("nan"))
+            ),
+            "BestIntermediateAnatomyScore": _safe_float(
+                getattr(ctx, "best_intermediate_anatomy_score", float("nan"))
+            ),
+            "FinalPickSource": str(pick_meta.get("selected_source", "n/a")),
+            "FinalPickNonApprovedPolicy": str(
+                pick_meta.get("nonapproved_policy", "")
+            ),
+            "FinalPickCurrentOnlineScore": _safe_float(
+                pick_meta.get("current_online_score", float("nan"))
+            ),
+            "FinalPickCurrentAnatomyScore": _safe_float(
+                pick_meta.get("current_anatomy_score", float("nan"))
+            ),
+            "FinalPickCurrentBlendedScore": _safe_float(
+                pick_meta.get("current_blended_score", float("nan"))
+            ),
+            "FinalPickBestOnlineScore": _safe_float(
+                pick_meta.get("best_online_score", float("nan"))
+            ),
+            "FinalPickBestAnatomyScore": _safe_float(
+                pick_meta.get("best_anatomy_score", float("nan"))
+            ),
+            "FinalPickBestBlendedScore": _safe_float(
+                pick_meta.get("best_blended_score", float("nan"))
+            ),
+            "FinalPickNonApprovedOnlineGainOK": bool(
+                pick_meta.get("nonapproved_online_gain_ok", False)
+            ),
+            "FinalPickNonApprovedAnatomyGainOK": bool(
+                pick_meta.get("nonapproved_anatomy_gain_ok", False)
+            ),
+            "FinalPickNonApprovedBlendedGainOK": bool(
+                pick_meta.get("nonapproved_blended_gain_ok", False)
+            ),
             "AtlasMode": atlas_mode,
             "AtlasUsed": atlas_used,
             "AtlasPathUsed": atlas_path_used,
@@ -1551,9 +2172,11 @@ def _run_repair_stage(
             "AppliedOps": json.dumps([op.get("name", "") for op in ctx.applied_ops], ensure_ascii=False),
             "RoundsCompleted": int(getattr(ctx, "rounds_completed", 0)),
             "VerifyVerdict_Raw": str(last_verify.get("verdict", "")),
+            "VerifyScore_Raw": _safe_float(last_verify.get("score", float("nan"))),
             "VerifyConfidence_Raw": _safe_float(last_verify.get("confidence", float("nan"))),
             "VerifyCompareVerdict": str(last_cmp.get("verdict", "")),
             "VerifyCompareConfidence": _safe_float(last_cmp.get("confidence", float("nan"))),
+            "VerifyMatchedExampleIDs": json.dumps(online_matched_ids, ensure_ascii=False),
             "VerifyCompareReference": str(last_verify.get("comparison_reference", "")),
             "VerifyProxyVerdict": str(last_proxy.get("proxy_verdict", "")),
             "VerifyProxyScore": _safe_float(last_proxy.get("proxy_score", float("nan"))),
@@ -1561,6 +2184,24 @@ def _run_repair_stage(
             "VerifyConsensusScore": _safe_float(last_proxy.get("consensus_score", float("nan"))),
             "VerifyConsensusVerdict": str(last_proxy.get("consensus_verdict", "")),
             "VerifyUnlockApplied": bool(last_proxy.get("unlock_applied", False)),
+            "online_verdict": str(last_verify.get("online_verdict", "")),
+            "online_score": _safe_float(last_verify.get("online_score", float("nan"))),
+            "online_confidence": _safe_float(last_verify.get("confidence", float("nan"))),
+            "online_threshold_reject": _safe_float(
+                last_verify.get("online_threshold_reject", float("nan"))
+            ),
+            "online_threshold_approve": _safe_float(
+                last_verify.get("online_threshold_approve", float("nan"))
+            ),
+            "online_compare_verdict": str(last_cmp.get("verdict", "")),
+            "online_compare_confidence": _safe_float(last_cmp.get("confidence", float("nan"))),
+            "online_quality_label": str((last_verify.get("vlm_quality", {}) or {}).get("quality", "")),
+            "online_quality_score": _safe_float(
+                (last_verify.get("vlm_quality", {}) or {}).get("score", float("nan"))
+            ),
+            "online_matched_example_ids": json.dumps(online_matched_ids, ensure_ascii=False),
+            "online_prompt_strict_no_gt": bool(last_verify.get("strict_no_gt_online", False)),
+            "online_knowledge_trace": json.dumps(getattr(ctx, "knowledge_trace", []), ensure_ascii=False),
             "ExecHighRiskUnlock": bool(getattr(ctx, "executor_high_risk_unlock", False)),
             "ExecHighRiskUnlockReason": str(
                 getattr(ctx, "executor_high_risk_unlock_reason", "")
@@ -1574,6 +2215,18 @@ def _run_repair_stage(
             "ExecCandidateSearchScore": _safe_float(
                 getattr(ctx, "executor_candidate_search_score", float("nan"))
             ),
+            "offline_oracle_pre_dice_mean": pre["Dice_Mean"],
+            "offline_oracle_pre_dice_rv": pre["Dice_RV"],
+            "offline_oracle_pre_dice_myo": pre["Dice_Myo"],
+            "offline_oracle_pre_dice_lv": pre["Dice_LV"],
+            "offline_oracle_post_dice_mean": post["Dice_Mean"],
+            "offline_oracle_post_dice_rv": post["Dice_RV"],
+            "offline_oracle_post_dice_myo": post["Dice_Myo"],
+            "offline_oracle_post_dice_lv": post["Dice_LV"],
+            "offline_oracle_dice_delta_mean": delta["DiceDelta_Mean"],
+            "offline_oracle_dice_delta_rv": delta["DiceDelta_RV"],
+            "offline_oracle_dice_delta_myo": delta["DiceDelta_Myo"],
+            "offline_oracle_dice_delta_lv": delta["DiceDelta_LV"],
             "PreDice_Mean": pre["Dice_Mean"],
             "PreDice_RV": pre["Dice_RV"],
             "PreDice_Myo": pre["Dice_Myo"],
@@ -1608,6 +2261,9 @@ def _summarize_repair(repair_df: pd.DataFrame) -> Dict[str, Any]:
         "n_cases": int(len(repair_df)),
         "n_valid_dice": int(len(valid)),
         "n_approved": int((repair_df["FinalVerdict"] == "approved").sum()),
+        "n_needs_more_work": int((repair_df["FinalVerdict"] == "needs_more_work").sum()),
+        "n_rejected": int((repair_df["FinalVerdict"] == "rejected").sum()),
+        "n_gave_up": int((repair_df["FinalVerdict"] == "gave_up").sum()),
         "n_saved_repaired": int(
             repair_df["SavedMaskType"].isin(["repaired", "best_intermediate"]).sum()
         ),
@@ -1620,6 +2276,22 @@ def _summarize_repair(repair_df: pd.DataFrame) -> Dict[str, Any]:
         "unchanged_count": int((delta == 0).sum()),
         "improved_ratio": float(np.mean(delta > 0)),
     }
+
+    approved = valid[valid["FinalVerdict"] == "approved"].copy()
+    if not approved.empty:
+        approved_delta = approved["PostDice_Mean"].astype(float) - approved["PreDice_Mean"].astype(float)
+        summary["approved_degradation_rate"] = float((approved_delta < 0).mean())
+        summary["approved_delta_dice_mean"] = float(np.mean(approved_delta))
+    else:
+        summary["approved_degradation_rate"] = float("nan")
+        summary["approved_delta_dice_mean"] = float("nan")
+
+    if "online_score" in valid.columns:
+        score_bins_df = _score_bin_table(valid, score_col="online_score")
+        if not score_bins_df.empty:
+            summary["gain_distribution_by_score_bin"] = score_bins_df.to_dict(orient="records")
+        else:
+            summary["gain_distribution_by_score_bin"] = []
 
     try:
         stat = ttest_rel(post, pre, alternative="greater")
@@ -2031,6 +2703,15 @@ def parse_args() -> argparse.Namespace:
         help="Run Stage-1 triage + metrics + figures only",
     )
     parser.add_argument(
+        "--triage_csv",
+        default=None,
+        help=(
+            "Path to an existing triage_results.csv from a previous run. "
+            "When provided, Stage-1 triage is skipped and repair runs directly "
+            "using the supplied triage results."
+        ),
+    )
+    parser.add_argument(
         "--atlas_mode",
         choices=["rebuild_global", "reuse_global", "disable_global", "local_per_sample"],
         default="rebuild_global",
@@ -2048,16 +2729,10 @@ def parse_args() -> argparse.Namespace:
         help="Override agents.triage.vlm_n_refs",
     )
     parser.add_argument(
-        "--triage_four_way_refs",
+        "--strict_no_gt_online",
         type=str,
         default=None,
-        help="Override agents.triage.vlm_four_way_refs (true/false)",
-    )
-    parser.add_argument(
-        "--triage_ref_categories",
-        type=str,
-        default=None,
-        help="Comma-separated triage ref categories, e.g. 01_good,02_good_low_dice,03_bad_high_dice,04_bad",
+        help="Strictly isolate online decision flow from GT/oracle metrics (true/false).",
     )
     parser.add_argument(
         "--llm_enabled",
@@ -2085,32 +2760,8 @@ def parse_args() -> argparse.Namespace:
             "One-switch knowledge policy. "
             "auto_skip: generate once and skip if exists; "
             "force_rebuild: rebuild all knowledge each run; "
-            "custom: use detailed refs4/quality/repair mode args."
+            "custom: use detailed quality/repair mode args."
         ),
-    )
-    parser.add_argument(
-        "--refs4_build_mode",
-        choices=["reuse", "build_if_missing", "rebuild"],
-        default="build_if_missing",
-        help="4-way triage refs mode: reuse existing, build if missing, or force rebuild from curated folders",
-    )
-    parser.add_argument(
-        "--refs4_good_low_dice_max",
-        type=float,
-        default=0.93,
-        help="Dice upper bound for 02_good_low_dice when auto-building 4-way refs",
-    )
-    parser.add_argument(
-        "--refs4_bad_high_dice_min",
-        type=float,
-        default=0.90,
-        help="Dice lower bound for 03_bad_high_dice when auto-building 4-way refs",
-    )
-    parser.add_argument(
-        "--refs_copy_mode",
-        choices=["symlink", "copy"],
-        default="symlink",
-        help="How to materialize 4-way ref folders into artifacts",
     )
     parser.add_argument(
         "--quality_model_mode",
@@ -2166,8 +2817,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repair_kb_max_cases",
         type=int,
-        default=24,
+        default=10,
         help="Max number of cases used to auto-build repair KB",
+    )
+    parser.add_argument(
+        "--repair_kb_min_dice",
+        type=float,
+        default=0.70,
+        help="Lower Dice bound (exclusive) when selecting cases for repair KB build",
+    )
+    parser.add_argument(
+        "--repair_kb_max_dice",
+        type=float,
+        default=0.90,
+        help="Upper Dice bound (exclusive) when selecting cases for repair KB build",
     )
     parser.add_argument(
         "--repair_kb_max_ops",
@@ -2199,11 +2862,21 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Minimum Dice delta for top-improved visualization",
     )
+    parser.add_argument(
+        "--save_baseline_snapshot",
+        action="store_true",
+        help="Persist artifacts/runtime/baseline_metrics.json for this run.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if float(args.repair_kb_min_dice) >= float(args.repair_kb_max_dice):
+        raise ValueError(
+            "repair_kb_min_dice must be smaller than repair_kb_max_dice "
+            f"(got {args.repair_kb_min_dice} >= {args.repair_kb_max_dice})"
+        )
     cfg_path = Path(args.config).resolve()
     source_root = Path(args.source_root).resolve()
     target_dir = Path(args.target_dir).resolve()
@@ -2214,20 +2887,17 @@ def main() -> None:
 
     llm_enabled = _parse_optional_bool(args.llm_enabled)
     vision_enabled = _parse_optional_bool(args.vision_enabled)
-    triage_four_way_refs = _parse_optional_bool(args.triage_four_way_refs)
+    strict_no_gt_online = _parse_optional_bool(args.strict_no_gt_online)
 
     # High-level knowledge policy (optional one-switch control).
-    effective_refs4_mode = args.refs4_build_mode
     effective_quality_mode = args.quality_model_mode
     effective_repair_kb_mode = args.repair_kb_mode
     repair_kb_skip_if_exists = False
     if args.knowledge_mode == "auto_skip":
-        effective_refs4_mode = "build_if_missing"
         effective_quality_mode = "train_if_missing"
         effective_repair_kb_mode = "build_if_missing"
         repair_kb_skip_if_exists = True
     elif args.knowledge_mode == "force_rebuild":
-        effective_refs4_mode = "rebuild"
         effective_quality_mode = "retrain"
         effective_repair_kb_mode = "rebuild"
         repair_kb_skip_if_exists = False
@@ -2243,7 +2913,6 @@ def main() -> None:
         artifacts_root = output_dirs["artifacts"]
     output_dirs["artifacts"] = artifacts_root
     output_dirs["artifacts_atlas"] = artifacts_root / "atlas"
-    output_dirs["artifacts_refs4"] = artifacts_root / "triage_4way_collections_gold"
     output_dirs["artifacts_models"] = artifacts_root / "models"
     output_dirs["artifacts_repair_kb"] = artifacts_root / "repair_kb"
     output_dirs["artifacts_configs"] = artifacts_root / "config"
@@ -2251,7 +2920,6 @@ def main() -> None:
     for p in [
         output_dirs["artifacts"],
         output_dirs["artifacts_atlas"],
-        output_dirs["artifacts_refs4"],
         output_dirs["artifacts_models"],
         output_dirs["artifacts_repair_kb"],
         output_dirs["artifacts_configs"],
@@ -2264,40 +2932,26 @@ def main() -> None:
         best_cases_dir, worst_cases_dir, known_stems
     )
 
-    # Materialize 4-way refs into artifacts and point VisualKnowledge loading there.
-    refs_info = _prepare_four_way_ref_artifacts(
-        source_root=source_root,
-        all_frames_dir=all_frames_dir,
-        known_stems=known_stems,
-        refs4_artifact_dir=output_dirs["artifacts_refs4"],
-        copy_mode=args.refs_copy_mode,
-        build_mode=effective_refs4_mode,
-        good_low_dice_max=float(args.refs4_good_low_dice_max),
-        bad_high_dice_min=float(args.refs4_bad_high_dice_min),
-    )
-    cfg["paths"]["visual_examples_dir"] = str(source_root)
-    manifest_ready = Path(refs_info.get("manifest_path", "")).exists()
-    if manifest_ready:
-        # Expose all visual resources from artifacts root so refs/best/worst/all_frames are consistent.
-        artifacts_visual_root = output_dirs["artifacts"]
-        for name in ["best_cases", "worst_cases", "all_frames_export", "single_panel_refs"]:
-            src = source_root / name
-            dst = artifacts_visual_root / name
-            if dst.exists() or dst.is_symlink():
-                if dst.is_dir() and not dst.is_symlink():
-                    shutil.rmtree(dst, ignore_errors=True)
+    # Expose all visual resources from artifacts root so best/worst/all_frames are consistent.
+    artifacts_visual_root = output_dirs["artifacts"]
+    for name in ["best_cases", "worst_cases", "all_frames_export", "single_panel_refs"]:
+        src = source_root / name
+        dst = artifacts_visual_root / name
+        if dst.exists() or dst.is_symlink():
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst, ignore_errors=True)
+            else:
+                dst.unlink()
+        if src.exists():
+            rel = os.path.relpath(src, artifacts_visual_root)
+            try:
+                dst.symlink_to(rel, target_is_directory=src.is_dir())
+            except OSError:
+                if src.is_dir():
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
                 else:
-                    dst.unlink()
-            if src.exists():
-                rel = os.path.relpath(src, artifacts_visual_root)
-                try:
-                    dst.symlink_to(rel, target_is_directory=src.is_dir())
-                except OSError:
-                    if src.is_dir():
-                        shutil.copytree(src, dst, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(src, dst)
-        cfg["paths"]["visual_examples_dir"] = str(artifacts_visual_root)
+                    shutil.copy2(src, dst)
+    cfg["paths"]["visual_examples_dir"] = str(artifacts_visual_root)
 
     # Discover all cases once (reuse for prep + experiment filtering).
     all_cases_full = discover_cases(str(all_frames_dir), str(all_frames_dir), gt_dir=str(all_frames_dir))
@@ -2335,6 +2989,8 @@ def main() -> None:
         max_ops=int(args.repair_kb_max_ops),
         improved_thr=float(args.repair_kb_improved_thr),
         degraded_thr=float(args.repair_kb_degraded_thr),
+        min_dice=float(args.repair_kb_min_dice),
+        max_dice=float(args.repair_kb_max_dice),
         atlas=None,
         skip_if_exists=repair_kb_skip_if_exists,
     )
@@ -2348,10 +3004,36 @@ def main() -> None:
         effective_quality_mode != "disable" and bool(quality_info.get("exists_after", False))
     )
 
+    # Auto-build or reuse anatomy stats from current dataset predictions.
+    _anatomy_stats_pkl = output_dirs["artifacts_models"] / "anatomy_stats.pkl"
+    if _anatomy_stats_pkl.exists():
+        print(f"Anatomy stats: reusing cached {_anatomy_stats_pkl}")
+    else:
+        from cardiac_agent_postproc.anatomy_score import (
+            fit_source_stats as _fit_anatomy,
+            save_stats as _save_anatomy,
+        )
+        _anatomy_dict = {}
+        for _view in ["2c", "3c", "4c"]:
+            try:
+                _s = _fit_anatomy(str(all_frames_dir), view_type=_view)
+                _anatomy_dict[_view] = _s
+                print(f"  Anatomy stats {_view}: n={_s.n_samples}")
+            except ValueError as _e:
+                print(f"  Anatomy stats {_view}: insufficient samples — {_e}")
+        if _anatomy_dict:
+            _save_anatomy(_anatomy_dict, str(_anatomy_stats_pkl))
+            print(f"Anatomy stats saved → {_anatomy_stats_pkl}")
+        else:
+            _anatomy_stats_pkl = None
+    if _anatomy_stats_pkl is not None:
+        cfg["anatomy_stats_path"] = str(_anatomy_stats_pkl)
+
     cfg.setdefault("llm", {})
     cfg.setdefault("vision_guardrail", {})
     cfg.setdefault("triage", {})
     cfg.setdefault("diagnosis", {})
+    cfg.setdefault("verifier", {})
     cfg.setdefault("agents", {})
     cfg["agents"].setdefault("triage", {})
     cfg["agents"]["triage"].setdefault("quality_model", {})
@@ -2360,6 +3042,22 @@ def main() -> None:
     cfg["agents"].setdefault("diagnosis", {})
     cfg["agents"].setdefault("planner", {})
     cfg["agents"].setdefault("verifier", {})
+    cfg.setdefault("multi_agent", {})
+    cfg["verifier"].setdefault("thresholds", {})
+    cfg["verifier"]["thresholds"].setdefault("reject", 45.0)
+    cfg["verifier"]["thresholds"].setdefault("approve", 65.0)
+    cfg["verifier"]["thresholds"].setdefault("per_view", {})
+    cfg["verifier"]["thresholds"]["per_view"].setdefault(
+        "2CH", {"reject": 43.0, "approve": 63.0}
+    )
+    cfg["verifier"]["thresholds"]["per_view"].setdefault(
+        "3CH", {"reject": 45.0, "approve": 65.0}
+    )
+    cfg["verifier"]["thresholds"]["per_view"].setdefault(
+        "4CH", {"reject": 47.0, "approve": 67.0}
+    )
+    cfg.setdefault("agents", {}).setdefault("verifier", {})
+    cfg["agents"]["verifier"].setdefault("knowledge_top_k", 2)
 
     if llm_enabled is not None:
         cfg["llm"]["enabled"] = bool(llm_enabled)
@@ -2370,12 +3068,11 @@ def main() -> None:
         cfg["agents"]["diagnosis"]["vlm_enabled"] = bool(vision_enabled)
     if args.triage_n_refs is not None:
         cfg["agents"]["triage"]["vlm_n_refs"] = int(args.triage_n_refs)
-    if triage_four_way_refs is not None:
-        cfg["agents"]["triage"]["vlm_four_way_refs"] = bool(triage_four_way_refs)
-    if args.triage_ref_categories:
-        categories = [x.strip() for x in args.triage_ref_categories.split(",") if x.strip()]
-        if categories:
-            cfg["agents"]["triage"]["vlm_ref_categories"] = categories
+    if strict_no_gt_online is not None:
+        cfg["multi_agent"]["strict_no_gt_online"] = bool(strict_no_gt_online)
+    else:
+        cfg["multi_agent"].setdefault("strict_no_gt_online", False)
+    verifier_thresholds = _verifier_thresholds_snapshot(cfg)
 
     # Persist resolved runtime config for reproducibility.
     resolved_cfg_path = output_dirs["artifacts_configs"] / "resolved_runtime_config.yaml"
@@ -2401,18 +3098,17 @@ def main() -> None:
     )
     print(
         "Knowledge policy: "
-        f"mode={args.knowledge_mode}, refs4={effective_refs4_mode}, "
+        f"mode={args.knowledge_mode}, "
         f"quality={effective_quality_mode}, repair_kb={effective_repair_kb_mode}, "
         f"repair_skip_if_exists={repair_kb_skip_if_exists}"
     )
+    print(
+        "Verifier online policy: "
+        f"strict_no_gt_online={cfg.get('multi_agent', {}).get('strict_no_gt_online', False)}, "
+        f"thresholds={verifier_thresholds}"
+    )
     if unresolved_files:
         print(f"Warning: {len(unresolved_files)} curated files could not map to stems.")
-    print(
-        "4-way refs: "
-        f"existing={refs_info.get('used_existing_collections', False)}, "
-        f"generated={refs_info.get('generated_from_curated', False)}, "
-        f"manifest={refs_info.get('manifest_path', '')}"
-    )
     print(
         "Quality model: "
         f"path={quality_model_path}, "
@@ -2428,7 +3124,9 @@ def main() -> None:
         f"path={repair_kb_dir}, "
         f"built={repair_kb_info.get('built', False)}, "
         f"used_existing={repair_kb_info.get('used_existing', False)}, "
-        f"usable={repair_kb_info.get('usable_after', False)}"
+        f"usable={repair_kb_info.get('usable_after', False)}, "
+        f"dice_band=({args.repair_kb_min_dice:.2f},{args.repair_kb_max_dice:.2f}), "
+        f"signature_match={repair_kb_info.get('signature_match', False)}"
     )
 
     bus, agents = _build_agent_stack(
@@ -2444,15 +3142,23 @@ def main() -> None:
     print(f"Cases to process: {len(all_cases)}")
 
     # Stage 1: Triage + metrics.
-    triage_df = _run_triage_stage(
-        cases=all_cases,
-        triage_agent=agents["triage"],
-        bus=bus,
-        triage_debug_dir=output_dirs["triage_debug"],
-    )
     triage_csv = output_dirs["triage"] / "triage_results.csv"
-    triage_df.to_csv(triage_csv, index=False)
-    print(f"Saved triage results: {triage_csv}")
+    if args.triage_csv:
+        # Skip triage and reuse supplied CSV
+        print(f"[Stage 1] Skipping triage — loading existing results from: {args.triage_csv}")
+        triage_df = pd.read_csv(args.triage_csv)
+        import shutil as _shutil
+        _shutil.copy(args.triage_csv, triage_csv)
+        print(f"Copied triage results to: {triage_csv}")
+    else:
+        triage_df = _run_triage_stage(
+            cases=all_cases,
+            triage_agent=agents["triage"],
+            bus=bus,
+            triage_debug_dir=output_dirs["triage_debug"],
+        )
+        triage_df.to_csv(triage_csv, index=False)
+        print(f"Saved triage results: {triage_csv}")
 
     eval_rows, triage_metrics = _evaluate_triage_curated(triage_df, curated_labels)
     eval_csv = output_dirs["triage"] / "triage_curated_eval_rows.csv"
@@ -2469,6 +3175,10 @@ def main() -> None:
     # Stage 2: Repair on need-fix set.
     repair_df = pd.DataFrame()
     repair_summary: Dict[str, Any] = {"n_cases": 0, "skipped": True}
+    verifier_calib_csv = output_dirs["summary"] / "verifier_score_calibration.csv"
+    verifier_thresh_json = output_dirs["summary"] / "verifier_threshold_recommendation.json"
+    verifier_calib_df = pd.DataFrame()
+    verifier_thresh_reco: Dict[str, Any] = {}
     if not args.skip_repair:
         repair_stems = _build_repair_queue(triage_df, curated_labels, mode=args.repair_subset)
         print(f"Repair subset ({args.repair_subset}): {len(repair_stems)} stems")
@@ -2491,6 +3201,33 @@ def main() -> None:
         repair_summary_csv = output_dirs["repair"] / "repair_summary_metrics.csv"
         _save_metrics_dict(repair_summary, repair_summary_csv)
         print(f"Saved repair results: {repair_csv}")
+
+        # Verifier score calibration artifacts.
+        verifier_calib_df = _score_bin_table(repair_df, score_col="online_score")
+        verifier_calib_df.to_csv(verifier_calib_csv, index=False)
+        verifier_thresh_reco = _recommend_thresholds_from_bins(
+            verifier_calib_df,
+            default_reject=float(verifier_thresholds.get("reject", 45.0)),
+            default_approve=float(verifier_thresholds.get("approve", 65.0)),
+        )
+        verifier_thresh_reco["thresholds_used"] = verifier_thresholds
+        verifier_thresh_reco["score_column"] = "online_score"
+        verifier_thresh_reco["calibration_csv"] = str(verifier_calib_csv)
+        with verifier_thresh_json.open("w", encoding="utf-8") as f:
+            json.dump(verifier_thresh_reco, f, ensure_ascii=False, indent=2)
+
+        # Optional baseline snapshot artifact for strict before/after comparability.
+        if args.save_baseline_snapshot:
+            baseline_payload = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "strict_no_gt_online": bool(cfg.get("multi_agent", {}).get("strict_no_gt_online", False)),
+                "repair_summary": repair_summary,
+                "verifier_thresholds": verifier_thresholds,
+            }
+            baseline_path = output_dirs["artifacts_runtime"] / "baseline_metrics.json"
+            with baseline_path.open("w", encoding="utf-8") as f:
+                json.dump(baseline_payload, f, ensure_ascii=False, indent=2)
+            print(f"Saved baseline snapshot: {baseline_path}")
 
     # Stage 3: MICCAI-style figures.
     figure_paths: Dict[str, Any] = {}
@@ -2540,9 +3277,17 @@ def main() -> None:
             "repair_subset_mode": args.repair_subset,
             "skip_repair": bool(args.skip_repair),
             "metrics": repair_summary,
+            "verifier_thresholds_used": verifier_thresholds,
+            "verifier_score_calibration_csv": str(verifier_calib_csv),
+            "verifier_threshold_recommendation_json": str(verifier_thresh_json),
+            "verifier_threshold_recommendation": verifier_thresh_reco,
+            "gain_distribution_by_score_bin": (
+                verifier_calib_df.to_dict(orient="records")
+                if not verifier_calib_df.empty
+                else []
+            ),
         },
         "preparation": {
-            "refs4": refs_info,
             "quality_model": quality_info,
             "repair_kb": repair_kb_info,
         },
@@ -2551,11 +3296,10 @@ def main() -> None:
             "atlas_path": str(atlas_path),
             "llm_enabled": cfg.get("llm", {}).get("enabled", True),
             "vision_enabled": cfg.get("vision_guardrail", {}).get("enabled", True),
+            "strict_no_gt_online": bool(cfg.get("multi_agent", {}).get("strict_no_gt_online", False)),
+            "verifier_thresholds": verifier_thresholds,
             "triage_n_refs": cfg.get("agents", {}).get("triage", {}).get("vlm_n_refs"),
-            "triage_four_way_refs": cfg.get("agents", {}).get("triage", {}).get("vlm_four_way_refs"),
-            "triage_ref_categories": cfg.get("agents", {}).get("triage", {}).get("vlm_ref_categories"),
             "knowledge_mode": args.knowledge_mode,
-            "refs4_build_mode": effective_refs4_mode,
             "quality_model_mode": effective_quality_mode,
             "quality_label_mode": args.quality_label_mode,
             "quality_model_path": str(quality_model_path),
@@ -2563,7 +3307,8 @@ def main() -> None:
             "repair_kb_skip_if_exists": repair_kb_skip_if_exists,
             "repair_kb_dir": str(repair_kb_dir),
             "artifacts_dir": str(output_dirs["artifacts"]),
-            "refs4_info": refs_info,
+            "save_baseline_snapshot": bool(args.save_baseline_snapshot),
+            "baseline_metrics_json": str(output_dirs["artifacts_runtime"] / "baseline_metrics.json"),
             "resolved_runtime_config": str(resolved_cfg_path),
             "runtime_args_json": str(runtime_args_path),
         },
@@ -2580,6 +3325,10 @@ def main() -> None:
     print(f"Atlas path: {atlas_path}")
     print(f"Quality model path: {quality_model_path}")
     print(f"Repair KB dir: {repair_kb_dir}")
+    print(f"Strict no-GT online: {cfg.get('multi_agent', {}).get('strict_no_gt_online', False)}")
+    print(f"Verifier thresholds: {verifier_thresholds}")
+    print(f"Verifier calibration CSV: {verifier_calib_csv}")
+    print(f"Verifier threshold recommendation: {verifier_thresh_json}")
     if not args.skip_repair:
         print(f"Repair cases: {repair_summary.get('n_cases', 0)}")
         print(f"Repair mean Dice delta: {repair_summary.get('delta_dice_mean', float('nan')):+.4f}")

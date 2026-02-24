@@ -112,7 +112,6 @@ shape_atlas:
   per_view_divisor: 15
   target_diag: 128
 solver:
-  atlas_builder_min_rqs: 80.0
   max_inner: 15
   max_outer: 10
   min_delta: 0.5
@@ -120,7 +119,6 @@ solver:
   patience: 10
   skip_good_rqs_threshold: 75.0
   stop_min_rqs: 90.0
-  stop_min_rqs_delta: 0.2
   stop_min_rqs_stagnant_rounds: 2
   topk_frac: 0.25
   topk_max: 200

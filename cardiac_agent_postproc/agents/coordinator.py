@@ -7,6 +7,7 @@ with dynamic re-routing when the Verifier rejects a fix.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, List, Optional
 
 from .base_agent import BaseAgent
@@ -97,6 +98,9 @@ class CoordinatorAgent(BaseAgent):
             self.log(f"  Triaged as GOOD — skip optimization")
             return "good"
 
+        # Load anatomy stats and compute no-GT baseline score for the original mask.
+        self._init_anatomy_baseline(ctx)
+
         # Initialize best-intermediate baseline (original prediction).
         if ctx.original_mask is not None and ctx.best_intermediate_mask is None:
             ctx.best_intermediate_mask = ctx.original_mask.copy()
@@ -106,6 +110,27 @@ class CoordinatorAgent(BaseAgent):
             ctx.best_intermediate_reason = "initial prediction baseline"
             ctx.best_intermediate_ops = []
             ctx.best_intermediate_is_original = True
+            ctx.best_intermediate_online_score = float("nan")
+            try:
+                ctx.best_intermediate_anatomy_score = float(ctx.anatomy_score_before)
+            except Exception:
+                ctx.best_intermediate_anatomy_score = float("nan")
+        if ctx.original_mask is not None and ctx.best_anatomy_intermediate_mask is None:
+            ctx.best_anatomy_intermediate_mask = ctx.original_mask.copy()
+            try:
+                baseline_anatomy = float(ctx.anatomy_score_before)
+            except Exception:
+                baseline_anatomy = float("nan")
+            if self._is_finite(baseline_anatomy) and baseline_anatomy < 0.0:
+                baseline_anatomy = float("nan")
+            ctx.best_anatomy_intermediate_score = baseline_anatomy
+            ctx.best_anatomy_intermediate_delta = 0.0
+            ctx.best_anatomy_intermediate_round = 0
+            ctx.best_anatomy_intermediate_verdict = "baseline_original"
+            ctx.best_anatomy_intermediate_reason = "initial prediction baseline"
+            ctx.best_anatomy_intermediate_ops = []
+            ctx.best_anatomy_intermediate_is_original = True
+            ctx.best_anatomy_intermediate_online_score = float("nan")
 
         # Step 2-5: Diagnosis → Plan → Execute → Verify loop
         max_rounds = max(1, int(max_rounds))
@@ -211,6 +236,11 @@ class CoordinatorAgent(BaseAgent):
                 verify_content = verify_msgs[-1].content
                 verdict = verify_content.get("verdict", "approve")
                 self._maybe_update_best_intermediate(ctx, verify_content, round_num)
+                self._maybe_update_best_anatomy_intermediate(
+                    ctx=ctx,
+                    verify_content=verify_content,
+                    round_num=round_num,
+                )
 
                 if verdict == "approve":
                     if split_relabel_applied and not post_split_cleanup_consumed:
@@ -291,6 +321,54 @@ class CoordinatorAgent(BaseAgent):
             self.log(f"  Exhausted {ctx.rounds_completed} rounds")
             return "gave_up"
 
+    def _init_anatomy_baseline(self, ctx: CaseContext) -> None:
+        """
+        Load anatomy distribution stats and compute the no-GT anatomy score for the
+        original (pre-repair) mask. Stores results in ctx.anatomy_stats and
+        ctx.anatomy_score_before so DiagnosisAgent and VerifierAgent can use them.
+        """
+        stats_path = self.cfg.get("anatomy_stats_path")
+        if not stats_path:
+            return
+        if ctx.original_mask is None or ctx.image is None:
+            return
+        try:
+            from ..anatomy_score import (
+                load_stats,
+                compute_anatomy_score,
+                build_anatomy_llm_summary,
+                _normalize_view,
+            )
+            stats_dict = load_stats(stats_path)
+            ctx.anatomy_stats = stats_dict
+            view = _normalize_view(ctx.view_type or "")
+            stats = stats_dict.get(view)
+            if stats is None:
+                self.log(f"  Anatomy stats: no entry for view='{view}'")
+                return
+            score, detail = compute_anatomy_score(ctx.original_mask, ctx.image, view, stats)
+            ctx.anatomy_score_before = float(score)
+            ma_cfg = self.cfg.get("multi_agent", {}) or {}
+            summary_top_k = int(ma_cfg.get("anatomy_llm_top_k", 5))
+            summary = build_anatomy_llm_summary(
+                score=score,
+                detail=detail,
+                view_type=view,
+                top_k=max(1, summary_top_k),
+            )
+            ctx.anatomy_score_current = float(score)
+            ctx.anatomy_score_history = [float(score)]
+            ctx.anatomy_baseline_summary = dict(summary)
+            ctx.anatomy_latest_summary = dict(summary)
+            self.log(f"  Anatomy baseline score: {score:.1f}/100 (view={view})")
+            if summary.get("hard_violations"):
+                self.log(
+                    "  Anatomy baseline violations: "
+                    f"{summary.get('hard_violations', [])}"
+                )
+        except Exception as e:
+            self.log(f"  Anatomy baseline init failed: {e}")
+
     @staticmethod
     def _has_high_risk_issue(issues: List[str]) -> bool:
         risk_tokens = (
@@ -320,6 +398,26 @@ class CoordinatorAgent(BaseAgent):
         if x > 1.0:
             return 1.0
         return x
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = float("nan")) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _is_finite(value: Any) -> bool:
+        try:
+            return math.isfinite(float(value))
+        except Exception:
+            return False
+
+    def _strict_no_gt_online(self) -> bool:
+        ma_cfg = self.cfg.get("multi_agent", {}) or {}
+        return bool(ma_cfg.get("strict_no_gt_online", False))
 
     def _score_verifier_snapshot(self, verify_content: Dict[str, Any]) -> float:
         """
@@ -372,8 +470,19 @@ class CoordinatorAgent(BaseAgent):
             consensus_score = float(proxy_obj.get("consensus_score", 0.0))
         except Exception:
             consensus_score = 0.0
+        # Canonical online score (0-100) is primary when available.
+        online_score = verify_content.get("online_score", None)
+        online_bonus = 0.0
+        try:
+            if online_score is not None:
+                online_bonus = max(-1.0, min(1.0, (float(online_score) - 50.0) / 50.0))
+        except Exception:
+            online_bonus = 0.0
+
         # Cap GT contribution to avoid dominating no-GT signals.
-        dice_bonus = max(-0.5, min(0.5, dice_delta * 10.0))
+        dice_bonus = 0.0
+        if not self._strict_no_gt_online():
+            dice_bonus = max(-0.5, min(0.5, dice_delta * 10.0))
 
         return float(
             verdict_map.get(verdict, 0.0)
@@ -386,10 +495,12 @@ class CoordinatorAgent(BaseAgent):
             + 0.3 * proxy_score
             + 0.2 * proxy_conf
             + 0.2 * consensus_score
+            + 0.8 * online_bonus
             + dice_bonus
         )
 
     def _is_best_candidate(self, verify_content: Dict[str, Any]) -> bool:
+        strict_no_gt = self._strict_no_gt_online()
         verdict = str(verify_content.get("verdict", "")).lower()
         cmp_obj = verify_content.get("vlm_comparison", {}) or {}
         cmp_v = str(cmp_obj.get("verdict", "same")).lower()
@@ -412,17 +523,25 @@ class CoordinatorAgent(BaseAgent):
 
         if cmp_v in ("worse", "degraded") and verdict != "approve":
             # In evaluation runs with GT, keep large true improvements even if VLM compare is noisy.
-            if dice_delta <= gt_delta_th:
+            if strict_no_gt or dice_delta <= gt_delta_th:
                 return False
 
-        return (
+        has_online_gain = False
+        try:
+            has_online_gain = float(verify_content.get("online_score", 50.0)) >= 60.0
+        except Exception:
+            has_online_gain = False
+
+        base_hit = (
             verdict == "approve"
             or cmp_v == "improved"
             or quality_v == "good"
             or proxy_v == "improved"
             or consensus_v == "approve"
-            or dice_delta > gt_delta_th
         )
+        if strict_no_gt:
+            return base_hit or has_online_gain
+        return base_hit or has_online_gain or (dice_delta > gt_delta_th)
 
     def _maybe_update_best_intermediate(
         self,
@@ -488,9 +607,87 @@ class CoordinatorAgent(BaseAgent):
         ctx.best_intermediate_reason = str(verify_content.get("reasoning", ""))[:300]
         ctx.best_intermediate_ops = [dict(op) for op in (ctx.applied_ops or [])]
         ctx.best_intermediate_is_original = False
+        try:
+            ctx.best_intermediate_online_score = float(
+                verify_content.get("online_score", float("nan"))
+            )
+        except Exception:
+            ctx.best_intermediate_online_score = float("nan")
+        anatomy_obj = verify_content.get("anatomy_signal", {}) or {}
+        try:
+            ctx.best_intermediate_anatomy_score = float(
+                anatomy_obj.get("score_after", float("nan"))
+            )
+        except Exception:
+            ctx.best_intermediate_anatomy_score = float("nan")
         self.log(
             "  ↺ Updated best intermediate "
             f"(round={ctx.best_intermediate_round}, score={candidate_score:.3f})"
+        )
+
+    def _maybe_update_best_anatomy_intermediate(
+        self,
+        ctx: CaseContext,
+        verify_content: Dict[str, Any],
+        round_num: int,
+    ) -> None:
+        """
+        Track the intermediate snapshot with the highest anatomy score.
+        Used by nonapproved final-pick policy (anatomy-priority fallback).
+        """
+        if ctx.current_mask is None:
+            return
+
+        anatomy_obj = verify_content.get("anatomy_signal", {}) or {}
+        if not bool(anatomy_obj.get("enabled", False)):
+            return
+
+        score_after = self._safe_float(anatomy_obj.get("score_after", float("nan")))
+        score_before = self._safe_float(
+            getattr(ctx, "anatomy_score_before", float("nan"))
+        )
+        if self._is_finite(score_before) and score_before < 0.0:
+            score_before = float("nan")
+        if not self._is_finite(score_after):
+            return
+        delta = score_after - score_before if self._is_finite(score_before) else float("nan")
+
+        best_score = self._safe_float(
+            getattr(ctx, "best_anatomy_intermediate_score", float("nan"))
+        )
+        has_baseline_only = bool(
+            getattr(ctx, "best_anatomy_intermediate_is_original", False)
+        )
+        should_update = False
+        if not self._is_finite(best_score):
+            should_update = True
+        elif has_baseline_only and score_after >= (best_score - 1e-6):
+            should_update = True
+        elif score_after > (best_score + 1e-6):
+            should_update = True
+
+        if not should_update:
+            return
+
+        ctx.best_anatomy_intermediate_mask = ctx.current_mask.copy()
+        ctx.best_anatomy_intermediate_score = float(score_after)
+        ctx.best_anatomy_intermediate_delta = float(delta)
+        ctx.best_anatomy_intermediate_round = int(round_num + 1)
+        ctx.best_anatomy_intermediate_verdict = str(
+            verify_content.get("verdict", "needs_more_work")
+        ).lower()
+        ctx.best_anatomy_intermediate_reason = str(
+            verify_content.get("reasoning", "")
+        )[:300]
+        ctx.best_anatomy_intermediate_ops = [dict(op) for op in (ctx.applied_ops or [])]
+        ctx.best_anatomy_intermediate_is_original = False
+        ctx.best_anatomy_intermediate_online_score = self._safe_float(
+            verify_content.get("online_score", float("nan"))
+        )
+        self.log(
+            "  ↺ Updated best anatomy intermediate "
+            f"(round={ctx.best_anatomy_intermediate_round}, "
+            f"anatomy={score_after:.1f}, delta={delta:+.1f})"
         )
 
     def _should_retry(

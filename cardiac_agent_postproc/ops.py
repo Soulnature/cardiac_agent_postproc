@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import cv2
 from scipy import ndimage as ndi
@@ -77,8 +77,12 @@ def remove_islands(mask: np.ndarray) -> np.ndarray:
     return out
 
 def morph_close_large(mask: np.ndarray, cfg: dict) -> np.ndarray:
-    """Stronger closing for larger holes/gaps using 9x9 kernel."""
-    k = 9
+    """Stronger closing for larger holes/gaps with configurable kernel."""
+    ops_cfg = cfg.get("ops", {}) if isinstance(cfg, dict) else {}
+    k = int(ops_cfg.get("morph_close_large_kernel", 5))
+    k = max(3, int(k))
+    if k % 2 == 0:
+        k += 1
     ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k,k))
     M1 = (mask==1).astype(np.uint8)
     M2 = (mask==2).astype(np.uint8)
@@ -93,21 +97,45 @@ def morph_close_large(mask: np.ndarray, cfg: dict) -> np.ndarray:
 
 def morphological_gap_close(mask: np.ndarray, cfg: dict) -> np.ndarray:
     """
-    Specifically targets Myocardium (2) gaps by aggressive closing (15px kernel).
-    Prioritizes Myo over LV/RV to fix intrusions.
+    Close narrow Myo gaps with conservative sequential morphology:
+    close(small) -> open(small) -> close(large).
+    A growth cap prevents over-expansion of Myo.
     """
-    k = 15 # Very large kernel to bridge significant gaps
-    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k,k))
+    ops_cfg = cfg.get("ops", {}) if isinstance(cfg, dict) else {}
+    k_small = int(ops_cfg.get("gap_close_small_kernel", 3))
+    k_large = int(ops_cfg.get("gap_close_large_kernel", 5))
+    do_open = bool(ops_cfg.get("gap_close_open_between", True))
+    max_growth_ratio = float(ops_cfg.get("gap_close_max_myo_growth_ratio", 0.12))
+
+    k_small = max(3, int(k_small))
+    if k_small % 2 == 0:
+        k_small += 1
+    k_large = max(k_small, int(k_large))
+    if k_large % 2 == 0:
+        k_large += 1
+
+    ker_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_small, k_small))
+    ker_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_large, k_large))
     M2 = (mask==2).astype(np.uint8)
-    
-    # Closing = Dilate -> Erode. Bridges gaps < kernel size.
-    M2_closed = cv2.morphologyEx(M2, cv2.MORPH_CLOSE, ker)
-    
+    if int(np.count_nonzero(M2)) == 0:
+        return mask.copy()
+
+    # Literature-style sequential filtering is less brittle than one-shot large kernels.
+    M2n = cv2.morphologyEx(M2, cv2.MORPH_CLOSE, ker_small)
+    if do_open:
+        M2n = cv2.morphologyEx(M2n, cv2.MORPH_OPEN, ker_small)
+    M2n = cv2.morphologyEx(M2n, cv2.MORPH_CLOSE, ker_large)
+
+    before = int(np.count_nonzero(M2))
+    after = int(np.count_nonzero(M2n))
+    if after > before:
+        growth_ratio = float(after - before) / float(max(1, before))
+        if growth_ratio > max_growth_ratio:
+            return mask.copy()
+
     M1 = (mask==1)
     M3 = (mask==3)
-    
-    # _merge prioritizes M2, so this will overwrite LV/RV at the gap
-    return _merge(M1, M2_closed>0, M3)
+    return _merge(M1, M2n>0, M3)
 
 def close_holes(mask: np.ndarray) -> np.ndarray:
     """Standalone binary fill holes for all classes."""
@@ -206,22 +234,50 @@ def morph_close_open(mask: np.ndarray, cfg: dict, close2_open3: bool=True) -> np
         M3n = cv2.morphologyEx(M3, cv2.MORPH_CLOSE, ker)
     return _merge(M1>0, M2n>0, M3n>0)
 
-def dilate_or_erode(mask: np.ndarray, cfg: dict, cls: int, op: str) -> np.ndarray:
-    # Kernel size logic: 
+def _kernel_shape_flag(kernel_shape: str) -> int:
+    shape = str(kernel_shape or "ellipse").strip().lower()
+    if shape == "cross":
+        return cv2.MORPH_CROSS
+    if shape == "rect":
+        return cv2.MORPH_RECT
+    return cv2.MORPH_ELLIPSE
+
+
+def dilate_or_erode(
+    mask: np.ndarray,
+    cfg: dict,
+    cls: int,
+    op: str,
+    kernel_size: Optional[int] = None,
+    iterations: Optional[int] = None,
+    kernel_shape: str = "ellipse",
+) -> np.ndarray:
+    # Kernel size logic:
     # "dilate" / "erode" -> 3x3 (Standard)
     # "dilate_large" / "erode_large" -> 5x5
-    k = 3
-    if "large" in op:
-        k = 5
+    if kernel_size is not None:
+        k = int(kernel_size)
+    else:
+        k = 3
+        if "large" in op:
+            k = 5
+    k = max(1, int(k))
+    # Keep an odd kernel to preserve center alignment.
+    if k % 2 == 0:
+        k += 1
     
-    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k,k))
+    ker = cv2.getStructuringElement(_kernel_shape_flag(kernel_shape), (k, k))
     Mc = (mask==cls).astype(np.uint8)
     
     # Get iterations from config (default 1)
-    iters = int(cfg["ops"].get("erosion_iterations", 1))
+    iters = int(iterations) if iterations is not None else int(cfg["ops"].get("erosion_iterations", 1))
+    iters = max(1, iters)
 
     if "dilate" in op:
-        iters = int(cfg["ops"].get("dilation_iterations", 1)) # Separated for flexibility
+        if iterations is None:
+            # Separated for flexibility.
+            iters = int(cfg["ops"].get("dilation_iterations", 1))
+            iters = max(1, iters)
         Mcn = cv2.dilate(Mc, ker, iterations=iters)>0
     else:
         # Safety Check: Prevent suicide erosion
@@ -266,10 +322,10 @@ def erode_lv_expand_myo(mask: np.ndarray, cfg: dict) -> np.ndarray:
     # 2. Erode LV (standard 3x3 kernel)
     k = 3
     ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-    # Coupled erosion needs to be stronger to be effective. Default to 2 if not specified.
-    # If global erosion_iterations is set to something higher, use that.
+    # Keep coupled erosion conservative by default; allow config to increase when needed.
     global_iters = int(cfg["ops"].get("erosion_iterations", 1))
-    iters = max(2, global_iters)
+    min_iters = int(cfg["ops"].get("coupled_erosion_min_iters", 1))
+    iters = max(1, min_iters, global_iters)
     
     # Safety check (same as dilate_or_erode)
     pre_count = np.count_nonzero(M3)
@@ -317,9 +373,10 @@ def erode_rv_expand_myo_conditional(mask: np.ndarray, cfg: dict) -> np.ndarray:
     # 2. Erode RV (standard 3x3 kernel)
     k = 3
     ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-    # Coupled erosion needs to be stronger. Default to 2.
+    # Keep coupled erosion conservative by default; allow config to increase when needed.
     global_iters = int(cfg["ops"].get("erosion_iterations", 1))
-    iters = max(2, global_iters)
+    min_iters = int(cfg["ops"].get("coupled_erosion_min_iters", 1))
+    iters = max(1, min_iters, global_iters)
     
     # Safety Check
     pre_count = np.count_nonzero(M1)
@@ -375,7 +432,8 @@ def erode_myo_expand_lv(mask: np.ndarray, cfg: dict) -> np.ndarray:
     k = 3
     ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     global_iters = int(cfg["ops"].get("erosion_iterations", 1))
-    iters = max(2, global_iters)
+    min_iters = int(cfg["ops"].get("coupled_erosion_min_iters", 1))
+    iters = max(1, min_iters, global_iters)
 
     pre_count = np.count_nonzero(M2)
     M2n = cv2.erode(M2, ker, iterations=iters) > 0
@@ -417,7 +475,8 @@ def erode_myo_expand_rv(mask: np.ndarray, cfg: dict) -> np.ndarray:
     k = 3
     ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     global_iters = int(cfg["ops"].get("erosion_iterations", 1))
-    iters = max(2, global_iters)
+    min_iters = int(cfg["ops"].get("coupled_erosion_min_iters", 1))
+    iters = max(1, min_iters, global_iters)
 
     pre_count = np.count_nonzero(M2)
     M2n = cv2.erode(M2, ker, iterations=iters) > 0
@@ -449,32 +508,47 @@ def valve_suppress(mask: np.ndarray, valve_y: int|None, cfg: dict) -> np.ndarray
     out[:valve_y,:] = 0
     return out
 
-def rv_lv_barrier(mask: np.ndarray, cfg: dict) -> np.ndarray:
-    # implements spec F
+def rv_lv_barrier(
+    mask: np.ndarray,
+    cfg: dict,
+    touch_dilate_iters: Optional[int] = None,
+    barrier_dilate_iters: Optional[int] = None,
+) -> np.ndarray:
+    # Conservative default: detect contact with small dilation, then insert thin barrier.
     M1 = (mask==1)
     M2 = (mask==2)
     M3 = (mask==3)
     if M1.sum()==0 or M3.sum()==0:
         return mask.copy()
-    
-    # AGGRESSIVE: Dilate 5 times (approx 5px radius) to find near-misses
-    dilated_M1 = ndi.binary_dilation(M1, iterations=5)
+
+    ops_cfg = cfg.get("ops", {}) if isinstance(cfg, dict) else {}
+    if touch_dilate_iters is None:
+        touch_dilate_iters = int(ops_cfg.get("rv_lv_barrier_touch_iters", 3))
+    if barrier_dilate_iters is None:
+        barrier_dilate_iters = int(ops_cfg.get("rv_lv_barrier_barrier_iters", 1))
+    touch_dilate_iters = max(1, int(touch_dilate_iters))
+    barrier_dilate_iters = max(1, int(barrier_dilate_iters))
+    max_new_myo_ratio = float(ops_cfg.get("rv_lv_barrier_max_new_myo_ratio", 0.04))
+
+    dilated_M1 = ndi.binary_dilation(M1, iterations=touch_dilate_iters)
     touch_zone = dilated_M1 & M3
     
     if touch_zone.sum()==0:
-        # Extreme case: Try dilating M3 as well if M1 dilation alone didn't reach
-        dilated_M3 = ndi.binary_dilation(M3, iterations=5)
+        # Fallback: also dilate LV when direct contact is nearly-miss.
+        dilated_M3 = ndi.binary_dilation(M3, iterations=touch_dilate_iters)
         touch_zone = dilated_M1 & dilated_M3
     
     if touch_zone.sum()==0:
         return mask.copy()
     
-    # Create barrier: Dialte touch zone significantly to form a thick wall
-    # Using 3 iterations (~3px radius) -> 6px thick wall
-    barrier = ndi.binary_dilation(touch_zone, iterations=3)
+    barrier = ndi.binary_dilation(touch_zone, iterations=barrier_dilate_iters)
     
-    # Enforce Myo (2) on barrier
     new_M2 = M2 | barrier
+    added_myo = int(np.count_nonzero(new_M2 & (~M2)))
+    total_fg = max(1, int(np.count_nonzero(mask > 0)))
+    if float(added_myo) / float(total_fg) > max_new_myo_ratio:
+        return mask.copy()
+
     new_M1 = M1 & (~new_M2)
     new_M3 = M3 & (~new_M2)
     
@@ -824,7 +898,7 @@ def boundary_smoothing(mask: np.ndarray, cfg: dict, method: str="contour") -> np
 
     return mask.copy()
 
-def myo_bridge(mask: np.ndarray) -> np.ndarray:
+def myo_bridge(mask: np.ndarray, bridge_thickness: int = 3) -> np.ndarray:
     """
     Targeted fix for disconnected myocardium: find the gap between the two
     largest myo components and draw a thin (3 px) bridge of class 2 between
@@ -865,16 +939,17 @@ def myo_bridge(mask: np.ndarray) -> np.ndarray:
     dists_at_a = np.where(border_a, dist_b, np.inf)
     idx_a = np.unravel_index(np.argmin(dists_at_a), dists_at_a.shape)
 
-    # Draw bridge line (3 px thick) between idx_a and idx_b
+    # Draw bridge line (thickness defaults to 3 px) between idx_a and idx_b
     out = mask.copy()
     bridge = np.zeros_like(M2)
+    thickness = max(1, int(bridge_thickness))
     cv2.line(bridge, (int(idx_a[1]), int(idx_a[0])), (int(idx_b[1]), int(idx_b[0])),
-             1, thickness=3)
+             1, thickness=thickness)
     out[bridge > 0] = 2
     return out
 
 
-def lv_bridge(mask: np.ndarray) -> np.ndarray:
+def lv_bridge(mask: np.ndarray, bridge_thickness: int = 3) -> np.ndarray:
     """
     Targeted fix for fragmented LV: bridge the two largest LV components
     with a thin line of class 3.
@@ -907,8 +982,9 @@ def lv_bridge(mask: np.ndarray) -> np.ndarray:
 
     out = mask.copy()
     bridge = np.zeros_like(M3)
+    thickness = max(1, int(bridge_thickness))
     cv2.line(bridge, (int(idx_a[1]), int(idx_a[0])), (int(idx_b[1]), int(idx_b[0])),
-             1, thickness=3)
+             1, thickness=thickness)
     out[bridge > 0] = 3
     return out
 

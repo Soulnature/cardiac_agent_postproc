@@ -17,12 +17,12 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..api_client import OpenAICompatClient
 from ..settings import LLMSettings
 from .message_bus import AgentMessage, CaseContext, MessageBus, MessageType
-from .visual_knowledge import VisualKnowledgeBase, RepairComparisonKB
+from .visual_knowledge import KnowledgeRecord, RepairComparisonKB, VisualKnowledgeBase
 
 logger = logging.getLogger(__name__)
 
@@ -325,8 +325,15 @@ class BaseAgent(ABC):
         "Task: classify TARGET as 'good', 'borderline', or 'bad'.\n"
         "The REFERENCE images are 10/10; score the TARGET relative to them.\n"
         "Judge by morphology only (do NOT guess exact Dice from appearance).\n\n"
+        "View-aware anatomy rules:\n"
+        "- RV is often more trabeculated and crescent/triangular compared with LV.\n"
+        "- LV is usually smoother and more compact than RV.\n"
+        "- Interventricular septum separates RV and LV.\n"
+        "- Myo is LV myocardium; do not require Myo to surround RV.\n"
+        "- SAX mid-slice: LV should be enclosed or near-enclosed by Myo.\n"
+        "- LAX/basal/apical slices: do NOT force strict 360-degree Myo closure.\n\n"
         "Scoring checklist (0-10 each):\n"
-        "- ring_integrity: Is the Myo ring complete and closed around LV?\n"
+        "- ring_integrity: Is Myo continuity plausible for this view/slice?\n"
         "- separation: Are RV and LV separated by Myo (no direct merge)?\n"
         "- structure_presence: Are required structures present and coherent?\n"
         "- contour_quality: Are boundaries smooth with limited holes/noise?\n\n"
@@ -339,7 +346,7 @@ class BaseAgent(ABC):
         "- good: score >= 7.0 and no major structural violation\n"
         "- borderline: 4.5 <= score < 7.0\n"
         "- bad: score < 4.5 OR major violation (large Myo gap, RV/LV merge, missing critical structure)\n\n"
-        "Respond in JSON:\n"
+        "Respond in JSON only with keys quality, score, confidence, issues, subscores, reasoning.\n"
         '{"quality":"good"|"borderline"|"bad",'
         '"score":1-10,'
         '"confidence":0.0-1.0,'
@@ -353,8 +360,9 @@ class BaseAgent(ABC):
         "You are a cardiac MRI segmentation quality judge.\n\n"
         "I will show you a BEFORE and AFTER overlay of the same case.\n"
         "Determine if the repair IMPROVED the segmentation.\n\n"
-        "Each overlay has 4 panels: Raw, GT, Pred (Dice), Error map.\n"
+        "Each overlay is a single-panel segmentation overlay on MRI.\n"
         "Color legend: Cyan=RV, Yellow ring=Myo, Red-brown=LV\n\n"
+        "Use view-aware anatomy judgment (SAX closure stricter, LAX/basal/apical more conservative).\n\n"
         "CRITICAL: Count as IMPROVED if:\n"
         "- A structural defect is fixed (e.g., a gap in the yellow ring is closed).\n"
         "- A missing part is restored.\n"
@@ -363,7 +371,7 @@ class BaseAgent(ABC):
         "- Fixing a gap introduces slight roughness or minor noise.\n"
         "- Restoring a missing part makes the boundary slightly incorrect.\n"
         "- Better anatomy is worth a few incorrect pixels.\n\n"
-        "Respond in JSON:\n"
+        "Respond in JSON only with keys verdict, confidence, before_quality, after_quality, changes_observed, reasoning.\n"
         '{"verdict": "improved"|"same"|"worse", '
         '"confidence": 0.0-1.0, '
         '"before_quality": "good"|"bad"|"borderline", '
@@ -378,7 +386,6 @@ class BaseAgent(ABC):
         n_refs: int = 1,
         view_type: Optional[str] = None,
         seed: Optional[str] = None,
-        four_way_categories: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Use VLM to judge segmentation quality by comparing the target overlay
@@ -404,58 +411,60 @@ class BaseAgent(ABC):
         # Build image list with labels
         image_paths = []
         image_labels = []
-        used_four_way = False
-        good_refs = []
-        bad_refs = []
+        strict_no_gt_online = bool(
+            (self.cfg.get("multi_agent", {}) or {}).get("strict_no_gt_online", False)
+        )
 
-        # Preferred mode: one reference from each configured 4-way category.
-        if four_way_categories:
-            four_way_refs = self.visual_kb.get_four_way_set(
-                categories=four_way_categories,
-                view_type=view_type,
-                seed=seed,
-            )
-            if four_way_refs:
-                used_four_way = True
-                for ex in four_way_refs:
-                    image_labels.append(
-                        f"[REF {ex.category}] Dice={ex.dice:.3f}, Issue={ex.issue_type or 'N/A'}"
-                    )
-                    image_paths.append(ex.path)
-
-        # Backward-compatible mode: balanced good/bad references.
-        if not used_four_way:
-            good_refs, bad_refs = self.visual_kb.get_few_shot_set(
-                n_refs, n_refs, view_type=view_type, seed=seed
-            )
-            for i, ex in enumerate(good_refs):
+        n_each = max(1, n_refs // 2)
+        good_refs, bad_refs = self.visual_kb.get_few_shot_set(
+            n_each, n_each, view_type=view_type, seed=seed
+        )
+        for i, ex in enumerate(good_refs):
+            if strict_no_gt_online:
+                image_labels.append(f"[REFERENCE: GOOD #{i+1}]")
+            else:
                 image_labels.append(f"[REFERENCE: SCORE 10/10 #{i+1}] Dice={ex.dice:.3f}")
-                image_paths.append(ex.path)
+            image_paths.append(ex.path)
 
-            for i, ex in enumerate(bad_refs):
+        for i, ex in enumerate(bad_refs):
+            if strict_no_gt_online:
+                image_labels.append(f"[REFERENCE: BAD #{i+1}]")
+            else:
                 image_labels.append(
                     f"[BAD EXAMPLE {i+1}] Dice={ex.dice:.3f}, Issue={ex.issue_type}"
                 )
-                image_paths.append(ex.path)
+            image_paths.append(ex.path)
 
         image_labels.append("[TARGET - EVALUATE THIS]")
         image_paths.append(overlay_path)
 
         # Add knowledge context to prompt
-        knowledge_text = self.visual_kb.build_knowledge_prompt()
-        full_prompt = f"{knowledge_text}\n\n{self._JUDGE_PROMPT}"
+        knowledge_text = ""
+        if not strict_no_gt_online:
+            knowledge_text = self.visual_kb.build_knowledge_prompt()
 
-        if used_four_way:
-            self.log(
-                "VLM judge: 4-way refs "
-                f"({','.join(four_way_categories or [])}) -> {len(image_paths)-1} refs "
-                f"(view={view_type or 'any'}) -> evaluating {overlay_path}"
+        # Inject view-specific rules so VLM doesn't penalise absent RV in 2CH
+        view_addendum = ""
+        if view_type and "2ch" in str(view_type).lower():
+            view_addendum = (
+                "\n\nIMPORTANT — THIS IS A 2CH (2-CHAMBER LONG-AXIS) VIEW:\n"
+                "In 2CH, the RIGHT VENTRICLE (RV) is anatomically ABSENT. "
+                "Do NOT penalise for missing RV — its absence is correct and expected.\n"
+                "Required structures for 2CH: Myocardium (green/yellow) and LV (blue) ONLY.\n"
+                "- structure_presence: judge based on Myo + LV only; RV absence is NORMAL.\n"
+                "- separation: no RV/LV separation is needed; judge the Myo-LV boundary quality.\n"
+                "- ring_integrity: Myo does NOT form a closed ring in 2CH (LAX view); "
+                "partial coverage along LV wall is acceptable and correct.\n"
+                "Do NOT list 'missing RV', 'missing RV label', or 'no RV' as issues in 2CH.\n"
             )
-        else:
-            self.log(
-                f"VLM judge: {len(good_refs)} good + {len(bad_refs)} bad refs "
-                f"(view={view_type or 'any'}) -> evaluating {overlay_path}"
-            )
+
+        base_prompt = self._JUDGE_PROMPT + view_addendum
+        full_prompt = f"{knowledge_text}\n\n{base_prompt}" if knowledge_text else base_prompt
+
+        self.log(
+            f"VLM judge: {len(good_refs)} good + {len(bad_refs)} bad refs "
+            f"(view={view_type or 'any'}) -> evaluating {overlay_path}"
+        )
 
         vg_cfg = self._vlm_cfg()
         image_detail = vg_cfg.get("image_detail", "auto")
@@ -475,9 +484,26 @@ class BaseAgent(ABC):
         if quality not in ("good", "bad", "borderline"):
             quality = "borderline"
         result["quality"] = quality
+        score_val = result.get("score", 5.0)
+        try:
+            score_val = float(score_val)
+        except Exception:
+            score_val = 5.0
+        result["score"] = max(1.0, min(10.0, score_val))
         result.setdefault("confidence", 0.5)
         result.setdefault("issues", [])
         result.setdefault("reasoning", "")
+        result.setdefault("reason", str(result.get("reasoning", "")))
+        matched_example_ids = [
+            str(getattr(ex, "example_id", "")).strip()
+            for ex in (good_refs + bad_refs)
+            if str(getattr(ex, "example_id", "")).strip()
+        ]
+        if isinstance(result.get("matched_example_ids"), list):
+            raw_ids = [str(x).strip() for x in result["matched_example_ids"] if str(x).strip()]
+            if raw_ids:
+                matched_example_ids = raw_ids
+        result["matched_example_ids"] = matched_example_ids
 
         self.log(f"VLM verdict: {result['quality']} (conf={result['confidence']:.2f})")
         return result
@@ -544,83 +570,153 @@ class BaseAgent(ABC):
 
     _REPAIR_COMPARE_PROMPT = (
         "You are a cardiac MRI segmentation repair quality judge.\n\n"
-        "TASK: Read the pixel statistics from the image header and confirm with visual evidence.\n\n"
-        "The image has 3 panels:\n"
-        "  LEFT = BEFORE repair\n"
-        "  MIDDLE = AFTER repair\n"
-        "  RIGHT = DIFF panel showing pixel-level changes.\n\n"
-        "CRITICAL STEP 1: READ THE HEADER OF THE RIGHT (DIFF) PANEL.\n"
-        "There is text like 'DIFF +123 -45 ~67'.\n"
-        "  +N = pixels ADDED (green)\n"
-        "  -N = pixels REMOVED (red)\n"
-        "  ~N = pixels CLASS CHANGED (yellow)\n\n"
-        "CRITICAL STEP 2: VISUAL CHECK:\n"
-        "Do the green pixels look like they are filling a gap? (Good)\n"
-        "Do the red pixels look like they are removing spurious noise? (Good)\n"
-        "Or are red pixels removing correct walls? (Bad)\n\n"
-        "Respond ONLY in JSON:\n"
-        '{"diff_stats": "+... -... ~...", '
-        '"verdict": "improved"|"degraded"|"neutral", '
-        '"confidence": 0.0-1.0, '
-        '"reasoning": "stats read + visual confirmation"}'
+        "TASK:\n"
+        "1) Read the DIFF panel header text: DIFF +N -M ~K\n"
+        "2) Verify with morphology in BEFORE/AFTER/DIFF panels\n"
+        "3) Return calibrated relative-improvement score.\n\n"
+        "DIFF header meaning:\n"
+        "+N = pixels ADDED, -M = pixels REMOVED, ~K = class-changed pixels.\n\n"
+        "Output contract (JSON only, no extra keys required):\n"
+        "{\n"
+        '  "verdict": "improved" | "degraded" | "neutral",\n'
+        '  "score": 0-100,\n'
+        '  "quality": "better" | "same" | "worse",\n'
+        '  "confidence": 0.0-1.0,\n'
+        '  "matched_example_ids": ["..."],\n'
+        '  "reason": "brief evidence-based explanation",\n'
+        '  "diff_stats": "+N -M ~K"\n'
+        "}\n\n"
+        "Scoring semantics:\n"
+        "- 0-39: confident degradation\n"
+        "- 40-59: uncertain/neutral\n"
+        "- 60-100: confident improvement\n"
     )
 
+    @staticmethod
+    def _default_relative_score(verdict: str, confidence: float) -> float:
+        conf = max(0.0, min(1.0, float(confidence)))
+        v = str(verdict).lower()
+        if v == "improved":
+            return 50.0 + 50.0 * conf
+        if v == "degraded":
+            return 50.0 - 50.0 * conf
+        return 50.0
+
+    @staticmethod
+    def _quality_from_verdict(verdict: str) -> str:
+        v = str(verdict).lower()
+        if v == "improved":
+            return "better"
+        if v == "degraded":
+            return "worse"
+        return "same"
+
+    @staticmethod
+    def _render_evidence_table(
+        records: Sequence[KnowledgeRecord],
+        include_prior: bool = True,
+    ) -> str:
+        if not records:
+            return "No retrieval evidence."
+        lines = [
+            "Evidence table (Top-K retrieved examples):",
+            "id | outcome | view | defects | actions | prior",
+        ]
+        for rec in records:
+            prior_txt = f"{float(rec.confidence_prior):.3f}" if include_prior else "N/A"
+            lines.append(
+                f"{rec.example_id} | {rec.expected_outcome} | {rec.view_type} | "
+                f"{','.join(rec.defect_tags) or '-'} | "
+                f"{','.join(rec.action_tags) or '-'} | "
+                f"{prior_txt}"
+            )
+        return "\n".join(lines)
+
     def judge_repair_comparison(
-        self, diff_overlay_path: str, applied_ops: Optional[List[str]] = None
+        self,
+        diff_overlay_path: str,
+        applied_ops: Optional[List[str]] = None,
+        view_type: Optional[str] = None,
+        defect_tags: Optional[List[str]] = None,
+        top_k_refs: int = 2,
+        use_confidence_prior: bool = True,
     ) -> Dict[str, Any]:
         """
-        Use VLM with the repair KB to judge a single diff-overlay image.
-
-        This is the improved replacement for `judge_visual_comparison` that:
-        - Uses a single 3-panel diff overlay (BEFORE | AFTER | DIFF)
-        - Provides few-shot repair examples from RepairComparisonKB
-        - Sends fewer images (max 3 total) for better VLM accuracy
+        VLM comparison on one diff-overlay with typed, deterministic KB retrieval.
 
         Returns:
-            {"verdict": "improved"|"degraded"|"neutral",
-             "confidence": float,
-             "reasoning": str}
+            {
+              "verdict": "improved"|"degraded"|"neutral",
+              "score": 0-100,
+              "quality": "better"|"same"|"worse",
+              "confidence": 0-1,
+              "matched_example_ids": [...],
+              "reason": "...",
+              "diff_stats": "+... -... ~..."
+            }
         """
         if not self._vlm_enabled():
             return {
                 "verdict": "neutral",
+                "score": 50.0,
+                "quality": "same",
                 "confidence": 0.0,
+                "matched_example_ids": [],
+                "reason": "vlm disabled by config",
                 "reasoning": "vlm disabled by config",
             }
 
-        image_paths = []
-        image_labels = []
+        image_paths: List[str] = []
+        image_labels: List[str] = []
+        selected_records: List[KnowledgeRecord] = []
+        selected_ids: List[str] = []
+        strict_no_gt_online = bool(
+            (self.cfg.get("multi_agent", {}) or {}).get("strict_no_gt_online", False)
+        )
 
-        # Add few-shot repair examples from KB (if available)
+        tags = list(defect_tags or [])
+        if applied_ops:
+            tags.extend([str(op) for op in applied_ops if str(op).strip()])
+
         if self.repair_kb and self.repair_kb.total > 0:
-            imp_refs, deg_refs = self.repair_kb.get_few_shot_repair(1, 1)
-            for ex in imp_refs:
-                image_labels.append(
-                    f"[EXAMPLE - IMPROVED repair, Dice delta={ex.dice_delta:+.3f}]"
-                )
-                image_paths.append(ex.path)
-            for ex in deg_refs:
-                image_labels.append(
-                    f"[EXAMPLE - DEGRADED repair, Dice delta={ex.dice_delta:+.3f}]"
-                )
+            selected_records = self.repair_kb.retrieve(
+                stage="repair_verification",
+                view_type=view_type,
+                defect_tags=tags,
+                top_k=max(1, int(top_k_refs)),
+                use_confidence_prior=(
+                    bool(use_confidence_prior) and (not strict_no_gt_online)
+                ),
+            )
+            selected_ids = [rec.example_id for rec in selected_records]
+            ref_examples = self.repair_kb.get_examples_by_ids(selected_ids)
+            for ex in ref_examples:
+                label = f"[REFERENCE {ex.example_id}] outcome={ex.category}"
+                if not strict_no_gt_online:
+                    label += f" delta={ex.dice_delta:+.3f}"
+                image_labels.append(label)
                 image_paths.append(ex.path)
 
-        # Target overlay to evaluate
         image_labels.append("[TARGET - EVALUATE THIS REPAIR]")
         image_paths.append(diff_overlay_path)
 
-        # Build prompt with repair knowledge
-        prompt = self._REPAIR_COMPARE_PROMPT
-        if self.repair_kb and self.repair_kb.total > 0:
-            knowledge = self.repair_kb.build_repair_knowledge_prompt()
-            prompt = f"{knowledge}\n\n{prompt}"
+        evidence_table = self._render_evidence_table(
+            selected_records,
+            include_prior=(not strict_no_gt_online),
+        )
+        prompt = (
+            f"{self._REPAIR_COMPARE_PROMPT}\n"
+            f"{evidence_table}\n\n"
+            "Use matched_example_ids from the evidence table only.\n"
+        )
 
-        self.log(f"VLM repair comparison: {diff_overlay_path} "
-                 f"(with {len(image_paths)-1} reference examples)")
+        self.log(
+            f"VLM repair comparison: {diff_overlay_path} "
+            f"(references={len(image_paths)-1})"
+        )
 
         vg_cfg = self._vlm_cfg()
         image_detail = vg_cfg.get("image_detail", "auto")
-
         result = self.vlm.chat_vision_multi_json(
             system="You are a cardiac MRI segmentation repair quality judge.",
             user_text=prompt,
@@ -630,93 +726,162 @@ class BaseAgent(ABC):
             image_detail=image_detail,
         )
 
-        # Normalize
-        verdict = result.get("verdict", "neutral")
+        verdict = str(result.get("verdict", "neutral")).lower()
         if verdict not in ("improved", "degraded", "neutral"):
             verdict = "neutral"
         result["verdict"] = verdict
-        result.setdefault("confidence", 0.5)
-        result.setdefault("reasoning", "")
-        
+
+        try:
+            confidence = float(result.get("confidence", 0.5))
+        except Exception:
+            confidence = 0.5
+        confidence = max(0.0, min(1.0, confidence))
+        result["confidence"] = confidence
+
+        score = result.get("score")
+        try:
+            score_val = float(score)
+        except Exception:
+            score_val = self._default_relative_score(verdict, confidence)
+        score_val = max(0.0, min(100.0, score_val))
+        result["score"] = score_val
+        result["quality"] = str(result.get("quality", self._quality_from_verdict(verdict)))
+        if result["quality"] not in ("better", "same", "worse"):
+            result["quality"] = self._quality_from_verdict(verdict)
+
+        reason = result.get("reason", result.get("reasoning", ""))
+        if not isinstance(reason, str):
+            reason = str(reason)
+        result["reason"] = reason
+        result["reasoning"] = reason
+
+        matched_ids = result.get("matched_example_ids", [])
+        if not isinstance(matched_ids, list):
+            matched_ids = []
+        matched_ids = [str(x).strip() for x in matched_ids if str(x).strip()]
+        valid_ids = set(selected_ids)
+        matched_ids = [x for x in matched_ids if x in valid_ids]
+        if not matched_ids:
+            matched_ids = list(selected_ids)
+        result["matched_example_ids"] = matched_ids
+        result["selected_example_ids"] = list(selected_ids)
+
         if "diff_stats" in result:
             self.log(f"VLM read stats: {result['diff_stats']}")
-            
-            # --- DETERMINISTIC LOGIC OVERRIDE ---
-            # VLM is great at OCR (reading +123 -45) but bad at applying complex logic/ratios.
-            # We parse the stats here and force the correct verdict.
-            import re
-            stats_str = result["diff_stats"]
-            match_add = re.search(r'\+(\d+)', stats_str)
-            match_rem = re.search(r'-(\d+)', stats_str)
-            match_chg = re.search(r'~(\d+)', stats_str)
-            
+            stats_str = str(result["diff_stats"])
+            match_add = re.search(r"\+(\d+)", stats_str)
+            match_rem = re.search(r"-(\d+)", stats_str)
+            match_chg = re.search(r"~(\d+)", stats_str)
+
             if match_add and match_rem:
                 n_add = int(match_add.group(1))
                 n_rem = int(match_rem.group(1))
                 n_chg = int(match_chg.group(1)) if match_chg else 0
-                
+
                 calc_verdict = "neutral"
-                
-                # Check for Class-Swapping Operations
                 is_swapper = False
-                swapper_ops = ["erode_expand_myo", "neighbor_repair", "neighbor_rv_repair", "neighbor_myo_repair", "atlas", "1_erode_expand_myo", "3_erode_expand_myo", "lv_split_to_rv", "rv_split_to_lv"]
+                swapper_ops = [
+                    "erode_expand_myo",
+                    "neighbor_repair",
+                    "neighbor_rv_repair",
+                    "neighbor_myo_repair",
+                    "atlas",
+                    "1_erode_expand_myo",
+                    "3_erode_expand_myo",
+                    "lv_split_to_rv",
+                    "rv_split_to_lv",
+                ]
                 if applied_ops:
                     for op in applied_ops:
-                        if any(s in op for s in swapper_ops):
+                        op_name = str(op)
+                        if any(s in op_name for s in swapper_ops):
                             is_swapper = True
                             break
-                
-                # Special case: pure relabel ops (split_to_rv/lv) produce
-                # +0 -0 ~N — all changes are class swaps, which is expected.
+
                 is_pure_relabel = (
-                    is_swapper
-                    and n_add <= 10
-                    and n_rem <= 10
-                    and n_chg > 0
+                    is_swapper and n_add <= 10 and n_rem <= 10 and n_chg > 0
                 )
 
-                # Rule 1: Degradation (Strict safety check)
-                # If removing significantly more than adding (net loss)
-                if n_rem > n_add + 50 and not is_pure_relabel:
+                total_delta = n_add + n_rem + n_chg
+                # Suppress severe_removal when a class-swapping op produced substantial
+                # relabeling (n_chg ≥ 30): erode-expand legitimately removes one class
+                # while converting pixels to another, so large n_rem is expected.
+                severe_removal = (
+                    (n_rem > n_add + 50)
+                    and (not is_pure_relabel)
+                    and not (is_swapper and n_chg >= 30)
+                )
+                severe_relabel_noise = (
+                    (not is_pure_relabel)
+                    and n_chg > (n_add + (500 if is_swapper else 200))
+                )
+                strong_relabel_fix = is_pure_relabel and n_chg >= 120
+                strong_additive_fix = (
+                    (not is_pure_relabel)
+                    and n_add >= max(120, 3 * n_rem)
+                    and n_rem <= 20
+                    and n_chg <= max(40, int(0.5 * n_add))
+                )
+
+                if severe_removal or severe_relabel_noise:
                     calc_verdict = "degraded"
-
-                # If massive class confusion
-                # RELAXATION: If known class-swapper, tolerate much higher class changes
-                # EXEMPTION: Pure relabel ops are never penalized for class changes
-                elif not is_pure_relabel and n_chg > (n_add + (500 if is_swapper else 200)):
-                    calc_verdict = "degraded"
-                
-                # Rule 2: Pure relabel (split ops) — class changes are the intended fix
-                elif is_pure_relabel and n_chg > 50:
+                elif strong_relabel_fix or strong_additive_fix:
                     calc_verdict = "improved"
-
-                # Rule 3: Improvement (Massive repair)
-                # If adding way more than removing (ratio > 2), it's a fill operation
-                elif n_add > 2 * n_rem and n_add > 50:
-                    calc_verdict = "improved"
-
-                # Rule 4: Improvement (Clean gap fill)
-                # If adding something and removing almost nothing
-                elif n_add > 0 and n_rem < 30:
-                    calc_verdict = "improved"
-
-                # Rule 5: Neutral check
-                elif (n_add + n_rem + n_chg) < 30:
+                elif total_delta < 30:
                     calc_verdict = "neutral"
-                
-                # Apply Override
-                # We trust our Python logic more than the VLM's semantic intuition
-                if calc_verdict != result["verdict"]:
-                    self.log(f"LOGIC OVERRIDE: {result['verdict']} -> {calc_verdict} "
-                             f"(based on +{n_add} -{n_rem} ~{n_chg}, swapper={is_swapper})")
-                    result["original_verdict"] = result["verdict"]
-                    result["verdict"] = calc_verdict
-                    if not isinstance(result.get("reasoning"), str):
-                        result["reasoning"] = str(result.get("reasoning", ""))
-                    result["reasoning"] += f" [Auto-Correction: logic override based on stats]"
-            # --- END OVERRIDE ---
 
-        self.log(f"VLM repair verdict: {result['verdict']} (conf={result['confidence']:.2f})")
+                current_verdict = str(result.get("verdict", "neutral"))
+                override_verdict = current_verdict
+                # Conservative override policy:
+                # - Always allow override to degraded on strong regression evidence.
+                # - Pull optimistic improved back to neutral when evidence is weak.
+                # - Never flip degraded directly to improved via heuristics.
+                if calc_verdict == "degraded":
+                    override_verdict = "degraded"
+                elif calc_verdict == "neutral" and current_verdict == "improved":
+                    override_verdict = "neutral"
+                elif (
+                    calc_verdict == "improved"
+                    and current_verdict == "neutral"
+                ):
+                    override_verdict = "improved"
+
+                # Rescue swapper-op false-positive degraded verdicts:
+                # When a class-swapping op (erode_expand_myo, split_relabel, etc.)
+                # produces substantial relabeling (n_chg ≥ 30) with few or no
+                # outright removals, VLM's "degraded" is almost certainly a false
+                # positive — it sees class-changed pixels and mistakes them for
+                # misclassification. Demote to "neutral" so the proxy consensus
+                # and anatomy signals can drive the final verdict.
+                if (
+                    is_swapper
+                    and n_chg >= 30
+                    and n_rem <= n_chg * 0.5
+                    and override_verdict == "degraded"
+                ):
+                    override_verdict = "neutral"
+
+                if override_verdict != current_verdict:
+                    self.log(
+                        f"LOGIC OVERRIDE: {current_verdict} -> {override_verdict} "
+                        f"(based on +{n_add} -{n_rem} ~{n_chg}, swapper={is_swapper})"
+                    )
+                    result["original_verdict"] = current_verdict
+                    result["verdict"] = override_verdict
+                    result["quality"] = self._quality_from_verdict(override_verdict)
+                    result["score"] = self._default_relative_score(
+                        override_verdict, result["confidence"]
+                    )
+                    result["reason"] = (
+                        f"{result.get('reason', '')} "
+                        "[Auto-Correction: logic override based on diff stats]"
+                    ).strip()
+                    result["reasoning"] = result["reason"]
+
+        self.log(
+            f"VLM repair verdict: {result['verdict']} "
+            f"(score={result['score']:.1f}, conf={result['confidence']:.2f})"
+        )
         return result
 
 

@@ -28,7 +28,7 @@ from ..ops import (
     erode_myo_expand_lv, erode_myo_expand_rv,
     reassign_secondary_lv_to_rv, reassign_secondary_rv_to_lv,
 )
-from ..rqs import compute_rqs, sobel_edges, valve_plane_y
+from ..rqs import sobel_edges, valve_plane_y
 from ..slice_consistency import (
     neighbor_centroid_align, neighbor_shape_prior, neighbor_area_consistency,
 )
@@ -46,6 +46,8 @@ HIGH_IMPACT_OPS = {
     "individual_atlas_transfer",
     "convex_hull_fill",
     "rv_lv_barrier",
+    "rv_lv_barrier_mild",
+    "rv_lv_barrier_strong",
     "expand_myo_intensity",
     "expand_lv_intensity",
     "expand_rv_intensity",
@@ -81,6 +83,123 @@ def _is_high_impact_op(op_name: str) -> bool:
     return False
 
 
+def _normalize_strength(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"mild", "normal", "strong"}:
+        return text
+    return "normal"
+
+
+def _split_strength_suffix(op_name: str) -> tuple[str, str]:
+    raw = str(op_name or "").strip()
+    if not raw:
+        return "", "normal"
+    lowered = raw.lower()
+    if lowered.endswith("_mild"):
+        return raw[:-5], "mild"
+    if lowered.endswith("_strong"):
+        return raw[:-7], "strong"
+    return raw, "normal"
+
+
+def _resolve_operation_with_strength(
+    op_name: str,
+    strength: Any,
+    op_fns: Dict[str, Any],
+) -> tuple[str, str]:
+    base_name, suffix_strength = _split_strength_suffix(op_name)
+    base_name = str(base_name or "").strip().lower()
+    req_strength = _normalize_strength(strength)
+    final_strength = suffix_strength if suffix_strength != "normal" else req_strength
+
+    if final_strength != "normal":
+        candidate = f"{base_name}_{final_strength}"
+        if candidate in op_fns:
+            return candidate, final_strength
+
+    if base_name in op_fns:
+        return base_name, final_strength
+
+    raw = str(op_name or "").strip().lower()
+    if raw in op_fns:
+        return raw, final_strength
+    return raw, final_strength
+
+
+def _normalize_kernel_size(
+    value: Any,
+    min_size: int = 1,
+    max_size: int = 15,
+) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        kernel = int(round(float(value)))
+    except Exception:
+        return None
+    if kernel < int(min_size) or kernel > int(max_size):
+        return None
+    if kernel % 2 == 0:
+        kernel += 1
+        if kernel > int(max_size):
+            kernel -= 2
+    if kernel < int(min_size):
+        return None
+    return int(kernel)
+
+
+def _parse_kernel_override_target(op_name: str) -> tuple[Optional[int], Optional[str], str]:
+    """
+    Resolve whether an operation supports explicit kernel-size override.
+    Returns (class_id, morph_op, base_name).
+    """
+    base_name, _ = _split_strength_suffix(op_name)
+    base = str(base_name or "").strip().lower()
+    if base in {"smooth_morph", "smooth_morph_k5"}:
+        return None, None, base
+
+    # Pattern: "<class_id>_<dilate|erode|dilate_large|erode_large>"
+    parts = base.split("_", 1)
+    if len(parts) == 2 and parts[0] in {"1", "2", "3"}:
+        morph_op = parts[1]
+        if morph_op in {"dilate", "erode", "dilate_large", "erode_large"}:
+            return int(parts[0]), morph_op, base
+
+    # RV aliases
+    if base in {"rv_erode", "rv_erode_large"}:
+        morph_op = "erode_large" if base.endswith("_large") else "erode"
+        return 1, morph_op, base
+
+    return None, None, base
+
+
+def _supports_kernel_override(op_name: str) -> bool:
+    class_id, morph_op, base = _parse_kernel_override_target(op_name)
+    if class_id is not None and morph_op is not None:
+        return True
+    return base in {"smooth_morph", "smooth_morph_k5"}
+
+
+def _apply_op_with_kernel_override(
+    mask: np.ndarray,
+    op_name: str,
+    cfg: Dict[str, Any],
+    kernel_size: int,
+) -> Optional[np.ndarray]:
+    class_id, morph_op, base = _parse_kernel_override_target(op_name)
+    if class_id is not None and morph_op is not None:
+        return dilate_or_erode(
+            mask,
+            cfg,
+            class_id,
+            morph_op,
+            kernel_size=int(kernel_size),
+        )
+    if base in {"smooth_morph", "smooth_morph_k5"}:
+        return smooth_morph(mask, kernel=int(kernel_size))
+    return None
+
+
 def _component_count(class_mask: np.ndarray) -> int:
     """Count connected components in a binary class mask."""
     if class_mask is None or int(np.count_nonzero(class_mask)) == 0:
@@ -91,6 +210,21 @@ def _component_count(class_mask: np.ndarray) -> int:
 
 _CLASS_NAME_BY_ID = {1: "rv", 2: "myo", 3: "lv"}
 _CLASS_ID_BY_NAME = {"rv": 1, "myo": 2, "lv": 3}
+
+# These ops work by finding the globally closest component pair; cropping to a
+# local bbox can mis-identify connectivity and silently produce "no change".
+# They must always run on the full mask.
+_GLOBAL_ONLY_OPS = {
+    "myo_bridge",
+    "myo_bridge_mild",
+    "myo_bridge_strong",
+    "lv_bridge",
+    "lv_bridge_mild",
+    "lv_bridge_strong",
+    "morphological_gap_close",
+    "convex_hull_fill",
+}
+
 _CONTACT_INCREASE_ALLOWED_OPS = {
     "rv_lv_barrier",
     "rv_lv_barrier_mild",
@@ -199,9 +333,26 @@ def _neighbor_stats_for_class(
 
 def _build_op_fn(mask, view, cfg, E, vy, atlas=None, neighbor_masks=None, neighbor_img_paths=None, target_img=None, diagnosis_issues=None):
     """Build a dict of op_name → callable(mask) -> mask."""
+    ops_cfg = cfg.get("ops", {}) if isinstance(cfg, dict) else {}
+    erode_iters = max(1, int(cfg.get("ops", {}).get("erosion_iterations", 1)))
+    dilate_iters = max(1, int(cfg.get("ops", {}).get("dilation_iterations", 1)))
+    bridge_base = max(1, int(ops_cfg.get("bridge_thickness", 2)))
+    bridge_mild = max(1, int(ops_cfg.get("bridge_thickness_mild", max(1, bridge_base - 1))))
+    bridge_strong = max(bridge_base, int(ops_cfg.get("bridge_thickness_strong", bridge_base + 1)))
+    rv_touch_base = max(1, int(ops_cfg.get("rv_lv_barrier_touch_iters", 3)))
+    rv_barrier_base = max(1, int(ops_cfg.get("rv_lv_barrier_barrier_iters", 1)))
+    rv_touch_mild = max(1, int(ops_cfg.get("rv_lv_barrier_touch_iters_mild", max(1, rv_touch_base - 1))))
+    rv_barrier_mild = max(1, int(ops_cfg.get("rv_lv_barrier_barrier_iters_mild", rv_barrier_base)))
+    rv_touch_strong = max(rv_touch_base, int(ops_cfg.get("rv_lv_barrier_touch_iters_strong", rv_touch_base + 1)))
+    rv_barrier_strong = max(rv_barrier_base, int(ops_cfg.get("rv_lv_barrier_barrier_iters_strong", rv_barrier_base + 1)))
+
     ops = {
-        "myo_bridge": lambda m: myo_bridge(m),
-        "lv_bridge": lambda m: lv_bridge(m),
+        "myo_bridge": lambda m: myo_bridge(m, bridge_thickness=bridge_base),
+        "myo_bridge_mild": lambda m: myo_bridge(m, bridge_thickness=bridge_mild),
+        "myo_bridge_strong": lambda m: myo_bridge(m, bridge_thickness=bridge_strong),
+        "lv_bridge": lambda m: lv_bridge(m, bridge_thickness=bridge_base),
+        "lv_bridge_mild": lambda m: lv_bridge(m, bridge_thickness=bridge_mild),
+        "lv_bridge_strong": lambda m: lv_bridge(m, bridge_thickness=bridge_strong),
         "fill_holes": lambda m: fill_holes_ops(m, cfg),
         "fill_holes_m2": lambda m: fill_holes_ops_m2(m, cfg),
         "smooth_morph": lambda m: smooth_morph(m, kernel=3),
@@ -210,18 +361,73 @@ def _build_op_fn(mask, view, cfg, E, vy, atlas=None, neighbor_masks=None, neighb
         "smooth_gaussian": lambda m: boundary_smoothing(m, cfg, "gaussian"),
         "close2_open3": lambda m: morph_close_open(m, cfg, close2_open3=True),
         "open2_close3": lambda m: morph_close_open(m, cfg, close2_open3=False),
-        "rv_lv_barrier": lambda m: rv_lv_barrier(m, cfg),
+        "rv_lv_barrier": lambda m: rv_lv_barrier(
+            m,
+            cfg,
+            touch_dilate_iters=rv_touch_base,
+            barrier_dilate_iters=rv_barrier_base,
+        ),
+        "rv_lv_barrier_mild": lambda m: rv_lv_barrier(
+            m,
+            cfg,
+            touch_dilate_iters=rv_touch_mild,
+            barrier_dilate_iters=rv_barrier_mild,
+        ),
+        "rv_lv_barrier_strong": lambda m: rv_lv_barrier(
+            m,
+            cfg,
+            touch_dilate_iters=rv_touch_strong,
+            barrier_dilate_iters=rv_barrier_strong,
+        ),
         "rv_erode": lambda m: dilate_or_erode(m, cfg, 1, "erode"),
+        "rv_erode_mild": lambda m: dilate_or_erode(
+            m, cfg, 1, "erode", kernel_size=3, iterations=1, kernel_shape="cross"
+        ),
+        "rv_erode_strong": lambda m: dilate_or_erode(
+            m, cfg, 1, "erode", kernel_size=5, iterations=erode_iters, kernel_shape="ellipse"
+        ),
         "topology_cleanup": lambda m: topology_cleanup(m, view, cfg),
+        "topology_cleanup_mild": lambda m: safe_topology_fix(m, view, cfg),
+        "topology_cleanup_strong": lambda m: remove_islands(topology_cleanup(m, view, cfg)),
         "safe_topology_fix": lambda m: safe_topology_fix(m, view, cfg),
         "valve_suppress": lambda m: topology_cleanup(valve_suppress(m, vy, cfg), view, cfg),
         "edge_snap_proxy": lambda m: topology_cleanup(edge_snapping_proxy(m, E, cfg), view, cfg),
         "remove_islands": lambda m: remove_islands(m),
         "2_dilate": lambda m: dilate_or_erode(m, cfg, 2, "dilate"),
+        "2_dilate_mild": lambda m: dilate_or_erode(
+            m, cfg, 2, "dilate", kernel_size=3, iterations=1, kernel_shape="cross"
+        ),
+        "2_dilate_strong": lambda m: dilate_or_erode(
+            m, cfg, 2, "dilate", kernel_size=5, iterations=dilate_iters, kernel_shape="ellipse"
+        ),
         "2_erode": lambda m: dilate_or_erode(m, cfg, 2, "erode"),
+        "2_erode_mild": lambda m: dilate_or_erode(
+            m, cfg, 2, "erode", kernel_size=3, iterations=1, kernel_shape="cross"
+        ),
+        "2_erode_strong": lambda m: dilate_or_erode(
+            m, cfg, 2, "erode", kernel_size=5, iterations=erode_iters, kernel_shape="ellipse"
+        ),
         "3_dilate": lambda m: dilate_or_erode(m, cfg, 3, "dilate"),
+        "3_dilate_mild": lambda m: dilate_or_erode(
+            m, cfg, 3, "dilate", kernel_size=3, iterations=1, kernel_shape="cross"
+        ),
+        "3_dilate_strong": lambda m: dilate_or_erode(
+            m, cfg, 3, "dilate", kernel_size=5, iterations=dilate_iters, kernel_shape="ellipse"
+        ),
         "3_erode": lambda m: dilate_or_erode(m, cfg, 3, "erode"),
+        "3_erode_mild": lambda m: dilate_or_erode(
+            m, cfg, 3, "erode", kernel_size=3, iterations=1, kernel_shape="cross"
+        ),
+        "3_erode_strong": lambda m: dilate_or_erode(
+            m, cfg, 3, "erode", kernel_size=5, iterations=erode_iters, kernel_shape="ellipse"
+        ),
         "1_dilate": lambda m: dilate_or_erode(m, cfg, 1, "dilate"),
+        "1_dilate_mild": lambda m: dilate_or_erode(
+            m, cfg, 1, "dilate", kernel_size=3, iterations=1, kernel_shape="cross"
+        ),
+        "1_dilate_strong": lambda m: dilate_or_erode(
+            m, cfg, 1, "dilate", kernel_size=5, iterations=dilate_iters, kernel_shape="ellipse"
+        ),
 
         # Intensity-guided robustness ops
         "expand_myo_intensity": lambda m: expand_myo_intensity_guided(m, target_img),
@@ -446,8 +652,8 @@ class ExecutorAgent(BaseAgent):
             return None
         max_candidates = int(ex_cfg.get("candidate_search_max_candidates", 12))
         topk_vlm = int(ex_cfg.get("candidate_search_topk_vlm", 3))
-        max_change_ratio = float(ex_cfg.get("candidate_search_max_change_ratio", 0.14))
-        accept_score = float(ex_cfg.get("candidate_search_accept_score", 0.10))
+        max_change_ratio = float(ex_cfg.get("candidate_search_max_change_ratio", 0.10))
+        accept_score = float(ex_cfg.get("candidate_search_accept_score", 0.14))
         proxy_weight = float(ex_cfg.get("candidate_search_proxy_weight", 0.65))
         vlm_weight = float(ex_cfg.get("candidate_search_vlm_weight", 1.00))
 
@@ -602,15 +808,6 @@ class ExecutorAgent(BaseAgent):
         _add_atlas_ops(op_fns, ctx.current_mask, ctx.view_type, self._atlas, self.cfg)
 
         # Compute initial RQS (kept as optional reporting metric)
-        try:
-            initial_rqs = compute_rqs(
-                ctx.current_mask, ctx.image, ctx.view_type,
-                ctx.original_mask, self._atlas, [], self.cfg
-            )
-            current_rqs = initial_rqs.total
-        except Exception:
-            current_rqs = 0.0
-
         # Load GT for Oracle Dice Logging (if available)
         gt_mask = None
         current_dice = 0.0
@@ -659,6 +856,18 @@ class ExecutorAgent(BaseAgent):
 
         # Per-step VLM scoring and strict monotonic config
         ex_cfg = self.cfg.get("executor", {})
+        if getattr(ctx, "anatomy_score_current", -1.0) < 0.0 and getattr(
+            ctx, "anatomy_score_before", -1.0
+        ) >= 0.0:
+            ctx.anatomy_score_current = float(ctx.anatomy_score_before)
+        if not isinstance(getattr(ctx, "anatomy_score_history", None), list):
+            ctx.anatomy_score_history = []
+        if (
+            float(getattr(ctx, "anatomy_score_current", -1.0)) >= 0.0
+            and not ctx.anatomy_score_history
+        ):
+            ctx.anatomy_score_history = [float(ctx.anatomy_score_current)]
+
         ctx.executor_candidate_search_used = False
         ctx.executor_candidate_search_pick = ""
         ctx.executor_candidate_search_score = 0.0
@@ -699,12 +908,31 @@ class ExecutorAgent(BaseAgent):
 
         plan_start_mask = ctx.current_mask.copy()
         for step_idx, step in enumerate(plan):
-            op_name = step.get("operation", "")
+            requested_op = str(step.get("operation", "")).strip()
+            requested_strength = _normalize_strength(step.get("strength", "normal"))
+            op_name, resolved_strength = _resolve_operation_with_strength(
+                requested_op,
+                requested_strength,
+                op_fns,
+            )
             direction = normalize_direction_hint(str(step.get("direction", "global")))
             affected_class = step.get("affected_class", "myo")
             bbox = step.get("bbox", None)
             if not (isinstance(bbox, list) and len(bbox) == 4):
                 bbox = None
+            kernel_size = _normalize_kernel_size(step.get("kernel_size", None))
+            kernel_override_supported = bool(
+                kernel_size is not None and _supports_kernel_override(op_name)
+            )
+            if kernel_size is not None and kernel_override_supported:
+                self.log(
+                    f"  [{step_idx}] {op_name}: using kernel_size override={int(kernel_size)}"
+                )
+            elif kernel_size is not None:
+                self.log(
+                    f"  [{step_idx}] {op_name}: kernel_size={int(kernel_size)} ignored "
+                    "(unsupported op)"
+                )
             policy_tag = str(step.get("policy_tag", "")).strip().lower()
             is_forced_atlas = (
                 policy_tag == "forced_atlas_class_replace"
@@ -712,16 +940,40 @@ class ExecutorAgent(BaseAgent):
             )
             is_hard_split_relabel = op_name in {"lv_split_to_rv", "rv_split_to_lv"}
 
+            if (
+                requested_op
+                and (requested_op != op_name or requested_strength != resolved_strength)
+            ):
+                self.log(
+                    f"  [{step_idx}] resolved op: {requested_op} "
+                    f"(strength={requested_strength}) -> {op_name} "
+                    f"(strength={resolved_strength})"
+                )
+
             if strict_no_baseline_block:
                 reason = "strict_monotonic_requires_baseline_score"
                 self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
-                ops_failed.append({"operation": op_name, "reason": reason})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": reason,
+                    }
+                )
                 continue
 
             if is_hard_split_relabel and split_relabel_require_bbox and bbox is None:
                 reason = "split_relabel_requires_bbox"
                 self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
-                ops_failed.append({"operation": op_name, "reason": reason})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": reason,
+                    }
+                )
                 continue
 
             # ── Smart Global Repair: Infer bbox from direction if missing ──
@@ -764,7 +1016,14 @@ class ExecutorAgent(BaseAgent):
 
             if op_name not in op_fns:
                 self.log(f"  [{step_idx}] {op_name}: NOT AVAILABLE")
-                ops_failed.append({"operation": op_name, "reason": "not available"})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": "not available",
+                    }
+                )
                 continue
 
             try:
@@ -780,20 +1039,51 @@ class ExecutorAgent(BaseAgent):
                     apply_bbox = bbox
                     if op_name.startswith("neighbor_") or op_name.startswith("atlas_"):
                         apply_bbox = None
+                    op_callable = op_fns[op_name]
+                    if kernel_override_supported and kernel_size is not None:
+                        def _kernel_override_callable(
+                            m: np.ndarray,
+                            _op_name: str = op_name,
+                            _kernel_size: int = int(kernel_size),
+                        ) -> np.ndarray:
+                            overridden = _apply_op_with_kernel_override(
+                                m, _op_name, self.cfg, _kernel_size
+                            )
+                            if overridden is not None:
+                                return overridden
+                            return op_fns[_op_name](m)
 
-                    if apply_bbox:
-                        result = _apply_local_op(ctx.current_mask, op_fns[op_name], apply_bbox)
+                        op_callable = _kernel_override_callable
+
+                    if apply_bbox and op_name not in _GLOBAL_ONLY_OPS:
+                        result = _apply_local_op(ctx.current_mask, op_callable, apply_bbox)
                         self.log(f"  [{step_idx}] {op_name} (local): Applied to {apply_bbox}")
                     else:
-                        result = op_fns[op_name](ctx.current_mask)
+                        if apply_bbox and op_name in _GLOBAL_ONLY_OPS:
+                            self.log(f"  [{step_idx}] {op_name} (global-forced): bbox ignored for topology op")
+                        result = op_callable(ctx.current_mask)
             except Exception as e:
                 self.log(f"  [{step_idx}] {op_name}: FAILED ({e})")
-                ops_failed.append({"operation": op_name, "reason": str(e)})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": str(e),
+                    }
+                )
                 continue
 
             if result is None or not is_valid_candidate(result):
                 self.log(f"  [{step_idx}] {op_name}: INVALID result")
-                ops_failed.append({"operation": op_name, "reason": "invalid result"})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": "invalid result",
+                    }
+                )
                 continue
 
             # Apply diagnosis-constrained merge region:
@@ -825,7 +1115,14 @@ class ExecutorAgent(BaseAgent):
             elif enforce_directional_execution and (direction != "global") and (not is_hard_split_relabel):
                 reason = "directional_execution_region_missing"
                 self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
-                ops_failed.append({"operation": op_name, "reason": reason})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": reason,
+                    }
+                )
                 continue
 
             # Check pixel change
@@ -846,12 +1143,26 @@ class ExecutorAgent(BaseAgent):
                 if before_cc <= 1:
                     reason = f"split_source_not_fragmented (cc_before={before_cc})"
                     self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
-                    ops_failed.append({"operation": op_name, "reason": reason})
+                    ops_failed.append(
+                        {
+                            "operation": op_name,
+                            "requested_operation": requested_op,
+                            "strength": resolved_strength,
+                            "reason": reason,
+                        }
+                    )
                     continue
                 if after_cc >= before_cc:
                     reason = f"split_fragmentation_not_reduced ({before_cc}->{after_cc})"
                     self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
-                    ops_failed.append({"operation": op_name, "reason": reason})
+                    ops_failed.append(
+                        {
+                            "operation": op_name,
+                            "requested_operation": requested_op,
+                            "strength": resolved_strength,
+                            "reason": reason,
+                        }
+                    )
                     continue
                 if change_ratio > split_relabel_max_change_ratio:
                     reason = (
@@ -859,7 +1170,14 @@ class ExecutorAgent(BaseAgent):
                         f"max {split_relabel_max_change_ratio:.4f}"
                     )
                     self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
-                    ops_failed.append({"operation": op_name, "reason": reason})
+                    ops_failed.append(
+                        {
+                            "operation": op_name,
+                            "requested_operation": requested_op,
+                            "strength": resolved_strength,
+                            "reason": reason,
+                        }
+                    )
                     continue
 
             # Oracle Dice Check (Logging Only)
@@ -874,8 +1192,8 @@ class ExecutorAgent(BaseAgent):
                     pass
 
             # Trust-region guard: reject oversized edits before VLM gating.
-            max_high_ratio = float(ex_cfg.get("max_high_impact_change_ratio", 0.20))
-            max_normal_ratio = float(ex_cfg.get("max_step_change_ratio", 0.12))
+            max_high_ratio = float(ex_cfg.get("max_high_impact_change_ratio", 0.08))
+            max_normal_ratio = float(ex_cfg.get("max_step_change_ratio", 0.10))
             forced_atlas_max_ratio = float(
                 ex_cfg.get("forced_atlas_max_step_change_ratio", 0.45)
             )
@@ -904,7 +1222,14 @@ class ExecutorAgent(BaseAgent):
                     f"for {'high-impact' if is_high_impact else 'normal'} op"
                 )
                 self.log(f"  [{step_idx}] {op_name}: REJECTED ({reason})")
-                ops_failed.append({"operation": op_name, "reason": reason})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": reason,
+                    }
+                )
                 continue
 
             # ── Rule-based quality gate (GT-free) ──
@@ -985,11 +1310,16 @@ class ExecutorAgent(BaseAgent):
                 # Gate 3: Neighbor consistency — after the op, class area should
                 # not exceed 2x the neighbor's area (prevents over-filling)
                 # Exempt 'neighbor' ops because they explicitly copy from neighbor (so area will match)
+                # Exempt LV in 2CH: RV is absent so LV is the dominant structure and
+                # naturally varies more between adjacent frames than in SAX/4CH.
+                _is_2ch = "2ch" in str(ctx.view_type or "").lower()
+                _lv_2ch_exempt = _is_2ch and cid == 3
                 if (
                     nb_areas.get(cid, 0) > 0
                     and not is_repair
                     and not is_neighbor_op
                     and not is_forced_atlas
+                    and not _lv_2ch_exempt
                 ):
                     if after_area > nb_areas[cid] * 2.0:
                         accepted = False
@@ -1021,7 +1351,14 @@ class ExecutorAgent(BaseAgent):
                     pass
 
             if not accepted:
-                ops_failed.append({"operation": op_name, "reason": gate_reason})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": gate_reason,
+                    }
+                )
                 continue
 
             hard_gate_ok, hard_gate_reason, hard_gate_suggestions = self._run_hard_anatomy_gates(
@@ -1038,6 +1375,8 @@ class ExecutorAgent(BaseAgent):
             if not hard_gate_ok:
                 self.log(f"  [{step_idx}] {op_name}: REJECTED ({hard_gate_reason})")
                 fail_item: Dict[str, Any] = {"operation": op_name, "reason": hard_gate_reason}
+                fail_item["requested_operation"] = requested_op
+                fail_item["strength"] = resolved_strength
                 if hard_gate_suggestions:
                     fail_item["suggested_ops"] = [
                         s for s in hard_gate_suggestions if s in op_fns
@@ -1144,11 +1483,92 @@ class ExecutorAgent(BaseAgent):
                         vlm_reject_reason = f"strict_vlm_scoring_failed: {e}"
 
             if vlm_score_rejected:
-                ops_failed.append({"operation": op_name, "reason": vlm_reject_reason})
+                ops_failed.append(
+                    {
+                        "operation": op_name,
+                        "requested_operation": requested_op,
+                        "strength": resolved_strength,
+                        "reason": vlm_reject_reason,
+                    }
+                )
                 continue
+
+            # ── Anatomy hard gate (no-GT, view-aware) ──
+            anat_score_after_for_state: Optional[float] = None
+            anatomy_gate_enabled = bool(ex_cfg.get("anatomy_gate_enabled", True))
+            if (
+                anatomy_gate_enabled
+                and getattr(ctx, "anatomy_stats", None) is not None
+                and getattr(ctx, "anatomy_score_before", -1.0) >= 0
+                and ctx.image is not None
+            ):
+                try:
+                    from ..anatomy_score import compute_anatomy_score, _normalize_view
+                    _anat_view = _normalize_view(ctx.view_type or "")
+                    _anat_stats = ctx.anatomy_stats.get(_anat_view)
+                    if _anat_stats is not None:
+                        _anat_score_after, _ = compute_anatomy_score(
+                            result, ctx.image, _anat_view, _anat_stats
+                        )
+                        anat_score_after_for_state = float(_anat_score_after)
+                        _anat_delta = float(_anat_score_after) - float(ctx.anatomy_score_before)
+                        _anat_drop_th = float(ex_cfg.get("anatomy_gate_drop_threshold", -8.0))
+                        _anat_ref = float(getattr(ctx, "anatomy_score_current", ctx.anatomy_score_before))
+                        _anat_monotonic = bool(ex_cfg.get("anatomy_gate_monotonic", True))
+                        _anat_step_drop_tol = float(
+                            ex_cfg.get("anatomy_gate_step_drop_tolerance", 0.5)
+                        )
+                        if _anat_delta < _anat_drop_th:
+                            _anat_reason = (
+                                f"anatomy_gate: score {ctx.anatomy_score_before:.1f}"
+                                f" -> {_anat_score_after:.1f} "
+                                f"(delta={_anat_delta:+.1f} < threshold={_anat_drop_th:+.1f})"
+                            )
+                            self.log(f"  [{step_idx}] {op_name}: REJECTED ({_anat_reason})")
+                            ops_failed.append(
+                                {
+                                    "operation": op_name,
+                                    "requested_operation": requested_op,
+                                    "strength": resolved_strength,
+                                    "reason": _anat_reason,
+                                }
+                            )
+                            continue
+                        if _anat_monotonic and (
+                            float(_anat_score_after) < (_anat_ref - _anat_step_drop_tol)
+                        ):
+                            _anat_reason = (
+                                "anatomy_gate_monotonic: "
+                                f"view={_anat_view}, ref={_anat_ref:.1f}, "
+                                f"new={_anat_score_after:.1f}, "
+                                f"allowed_drop={_anat_step_drop_tol:.1f}"
+                            )
+                            self.log(f"  [{step_idx}] {op_name}: REJECTED ({_anat_reason})")
+                            ops_failed.append(
+                                {
+                                    "operation": op_name,
+                                    "requested_operation": requested_op,
+                                    "strength": resolved_strength,
+                                    "reason": _anat_reason,
+                                }
+                            )
+                            continue
+                        else:
+                            self.log(
+                                f"  [{step_idx}] {op_name}: anatomy gate OK "
+                                f"(view={_anat_view}, delta={_anat_delta:+.1f}, "
+                                f"ref={_anat_ref:.1f} -> new={_anat_score_after:.1f})"
+                            )
+                except Exception as _anat_exc:
+                    self.log(f"  [{step_idx}] {op_name}: anatomy gate error (skipped): {_anat_exc}")
 
             # Accept the step
             ctx.current_mask = result
+            if anat_score_after_for_state is not None:
+                ctx.anatomy_score_current = float(anat_score_after_for_state)
+                if not isinstance(ctx.anatomy_score_history, list):
+                    ctx.anatomy_score_history = []
+                ctx.anatomy_score_history.append(float(anat_score_after_for_state))
             if gt_mask is not None:
                 current_dice = new_dice
 
@@ -1157,16 +1577,12 @@ class ExecutorAgent(BaseAgent):
                 ctx.current_score = vlm_step_score
                 ctx.score_history.append(vlm_step_score)
 
-            # RQS removed. Defaulting values for backward compatibility in logs/CSV.
-            current_rqs = 0.0
-            rqs_delta = 0.0
-
             step_record = {
                 "name": op_name,
+                "requested_operation": requested_op or op_name,
+                "strength": resolved_strength,
+                "kernel_size": int(kernel_size) if kernel_size is not None else None,
                 "pixels_changed": px_changed,
-                "rqs_before": 0.0,
-                "rqs_after": 0.0,
-                "rqs_delta": 0.0,
                 "vlm_verdict": vlm_step_verdict.get("quality", "N/A"),
                 "vlm_score": vlm_step_score,
                 "vlm_score_prev": vlm_step_score_prev,
@@ -1175,6 +1591,7 @@ class ExecutorAgent(BaseAgent):
                 "vlm_compare_confidence": 0.0,
                 "change_ratio": round(change_ratio, 6),
                 "oracle_dice_delta": round(oracle_delta, 6) if gt_mask is not None else 0.0,
+                "offline_oracle_dice_delta": round(oracle_delta, 6) if gt_mask is not None else 0.0,
                 "high_risk_unlock": bool(high_risk_unlock_active),
                 "candidate_search": False,
             }
@@ -1228,61 +1645,138 @@ class ExecutorAgent(BaseAgent):
                 )
                 if pick is not None and pick.get("mask") is not None:
                     picked_mask = pick["mask"]
-                    px_changed = int(np.count_nonzero(picked_mask != before_mask))
-                    change_ratio = float(px_changed) / float(max(1, before_mask.size))
-                    oracle_delta = 0.0
-                    if gt_mask is not None:
-                        try:
-                            from ..eval_metrics import dice_macro
-                            new_dice = dice_macro(picked_mask, gt_mask)[0]
-                            oracle_delta = new_dice - current_dice
-                            current_dice = new_dice
-                        except Exception:
-                            oracle_delta = 0.0
-
                     op_label = f"candidate::{pick['name']}"
-                    step_record = {
-                        "name": op_label,
-                        "pixels_changed": px_changed,
-                        "rqs_before": 0.0,
-                        "rqs_after": 0.0,
-                        "rqs_delta": 0.0,
-                        "vlm_verdict": pick.get("vlm_verdict", "N/A"),
-                        "vlm_score": 0.0,
-                        "vlm_score_prev": ctx.current_score or 0.0,
-                        "vlm_confidence": float(pick.get("vlm_confidence", 0.0)),
-                        "vlm_compare_verdict": pick.get("vlm_verdict", "N/A"),
-                        "vlm_compare_confidence": float(pick.get("vlm_confidence", 0.0)),
-                        "change_ratio": round(change_ratio, 6),
-                        "oracle_dice_delta": round(oracle_delta, 6)
-                        if gt_mask is not None
-                        else 0.0,
-                        "high_risk_unlock": bool(high_risk_unlock_active),
-                        "candidate_search": True,
-                        "proxy_score": float(pick.get("proxy_score", 0.0)),
-                        "candidate_final_score": float(pick.get("final_score", 0.0)),
-                    }
-                    ctx.current_mask = picked_mask.copy()
-                    ctx.applied_ops.append(step_record)
-                    steps_applied.append(step_record)
-                    ctx.executor_candidate_search_used = True
-                    ctx.executor_candidate_search_pick = str(pick.get("name", ""))
-                    ctx.executor_candidate_search_score = float(
-                        pick.get("final_score", 0.0)
-                    )
-                    self.log(
-                        "  [CandidateSearch] accepted "
-                        f"{pick.get('name', '')} "
-                        f"(proxy={pick.get('proxy_score', 0.0):+.3f}, "
-                        f"vlm={pick.get('vlm_verdict', 'neutral')}, "
-                        f"score={pick.get('final_score', 0.0):+.3f})"
-                    )
-                    self.send_message(
-                        recipient="coordinator",
-                        msg_type=MessageType.STEP_COMPLETE,
-                        content=step_record,
-                        case_id=ctx.case_id,
-                    )
+                    candidate_gate_reject_reason = ""
+                    candidate_anat_score_after_for_state: Optional[float] = None
+                    anatomy_gate_enabled = bool(ex_cfg.get("anatomy_gate_enabled", True))
+                    if (
+                        anatomy_gate_enabled
+                        and getattr(ctx, "anatomy_stats", None) is not None
+                        and getattr(ctx, "anatomy_score_before", -1.0) >= 0
+                        and ctx.image is not None
+                    ):
+                        try:
+                            from ..anatomy_score import compute_anatomy_score, _normalize_view
+
+                            _anat_view = _normalize_view(ctx.view_type or "")
+                            _anat_stats = ctx.anatomy_stats.get(_anat_view)
+                            if _anat_stats is not None:
+                                _anat_score_after, _ = compute_anatomy_score(
+                                    picked_mask, ctx.image, _anat_view, _anat_stats
+                                )
+                                candidate_anat_score_after_for_state = float(_anat_score_after)
+                                _anat_delta = float(_anat_score_after) - float(ctx.anatomy_score_before)
+                                _anat_drop_th = float(ex_cfg.get("anatomy_gate_drop_threshold", -8.0))
+                                _anat_ref = float(
+                                    getattr(ctx, "anatomy_score_current", ctx.anatomy_score_before)
+                                )
+                                _anat_monotonic = bool(ex_cfg.get("anatomy_gate_monotonic", True))
+                                _anat_step_drop_tol = float(
+                                    ex_cfg.get("anatomy_gate_step_drop_tolerance", 0.5)
+                                )
+                                if _anat_delta < _anat_drop_th:
+                                    candidate_gate_reject_reason = (
+                                        f"anatomy_gate: score {ctx.anatomy_score_before:.1f}"
+                                        f" -> {_anat_score_after:.1f} "
+                                        f"(delta={_anat_delta:+.1f} < threshold={_anat_drop_th:+.1f})"
+                                    )
+                                elif _anat_monotonic and (
+                                    float(_anat_score_after) < (_anat_ref - _anat_step_drop_tol)
+                                ):
+                                    candidate_gate_reject_reason = (
+                                        "anatomy_gate_monotonic: "
+                                        f"view={_anat_view}, ref={_anat_ref:.1f}, "
+                                        f"new={_anat_score_after:.1f}, "
+                                        f"allowed_drop={_anat_step_drop_tol:.1f}"
+                                    )
+                                else:
+                                    self.log(
+                                        "  [CandidateSearch] anatomy gate OK "
+                                        f"(view={_anat_view}, delta={_anat_delta:+.1f}, "
+                                        f"ref={_anat_ref:.1f} -> new={_anat_score_after:.1f})"
+                                    )
+                        except Exception as _anat_exc:
+                            self.log(
+                                "  [CandidateSearch] anatomy gate error (skipped): "
+                                f"{_anat_exc}"
+                            )
+
+                    if candidate_gate_reject_reason:
+                        self.log(
+                            "  [CandidateSearch] rejected "
+                            f"{pick.get('name', '')} ({candidate_gate_reject_reason})"
+                        )
+                        ops_failed.append(
+                            {
+                                "operation": op_label,
+                                "requested_operation": str(pick.get("name", "")),
+                                "strength": "normal",
+                                "reason": candidate_gate_reject_reason,
+                            }
+                        )
+                    else:
+                        px_changed = int(np.count_nonzero(picked_mask != before_mask))
+                        change_ratio = float(px_changed) / float(max(1, before_mask.size))
+                        oracle_delta = 0.0
+                        if gt_mask is not None:
+                            try:
+                                from ..eval_metrics import dice_macro
+
+                                new_dice = dice_macro(picked_mask, gt_mask)[0]
+                                oracle_delta = new_dice - current_dice
+                                current_dice = new_dice
+                            except Exception:
+                                oracle_delta = 0.0
+
+                        step_record = {
+                            "name": op_label,
+                            "pixels_changed": px_changed,
+                            "vlm_verdict": pick.get("vlm_verdict", "N/A"),
+                            "vlm_score": 0.0,
+                            "vlm_score_prev": ctx.current_score or 0.0,
+                            "vlm_confidence": float(pick.get("vlm_confidence", 0.0)),
+                            "vlm_compare_verdict": pick.get("vlm_verdict", "N/A"),
+                            "vlm_compare_confidence": float(pick.get("vlm_confidence", 0.0)),
+                            "change_ratio": round(change_ratio, 6),
+                            "oracle_dice_delta": round(oracle_delta, 6)
+                            if gt_mask is not None
+                            else 0.0,
+                            "offline_oracle_dice_delta": round(oracle_delta, 6)
+                            if gt_mask is not None
+                            else 0.0,
+                            "high_risk_unlock": bool(high_risk_unlock_active),
+                            "candidate_search": True,
+                            "proxy_score": float(pick.get("proxy_score", 0.0)),
+                            "candidate_final_score": float(pick.get("final_score", 0.0)),
+                        }
+                        ctx.current_mask = picked_mask.copy()
+                        if candidate_anat_score_after_for_state is not None:
+                            ctx.anatomy_score_current = float(candidate_anat_score_after_for_state)
+                            if not isinstance(ctx.anatomy_score_history, list):
+                                ctx.anatomy_score_history = []
+                            ctx.anatomy_score_history.append(
+                                float(candidate_anat_score_after_for_state)
+                            )
+                        ctx.applied_ops.append(step_record)
+                        steps_applied.append(step_record)
+                        ctx.executor_candidate_search_used = True
+                        ctx.executor_candidate_search_pick = str(pick.get("name", ""))
+                        ctx.executor_candidate_search_score = float(
+                            pick.get("final_score", 0.0)
+                        )
+                        self.log(
+                            "  [CandidateSearch] accepted "
+                            f"{pick.get('name', '')} "
+                            f"(proxy={pick.get('proxy_score', 0.0):+.3f}, "
+                            f"vlm={pick.get('vlm_verdict', 'neutral')}, "
+                            f"score={pick.get('final_score', 0.0):+.3f})"
+                        )
+                        self.send_message(
+                            recipient="coordinator",
+                            msg_type=MessageType.STEP_COMPLETE,
+                            content=step_record,
+                            case_id=ctx.case_id,
+                        )
                 else:
                     self.log("  [CandidateSearch] no acceptable fallback candidate found")
 
@@ -1376,7 +1870,13 @@ class ExecutorAgent(BaseAgent):
         lv_myo_gate = bool(ex_cfg.get("gate_lv_myo_enable", True))
         if lv_myo_gate and 3 in required_ids:
             valve_margin = int(ex_cfg.get("gate_valve_exempt_margin_px", 6))
-            min_cov = float(ex_cfg.get("gate_lv_myo_min_coverage", 0.70))
+            # 2CH is a long-axis view: LV extends to apex where Myo does not
+            # surround it, so natural coverage is much lower than SAX.
+            _is_2ch_view = "2ch" in str(view_type or "").lower()
+            if _is_2ch_view:
+                min_cov = float(ex_cfg.get("gate_lv_myo_min_coverage_2ch", 0.30))
+            else:
+                min_cov = float(ex_cfg.get("gate_lv_myo_min_coverage", 0.70))
             allow_drop = float(ex_cfg.get("gate_lv_myo_allow_drop", 0.03))
             cov_before = _lv_myo_coverage(before_mask, valve_y=valve_y, valve_margin_px=valve_margin)
             cov_after = _lv_myo_coverage(after_mask, valve_y=valve_y, valve_margin_px=valve_margin)

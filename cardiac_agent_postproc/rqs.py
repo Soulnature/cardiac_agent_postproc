@@ -450,7 +450,7 @@ def compute_rqs(mask: np.ndarray,
     P_touch = 0.0
     w_touch = weights.get("P_touch", 50.0)
     if view_type in ("3ch","4ch") and w_touch > 0:
-        if touch > 0:
+        if touch >= 3:
              # Logic from user code: weights["P_touch"] + 10 * min(5, touch/50)
              P_touch = w_touch + 10.0 * min(5.0, touch/50.0)
 

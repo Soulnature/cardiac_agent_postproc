@@ -3733,3 +3733,1276 @@ Copy the template below and append it to the end of this file:
   - `WORKLOG.md`
 - Notes:
   - 本轮先完成“上传 V2 再改”的顺序要求；改动重点是减少“误拒 + 无步可走”导致的劣化，并增强每个 case 的可解释诊断日志。
+
+### Session: 2026-02-21 12:30 CST
+- Current goal:
+  - 按用户要求“运行测试一下”，验证 `V2` 改动后的 gpt-4o 流程可运行，并覆盖到 repair 链路。
+- Done:
+  - 启动过一次全量命令（320 cases）并确认流程正常进入 `Stage1 Triage`，随后为快速回报中断并转为 smoke。
+  - 完成 smoke-1（`--limit 1`）：
+    - 输出目录：`results/exp_mnm2_gpt4o_v2_proxy_unlock_smoke1`
+    - case `201_original_lax_4c_000` 被 triage 判为 good，repair cases=0（无修复样本）。
+  - 完成定向 worst case smoke（`--case_contains 209_original_lax_4c_022 --limit 1`）：
+    - 输出目录：`results/exp_mnm2_gpt4o_v2_proxy_unlock_smoke_case209022`
+    - `FinalVerdict=approved`
+    - Dice mean: `0.798967 -> 0.799204`（`+0.000237`）
+    - `AppliedOps=["candidate::3_dilate", "morphological_gap_close"]`
+    - 诊断字段：`VerifyConsensusVerdict=approve`, `VerifyConsensusScore=1.85071`, `ExecHighRiskUnlock=True`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_v2_proxy_unlock --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `results/exp_mnm2_gpt4o_v2_proxy_unlock_smoke1/triage/triage_results.csv`
+  - `results/exp_mnm2_gpt4o_v2_proxy_unlock_smoke_case209022/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_v2_proxy_unlock_smoke_case209022/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - smoke-1 选中的样本未触发 repair，属于 triage 正常分流。
+  - 定向 worst case 已验证 diagnosis/planner/executor/verifier 全链路可运行并产生正向 Dice 改善（小幅）。
+
+### Session: 2026-02-21 13:47 CST
+- Current goal:
+  - 回答用户“修改后的 label 是否有提升”，基于正在运行的 worst-only 修复结果做中间统计。
+- Done:
+  - 对 `results/exp_mnm2_gpt4o_v2_worst_only/repair/repaired_labels` 已完成样本做 GT Dice 复算（使用 `read_mask + dice_macro`）。
+  - 当前进度（中间结果）：completed=37/39，improved=8，unchanged=8，degraded=21。
+  - 当前统计：mean Dice delta=`-0.007007`，median Dice delta=`-0.000964`（整体暂未净提升）。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst_only --target_dir results/exp_mnm2_gpt4o_v2_worst_only --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `results/exp_mnm2_gpt4o_v2_worst_only/repair/repaired_labels/`
+  - `results/exp_mnm2_gpt4o_v2_worst_only/repair/_interim_dice_from_labels.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 该统计为任务进行中的中间快照；最终口径以任务完成后 `need_fix_diagnosis_repair_results.csv` 为准。
+
+### Session: 2026-02-21 14:58 CST
+- Current goal:
+  - 按用户要求先落地优化点 2/3：
+    1) 关闭修复后标签回写邻居；
+    2) 每个 case 重置全部 agent memory；
+    并查看效果。
+- Done:
+  - 代码改动（`scripts/run_miccai_multiagent_experiment.py`）：
+    - `local_per_sample` 构建 donor atlas 时，donor mask 改为优先 `original_mask`（不再用 `current_mask`）。
+    - `Stage1 Triage` 每个 case 前执行 `triage_agent.reset_memory()`。
+    - 新增 `_reset_agents_memory()`，在 `Stage2 Repair` 每个 case 开始前重置全部 agents memory。
+    - 邻居回写改为受控开关：`multi_agent.share_repair_to_neighbors`（默认 `False`），默认不再执行 `_update_neighbor_masks_for_group`。
+  - 语法校验通过：
+    - `python -m py_compile scripts/run_miccai_multiagent_experiment.py`
+  - 回归实验（新代码）：
+    - 命令：
+      `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst_only --target_dir results/exp_mnm2_gpt4o_v2_worst_only_fix23_limit10 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --limit 10`
+    - 结果：`Repair mean Dice delta = -0.0051`。
+  - 与旧代码同批 10 case 对照（基于 `repaired_labels` 重算 Dice）：
+    - Old mean delta: `-0.003157`
+    - New mean delta: `-0.005076`
+    - Mean(new-old): `-0.001919`
+    - improved/degraded/unchanged：旧 `4/4/2`，新 `4/4/2`（结构相同，但均值略差）。
+    - 对照文件：`results/exp_mnm2_gpt4o_v2_worst_only_fix23_limit10/repair/_compare_old_vs_fix23_limit10.csv`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_gpt4o_v2_fix23_worst39_from_fullsource --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `results/exp_mnm2_gpt4o_v2_worst_only_fix23_limit10/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_v2_worst_only_fix23_limit10/repair/_compare_old_vs_fix23_limit10.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 仅改 2/3 后，小样本对照未显示净提升；影响更大的瓶颈仍是参考集质量与运行设置（当前 `worst_only` 下 `best=0/10`，4-way refs 退化）。
+
+### Session: 2026-02-22 09:20 CST
+- Current goal:
+  - 按 `Plan_fix.md` 完成全项目改造：结构化 knowledge 检索、verifier 分数阈值化、strict no-GT online 隔离、校准与泄漏检查工具落地。
+- Done:
+  - `knowledge` 结构化改造：
+    - 在 `cardiac_agent_postproc/agents/visual_knowledge.py` 新增 `KnowledgeRecord`，并为 `VisualKnowledgeBase` / `RepairComparisonKB` 增加 typed record 归一化与确定性 `retrieve(stage, view_type, defect_tags, top_k)`。
+    - 兼容 legacy KB 文件名格式加载，并在首次加载时输出 migration warning。
+  - verifier/比较链路改造：
+    - 在 `cardiac_agent_postproc/agents/base_agent.py` 重写 `judge_repair_comparison(...)` 输出合同：`verdict, score(0-100), quality, confidence, matched_example_ids, reason`。
+    - `judge_visual_quality(...)` 与 repair comparison 均补齐 `matched_example_ids`，并在 strict 模式去除 Dice/GT 相关提示文本。
+    - 在 `cardiac_agent_postproc/agents/verifier_agent.py` 中：
+      - 引入 `online_score` 计算与阈值映射（`reject/approve` + per-view）；
+      - 引入 `strict_no_gt_online`（strict 时不向 prompt 注入 Dice 信息，proxy 共识不再吃 Dice bonus）；
+      - 写出每 case `*_verifier_payload.json`（online prompt/data + offline oracle metrics）；
+      - 记录 `online_matched_example_ids` 与 `knowledge_trace`。
+  - strict online/offline 隔离改造：
+    - `cardiac_agent_postproc/agents/coordinator.py`：strict 模式下 best-intermediate 评分与候选判断不再依赖 Dice 分支。
+    - `cardiac_agent_postproc/agents/executor.py`：补充 `offline_oracle_dice_delta` 命名空间字段（保留兼容字段）。
+    - `cardiac_agent_postproc/agents/message_bus.py`：新增 `knowledge_trace` 到 `CaseContext`。
+  - 实验脚本与报告改造：
+    - `scripts/run_miccai_multiagent_experiment.py`：新增 `--strict_no_gt_online` 与 `--save_baseline_snapshot`，输出 `online_*` / `offline_oracle_*` 字段，新增 `summary/verifier_score_calibration.csv`、`summary/verifier_threshold_recommendation.json`，并在 summary 写入阈值、approved degradation rate、score-bin 分布。
+    - `scripts/run_workflow_model_compare.py`：透传 `--strict_no_gt_online`。
+  - 新增工具脚本：
+    - `scripts/calibrate_verifier_scores.py`（历史结果阈值校准）。
+    - `scripts/check_gt_leakage.py`（strict 模式下在线 prompt/payload 泄漏检查）。
+  - 配置补全：
+    - `config/azure_openai_medrag.yaml`
+    - `config/openai_official_gpt52_medrag.yaml`
+    - `config/default.yaml`
+    - 新增 `multi_agent.strict_no_gt_online` 与 `verifier.thresholds`（含 per-view）。
+  - 校验：
+    - `python -m py_compile cardiac_agent_postproc/agents/visual_knowledge.py cardiac_agent_postproc/agents/base_agent.py cardiac_agent_postproc/agents/verifier_agent.py cardiac_agent_postproc/agents/coordinator.py cardiac_agent_postproc/agents/message_bus.py cardiac_agent_postproc/agents/executor.py scripts/run_miccai_multiagent_experiment.py scripts/run_workflow_model_compare.py scripts/calibrate_verifier_scores.py scripts/check_gt_leakage.py`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_planfix_strict_probe --knowledge_mode auto_skip --atlas_mode local_per_sample --strict_no_gt_online true --limit 5 --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `scripts/calibrate_verifier_scores.py`
+  - `scripts/check_gt_leakage.py`
+  - `WORKLOG.md`
+- Notes:
+  - 已完成“结构化检索 + 阈值化 + strict no-GT + calibration/leakage utility”主干代码落地；尚未在 full-run 上执行 A/B 对照（建议按 `Plan_fix.md` Phase 4 跑 matched experiments）。
+
+### Session: 2026-02-22 10:42 CST
+- Current goal:
+  - 按用户要求将提示词升级为更严格工程级格式，并联网补充 LV/RV/Myo 形态学与相互关系先验，提升 LLM 稳定性与自信。
+- Done:
+  - 联网检索并提炼 anatomy 先验（用于 prompt 约束）：
+    - RV 相对 LV 更易呈新月/三角样且小梁更明显；LV 更平滑紧凑；室间隔位于 LV 与 RV 之间。
+    - Myo 在本任务中作为 LV myocardium 语义使用（非 RV 壁语义），并保持视图感知约束（SAX 更严格，LAX/basal/apical 更保守）。
+  - 提示词工程化改造（严格 JSON 合同 + 枚举 + 无额外键）：
+    - `prompts/triage_system.txt`
+    - `prompts/diagnosis_system.txt`
+    - `prompts/diagnosis_prompt.txt`
+    - `prompts/verifier_system.txt`
+  - 知识构建链路补强：
+    - `cardiac_agent_postproc/agents/visual_knowledge.py` 的 `build_knowledge_prompt()` 新增 evidence-backed anatomy priors，且将闭环约束改为 SAX 严格 / LAX 保守。
+  - 解析鲁棒性补强：
+    - `cardiac_agent_postproc/agents/triage_agent.py`：`_canonicalize_issue()` 支持 spatial-tag issue（如 `disconnected_myo_at_lateral`）归一化。
+    - `cardiac_agent_postproc/agents/verifier_agent.py`：新增 `remaining_issues` 归一化逻辑，统一到 canonical codes，避免下游漂移。
+  - 语法校验通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/base_agent.py cardiac_agent_postproc/agents/triage_agent.py cardiac_agent_postproc/agents/verifier_agent.py cardiac_agent_postproc/agents/visual_knowledge.py`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_prompt_anatomy_strict_probe --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --limit 5`
+- Key files:
+  - `prompts/triage_system.txt`
+  - `prompts/diagnosis_system.txt`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/verifier_system.txt`
+  - `cardiac_agent_postproc/agents/visual_knowledge.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 本次改造目标是“提示词合同化 + anatomy 先验化 + 解析端兜底化”，优先降低 hallucination 与格式漂移，再提升可解释性与稳定性。
+
+### Session: 2026-02-22 01:52 CST
+- Current goal:
+  - 将修复操作从“自由参数”改为 LLM 可给出的离散档位建议（mild/normal/strong），并给出有文献/官方文档支撑的默认形态学强度映射。
+- Done:
+  - 执行器强度档位落地：
+    - 在 `cardiac_agent_postproc/agents/executor.py` 增加 `strength` 归一化与 `operation+strength` 解析逻辑（兼容旧式 `_mild/_strong` 操作名）。
+    - 为关键操作补齐强度变体：`myo_bridge_mild/strong`、`rv_lv_barrier_mild/strong`、`topology_cleanup_mild/strong`、`2/3/1_dilate_mild/strong`、`2/3/rv_erode_mild/strong`。
+    - 执行记录中新增 `requested_operation` 与 `strength` 字段，失败记录保留解析后的强度信息。
+  - 操作参数接口增强（仍保持非自由输入）：
+    - `cardiac_agent_postproc/ops.py` 的 `dilate_or_erode(...)` 新增可控参数：`kernel_size`、`iterations`、`kernel_shape`（cross/ellipse/rect）。
+    - `myo_bridge(...)` 新增 `bridge_thickness`。
+    - `rv_lv_barrier(...)` 新增 `touch_dilate_iters` 与 `barrier_dilate_iters`。
+  - 规划侧合同化：
+    - `prompts/planner_system.txt` 新增强度策略，要求每步输出 `strength: mild|normal|strong`，禁止自由数值参数。
+    - `cardiac_agent_postproc/agents/planner_agent.py` 增加强度字段解析与标准化；`_sanitize_plan(...)` 会将操作后缀 `_mild/_strong` 归一化到 `strength` 字段。
+  - 联网检索（官方文档+论文）并据此确定默认档位建议：
+    - mild：`3x3 cross, iter=1`
+    - normal：`3x3 ellipse, iter=1`
+    - strong：`5x5 ellipse, iter=1`
+  - 语法校验通过：
+    - `python -m py_compile cardiac_agent_postproc/ops.py cardiac_agent_postproc/agents/executor.py cardiac_agent_postproc/agents/planner_agent.py`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_strength_tier_ab --knowledge_mode auto_skip --atlas_mode local_per_sample --strict_no_gt_online true --limit 20`
+- Key files:
+  - `cardiac_agent_postproc/ops.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `prompts/planner_system.txt`
+  - `WORKLOG.md`
+- Notes:
+  - 采用“档位映射 + 代码硬门控”替代“LLM自由参数”，兼顾可控性与可解释性；默认 mild 使用 `3x3 cross`（比 `3x3 ellipse` 更保守）以降低过修复风险。
+
+### Session: 2026-02-22 02:20 CST
+- Current goal:
+  - 基于 GPT-4o 跑 10 个 worst cases，并输出可直接查阅的结果汇总。
+- Done:
+  - 先发现并确认了“未进入 repair”的原因：`--repair_subset worst_cases` 只决定候选修复队列；若本轮 `all_frames_export` 未包含这些 stem，则 repair 队列为空。
+  - 构建了仅含 curated worst 前 10 个 stem 的子数据根目录：
+    - `results/Input_MnM2_worst10_subset`
+    - 其中 `all_frames_export` 仅保留 10 例（img/pred/gt），`best_cases` 与 `worst_cases` 软链到原目录。
+  - 完整运行实验（triage + repair + summary）：
+    - 命令：`python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+    - 结果：`repair cases=10`，`mean Dice delta=-0.0099`，`approved=9/10`，`improved_count=2`。
+  - 生成了用户要求的 Markdown 报告（含每例明细 + 汇总）：
+    - `results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier/RESULTS_worst10_gpt4o.md`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier_rerun_seed2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier/triage/triage_results.csv`
+  - `results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier/summary/experiment_summary.json`
+  - `results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier/RESULTS_worst10_gpt4o.md`
+  - `WORKLOG.md`
+- Notes:
+  - 本次“真实 worst 10”运行中，候选搜索操作（如 `candidate::3_dilate`）被频繁选中；虽然在线 verifier 多数批准，但离线 Dice 总体仍下降，后续建议做多次重跑取均值并增加保守阈值校准。
+
+### Session: 2026-02-22 11:28 CST
+- Current goal:
+  - 排查“上次结果为什么没有提升”的具体原因，确认是评估口径问题还是验证放行逻辑问题。
+- Done:
+  - 对最近结果做了复核：
+    - `results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier/summary/experiment_summary.json`：`delta_dice_mean=-0.009891`，`improved_count=2/10`，`approved_degradation_rate=0.7778`。
+    - `results/exp_ukb_ollama_ministral3_20260222_r2/summary/experiment_summary.json`：`delta_dice_mean=-0.017071`，`improved_count=5/66`，`approved_degradation_rate=0.8913`。
+  - 定位到 verifier 比较判定与离线结果强烈背离：
+    - UKB run 中 `VerifyCompareVerdict=improved` 有 46 例，但这些样本平均 `offline_oracle_dice_delta_mean=-0.024282`。
+  - 进一步定位到具体代码机制：
+    - `cardiac_agent_postproc/agents/base_agent.py` 的 `judge_repair_comparison()` 里存在 diff-stats 规则覆盖（`LOGIC OVERRIDE`）。
+    - 在 `n_add>0 and n_rem<30` 的启发式下，多例被强制改判为 `improved`；UKB run 中检测到 `degraded -> improved` 覆盖 8 例（payload 证据见 `results/exp_ukb_ollama_ministral3_20260222_r2/repair/debug_overlays/*_img_verifier_payload.json`）。
+  - 结论：并非“没执行修复”，而是“修复后大量退化样本被错误放行”，导致总体 Dice 不升反降。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_fix_verifier_override_probe --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `results/exp_mnm2_gpt4o_worst10_trueworst_strength_tier/summary/experiment_summary.json`
+  - `results/exp_ukb_ollama_ministral3_20260222_r2/summary/experiment_summary.json`
+  - `results/exp_ukb_ollama_ministral3_20260222_r2/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_ukb_ollama_ministral3_20260222_r2/repair/debug_overlays/2121638_2_original_lax_3c_000_img_verifier_payload.json`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 本次排查重点是“为什么在线 high-score 仍出现大面积负向 Dice”；核心问题是 compare 结果被启发式强制正向，进而推高 `online_score` 并跨过 `approve` 阈值。
+
+### Session: 2026-02-22 11:35 CST
+- Current goal:
+  - 按用户要求收紧 verifier 的 override 规则，降低“误把退化修复判成 improved”的风险。
+- Done:
+  - 修改 `cardiac_agent_postproc/agents/base_agent.py`（`judge_repair_comparison()`）的 diff-stats override 逻辑：
+    - 删除宽松规则 `n_add > 0 and n_rem < 30 -> improved`。
+    - 将“improved”覆盖条件收紧为强证据场景：
+      - `strong_relabel_fix`: pure relabel 且 `n_chg >= 120`；
+      - `strong_additive_fix`: `n_add >= max(120, 3*n_rem)` 且 `n_rem <= 20` 且 `n_chg <= max(40, 0.5*n_add)`。
+    - 新增保守覆盖策略：
+      - 强回归证据可强制覆盖到 `degraded`；
+      - 若证据仅 `neutral` 且当前是 `improved`，下调为 `neutral`；
+      - 禁止 `degraded -> improved` 的启发式翻转。
+  - 语法校验通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/base_agent.py`
+  - 用历史 UKB payload 做规则重放估计：
+    - compare 判定从 `improved=46/52` 变为 `improved=5/52, neutral=41/52, degraded=3/52`；
+    - 共 44 例被下调（主要 `improved -> neutral`），覆盖了多例大幅负向 Dice 样本。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_fix_verifier_override_probe --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `results/exp_ukb_ollama_ministral3_20260222_r2/repair/debug_overlays/2121638_2_original_lax_3c_000_img_verifier_payload.json`
+  - `results/exp_ukb_ollama_ministral3_20260222_r2/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 这次改动意图是“宁可保守不给过，也不让明显高风险修复被自动抬升到 improved”。
+
+### Session: 2026-02-22 11:48 CST
+- Current goal:
+  - 参考已发表心脏分割后处理工作，把执行阶段的形态学操作与门控阈值从“偏激进”下调到“保守可控”。
+- Done:
+  - 收紧并参数化核心操作（`cardiac_agent_postproc/ops.py`）：
+    - `morph_close_large` 默认核从大核改为可配置保守核（默认 5，奇数约束）。
+    - `morphological_gap_close` 改为 `close-open-close` 顺序滤波，并加入 `gap_close_max_myo_growth_ratio` 增长上限（默认 0.12，超限回退 no-op）。
+    - `rv_lv_barrier` 改为配置驱动的接触/屏障膨胀迭代，新增 `rv_lv_barrier_max_new_myo_ratio`（默认 0.04）防止过扩张。
+    - coupled erosion 系列改为 `coupled_erosion_min_iters`（默认 1），不再强制至少 2 次侵蚀。
+  - 收紧执行器映射与默认值（`cardiac_agent_postproc/agents/executor.py`）：
+    - `myo_bridge/lv_bridge` 从硬编码厚度改为配置驱动（默认 normal=2、mild=1、strong=3）。
+    - `rv_lv_barrier` mild/normal/strong 改为配置驱动（默认 normal=3/1，mild=2/1，strong=4/2）。
+    - 回退默认门限改保守：`candidate_search_max_change_ratio` 0.14→0.10，`candidate_search_accept_score` 0.10→0.14，`max_high_impact_change_ratio` 默认 0.08，`max_step_change_ratio` 默认 0.10。
+  - 同步三份配置（`config/default.yaml`、`config/azure_openai_medrag.yaml`、`config/openai_official_gpt52_medrag.yaml`）：
+    - 新增上述 `ops` 参数键并给出保守默认值。
+    - 执行门限下调：`max_high_impact_change_ratio=0.07`，`max_step_change_ratio=0.08`，`candidate_search_max_change_ratio=0.10`，`candidate_search_accept_score=0.14`。
+    - high-risk unlock 收紧：`high_risk_unlock_change_ratio_scale=1.20`，`high_risk_unlock_max_ratio_cap=0.18`。
+  - 校验通过：
+    - `python -m py_compile cardiac_agent_postproc/ops.py cardiac_agent_postproc/agents/executor.py cardiac_agent_postproc/agents/base_agent.py`
+    - 三份 YAML `yaml.safe_load` 解析成功。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_conservative_ops_tuning_20260222 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/ops.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 本次方向是“先避免过修复，再逐步放开”，与文献中常见的小核顺序形态学+连通域优先清理策略一致。
+
+### Session: 2026-02-22 17:12 CST
+- Current goal:
+  - 明确本项目中 LLM 的有效职责边界，回答“Verifier 幻觉严重时，是否还应让 LLM 直接做诊断”。
+- Done:
+  - 逐文件核查了 `triage/diagnosis/planner/executor/verifier` 的决策链，确认各环节“LLM是否最终拍板”。
+  - 关键结论：`VerifierAgent` 的最终 verdict 并非由 LLM 文本决定，而是由 `online_score + 阈值` 决定；LLM 主要用于 `reasoning/remaining_issues` 文案层输出。
+  - 发现风险点：`DiagnosisAgent` 中 LLM 合成结果优先级较高（rule 作为补充），该环节更容易引入 hallucination 并影响后续操作选择。
+  - 形成建议：将 LLM 主职收敛到“计划编排/失败重规划/解释总结”，把“缺陷检测与验收判定”继续放在规则+VLM+硬门控侧。
+- Blocked:
+  - None
+- Next command:
+  - `rg --line-number "_llm_triage|_parse_llm_diagnoses|_should_retry|remaining_issues" cardiac_agent_postproc/agents -n`
+- Key files:
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `cardiac_agent_postproc/agents/triage_agent.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/base_agent.py`
+  - `cardiac_agent_postproc/api_client.py`
+  - `WORKLOG.md`
+- Notes:
+  - 当前代码已做了不少“去LLM化”安全设计（阈值判定、硬门控、候选搜索、fallback plan）；后续收益最高的是进一步降低 diagnosis/remaining_issues 对自由文本 LLM 的依赖。
+
+### Session: 2026-02-22 19:21 CST
+- Current goal:
+  - 实现“anatomy_score 协同接入 LLM（Diagnosis + Planner + Verifier）”方案：LLM可参考结构化解剖参数，但最终决策仍由硬门控/阈值主导。
+- Done:
+  - 在 `cardiac_agent_postproc/anatomy_score.py` 新增 `build_anatomy_llm_summary()`：输出 `score/risk_level/hard_violations/top_anomalies/action_tags` 的结构化摘要。
+  - 在 `cardiac_agent_postproc/agents/message_bus.py` 的 `CaseContext` 新增：
+    - `anatomy_baseline_summary`
+    - `anatomy_latest_summary`
+  - 在 `cardiac_agent_postproc/agents/coordinator.py` 的 `_init_anatomy_baseline()` 中：
+    - 计算 baseline anatomy score 后构建 summary；
+    - 写入 `ctx.anatomy_baseline_summary` 与 `ctx.anatomy_latest_summary`。
+  - 在 `cardiac_agent_postproc/agents/diagnosis_agent.py`：
+    - 读取 `multi_agent.anatomy_llm_*` 开关与 scope；
+    - 在 diagnosis prompt 的 `all_signals` 中注入 `anatomy_summary`（结构化摘要）；
+    - `_diagnose_anatomy()` 每轮更新 `ctx.anatomy_latest_summary`。
+  - 在 `cardiac_agent_postproc/agents/planner_agent.py`：
+    - 为 `process_case()` 与 `revise_plan()` 注入 anatomy structured summary（baseline/latest/last_verify_anatomy_signal）；
+    - 扩展 `_sanitize_plan()` 支持 `anatomy_summary + view_type`；
+    - 新增确定性冲突过滤 `_step_conflicts_with_anatomy()`（例如 2CH 的 RV contamination 场景下拦截增大 RV 的计划步骤）；
+    - 使 fallback/revise 分支同样走 anatomy 过滤，避免绕过约束。
+  - 在 `cardiac_agent_postproc/agents/verifier_agent.py`：
+    - prompt 注入 anatomy structured summary；
+    - `_compute_anatomy_signal()` 生成 `summary_after` 并刷新 `ctx.anatomy_latest_summary`；
+    - 新增 `_apply_anatomy_violation_policy()`：当修复后 hard violations 增加且无强置信 improved 证据时，确定性降级到拒绝；
+    - 将 `anatomy_signal` 写入 `ctx.last_verify_result`、bus 消息与 verifier payload。
+  - 配置同步：
+    - `config/default.yaml`
+    - `config/azure_openai_medrag.yaml`
+    - `config/openai_official_gpt52_medrag.yaml`
+    - 新增/同步 `anatomy_stats_path`（后两者）、`multi_agent.anatomy_llm_enable/anatomy_llm_top_k/anatomy_llm_scope`、`verifier.anatomy_hard_violation_reject`，并补齐 anatomy gate 相关键。
+  - 校验通过：
+    - `python -m py_compile`（核心修改文件）
+    - 三份 YAML `yaml.safe_load`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_anatomy_llm_collab_20260222 --repair_subset triage_need_fix --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/anatomy_score.py`
+  - `cardiac_agent_postproc/agents/message_bus.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 当前实现遵循“协同模式”：LLM可读解剖结构化参数参与诊断/规划/解释，但不能覆盖硬门控与阈值策略。
+
+### Session: 2026-02-22 19:37 CST
+- Current goal:
+  - 强化“view-specific 结构参数约束 + 向好优化保证”：确保LLM只在解剖分不退化轨道内优化。
+- Done:
+  - 在 `cardiac_agent_postproc/agents/executor.py` 实现 anatomy 分数的单调门控：
+    - 新增 per-step 参考分 `ctx.anatomy_score_current` 与历史 `ctx.anatomy_score_history` 的维护；
+    - 在原有 baseline drop gate 之外，新增 `anatomy_gate_monotonic` 规则：若 step 后 anatomy 分低于参考分超过 `anatomy_gate_step_drop_tolerance` 则拒绝该步；
+    - 日志中输出 view 与 ref/new 分，便于排查。
+  - 在 `cardiac_agent_postproc/agents/message_bus.py` 扩展 `CaseContext`：
+    - `anatomy_score_current`
+    - `anatomy_score_history`
+  - 在 `cardiac_agent_postproc/agents/coordinator.py` 的 anatomy baseline 初始化时，同步初始化上述两个字段。
+  - 在 `cardiac_agent_postproc/agents/planner_agent.py` 的 anatomy 冲突过滤中补充 view 一致性校验，避免跨-view summary 误用。
+  - 在 `cardiac_agent_postproc/agents/verifier_agent.py` 的 hard-violation policy 中补充 view 规范化匹配（2c/2ch、3c/3ch、4c/4ch 等价）。
+  - 配置同步（3个主配置）：
+    - `executor.anatomy_gate_monotonic: true`
+    - `executor.anatomy_gate_step_drop_tolerance: 0.5`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2 --target_dir results/exp_mnm2_anatomy_llm_monotonic_20260222 --repair_subset triage_need_fix --atlas_mode local_per_sample --knowledge_mode auto_skip`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/message_bus.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 该改动把“向好优化”从LLM意图层下沉为确定性执行约束：即便LLM建议偏激，step级 anatomy gate 也会阻断逆向退化。
+
+### Session: 2026-02-22 20:11 CST
+- Current goal:
+  - 用当前 pipeline 在 `results/Input_MnM2_worst10_subset` 先跑 2 个 case，验证修复后标签质量是否提升。
+- Done:
+  - 运行了 2-case 试验：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_anatomy_llm_two_case_20260222 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+  - 核验产物与指标：
+    - `repair/need_fix_diagnosis_repair_results.csv`
+    - `repair/repair_summary_metrics.csv`
+    - `summary/experiment_summary.json`
+  - 两个 case 的离线 Dice 均下降：
+    - `209_original_lax_4c_004`: `0.8146 -> 0.8061` (Δ `-0.0085`)
+    - `209_original_lax_4c_022`: `0.7990 -> 0.7773` (Δ `-0.0216`)
+  - 汇总：`delta_dice_mean = -0.0151`，`improved_count = 0/2`，`worsened_count = 2/2`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_anatomy_llm_worst10_rerun --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true`
+- Key files:
+  - `WORKLOG.md`
+  - `results/exp_mnm2_anatomy_llm_two_case_20260222/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_anatomy_llm_two_case_20260222/repair/repair_summary_metrics.csv`
+  - `results/exp_mnm2_anatomy_llm_two_case_20260222/summary/experiment_summary.json`
+- Notes:
+  - 当前两例中，LLM/VLM 在线评分与离线 Dice 方向不一致（出现“approve 但 Dice 下降”），后续需进一步收紧 gate 或调整候选选择策略。
+
+### Session: 2026-02-22 20:22 CST
+- Current goal:
+  - 按需求补两处硬化：1) candidate fallback 不得绕过 anatomy monotonic gate；2) verifier 在无 hard violation 时也能因 anatomy score 负向回退而拒绝。
+- Done:
+  - 在 `cardiac_agent_postproc/agents/executor.py` 的 candidate 接收路径新增 anatomy gate 复核：
+    - 对 `picked_mask` 计算 anatomy score（view-aware）；
+    - 复用 `anatomy_gate_drop_threshold` + `anatomy_gate_monotonic` + `anatomy_gate_step_drop_tolerance` 规则；
+    - 若不满足则拒绝该 candidate 并写入 `ops_failed`；
+    - 通过时同步更新 `ctx.anatomy_score_current` 与 `ctx.anatomy_score_history`，避免状态漂移。
+  - 在 `cardiac_agent_postproc/agents/verifier_agent.py` 的 `_apply_anatomy_violation_policy()` 新增 delta 硬降级：
+    - 新增配置 `verifier.anatomy_delta_reject_enable`、`verifier.anatomy_delta_reject_threshold`；
+    - 当 `anatomy_signal.delta < threshold` 时，即使 `hard_violations` 没增加，也将 `approve/needs_more_work` 降级为 `reject`，并附带 `anatomy_score_regression`。
+  - 在三份配置写入新阈值键：
+    - `config/default.yaml`
+    - `config/azure_openai_medrag.yaml`
+    - `config/openai_official_gpt52_medrag.yaml`
+  - 语法/配置校验通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/executor.py cardiac_agent_postproc/agents/verifier_agent.py`
+    - `yaml.safe_load` 三份配置均 `OK`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_anatomy_llm_two_case_hardened_20260222 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 当前 hardening 会提升“拒绝退化候选”的概率，可能牺牲部分 recall；建议先用同样 2-case 设置做对照验证方向是否变正。
+
+### Session: 2026-02-22 21:06 CST
+- Current goal:
+  - 将 approved 分支改为：比较 `current_mask` 与 `best_intermediate_mask` 的 no-GT 联合评分（LLM在线分 + 解剖结构分），保存更高分标签。
+- Done:
+  - 在 `scripts/run_miccai_multiagent_experiment.py` 新增 approved 终选逻辑：
+    - `_compute_anatomy_score_for_mask()`：对候选 mask 计算 view-aware anatomy score（无 GT）。
+    - `_blend_approved_pick_score()`：联合分 `blend = w_llm*online_score + w_anatomy*anatomy_score`（缺失值回退 50）。
+    - `_select_approved_final_mask()`：在 `approved` 时对 `current_mask` 与 `best_intermediate_mask` 打分并选优保存。
+  - 在 `_run_repair_stage()` 中替换保存分支：
+    - `approved` 不再固定保存 `current_mask`，而是保存联合分更高者；
+    - 保留 `SavedMaskType` 语义（`repaired` / `best_intermediate`）。
+  - 在 repair CSV 新增审计字段：
+    - `BestIntermediateOnlineScore`, `BestIntermediateAnatomyScore`
+    - `FinalPickSource`
+    - `FinalPickCurrentOnlineScore`, `FinalPickCurrentAnatomyScore`, `FinalPickCurrentBlendedScore`
+    - `FinalPickBestOnlineScore`, `FinalPickBestAnatomyScore`, `FinalPickBestBlendedScore`
+  - 在 `CaseContext` 新增 best-intermediate 的分数缓存字段：
+    - `best_intermediate_online_score`
+    - `best_intermediate_anatomy_score`
+  - 在 `Coordinator` 的 `_maybe_update_best_intermediate()` 写入上述两类分数；并在 baseline 初始化时补齐默认值。
+  - 在三份配置新增可调权重：
+    - `multi_agent.approved_pick_llm_weight` (默认 `0.60`)
+    - `multi_agent.approved_pick_anatomy_weight` (默认 `0.40`)
+    - `multi_agent.approved_pick_min_margin` (默认 `1e-6`)
+  - 校验通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/message_bus.py cardiac_agent_postproc/agents/coordinator.py scripts/run_miccai_multiagent_experiment.py`
+    - 三份 YAML `yaml.safe_load` 通过。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_anatomy_llm_two_case_hardened_pick_20260222 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/agents/message_bus.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 该策略仅使用已产生的在线分与 anatomy 结构分，不额外触发 LLM 推理调用；适合作为 approved 后的确定性终选层。
+
+### Session: 2026-02-22 21:15 CST
+- Current goal:
+  - 验证“candidate+verifier硬化 + approved终选联合评分(LLM+anatomy)”后，LLM给出的调整参数是否带来真实提升。
+- Done:
+  - 运行 2-case 对照实验：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_anatomy_llm_two_case_hardened_pick_20260222 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+  - 核验结果文件：
+    - `results/exp_mnm2_anatomy_llm_two_case_hardened_pick_20260222/repair/need_fix_diagnosis_repair_results.csv`
+    - `results/exp_mnm2_anatomy_llm_two_case_hardened_pick_20260222/repair/repair_summary_metrics.csv`
+  - 关键现象：
+    - 新增 candidate anatomy monotonic gate 生效，多次拒绝 `3_dilate`（日志含 `CandidateSearch rejected ... anatomy_gate_monotonic`）。
+    - 两个 case 最终均 `gave_up`，无 `approved`。
+    - Case 级 Dice：
+      - `209_original_lax_4c_004`: `0.8146 -> 0.8146` (Δ `+0.0000`, 回退 original)
+      - `209_original_lax_4c_022`: `0.7990 -> 0.7557` (Δ `-0.0433`, 保存 best_intermediate)
+    - 汇总：`delta_dice_mean = -0.0216`，`improved_count = 0/2`，`worsened_count = 1/2`，`unchanged_count = 1/2`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_anatomy_llm_two_case_hardened_pick_v2_20260222 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `WORKLOG.md`
+  - `results/exp_mnm2_anatomy_llm_two_case_hardened_pick_20260222/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_anatomy_llm_two_case_hardened_pick_20260222/repair/repair_summary_metrics.csv`
+- Notes:
+  - 当前参数“能约束坏改动”，但“还不能稳定带来 Dice 提升”；no-GT 代理分（online+anatomy）与 Dice 在个别 case 上仍有偏差。
+
+### Session: 2026-02-23 00:35 CST
+- Current goal:
+  - 完成 `gave_up/reject` 分支的 `original vs best_intermediate` 终选硬化，并用 2-case pipeline 实测，验证是否避免劣化；同时结合 overlay 图检查 LLM 修改建议是否真实有效。
+- Done:
+  - 在 `scripts/run_miccai_multiagent_experiment.py` 新增非批准分支终选：
+    - `_estimate_original_online_score()`：将 triage score 映射为 original 的 online no-GT 分。
+    - `_select_nonapproved_final_mask()`：对 `original_mask` 与 `best_intermediate_mask` 进行 blended(online+anatomy) 比较，并支持 `require_both_signals + margin + min_gain` 门控。
+    - `_run_repair_stage()` 中 `approved` 之外统一走 `_select_nonapproved_final_mask()`。
+    - CSV 审计新增：`FinalPickNonApprovedOnlineGainOK`、`FinalPickNonApprovedAnatomyGainOK`、`FinalPickNonApprovedBlendedGainOK`。
+  - 在三份配置新增非批准分支阈值键：
+    - `multi_agent.nonapproved_pick_require_both_signals`
+    - `multi_agent.nonapproved_pick_min_margin`
+    - `multi_agent.nonapproved_pick_min_online_gain`
+    - `multi_agent.nonapproved_pick_min_anatomy_gain`
+  - 运行 2-case 复测（`exp_mnm2_anatomy_llm_two_case_hardened_pick_v2_20260222`）：
+    - `n_gave_up = 2`，`SavedMaskType = original`（两例）
+    - `delta_dice_mean = 0.0`，`improved=0`，`worsened=0`，`unchanged=2`
+    - `FinalPickSource = original_nonapproved`（两例）
+    - `FinalPickNonApproved*GainOK = False/False/False`（两例）
+  - 图像复核（`verify_before/after/diff` + `candidate_*_diff`）：
+    - 两例最终 `before/after` 一致（diff `+0 -0 ~0`），确认已回退 original。
+    - 022 的候选建议主要是 LV 外缘扩张（`3_dilate_large`/`expand_myo_intensity`），对“RV-LV 分离/环完整性”改善有限，且 anatomy 分下降，被结构 gate 拒绝；属于“方向不够对齐结构目标”的建议，而非稳定有效修复。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_anatomy_llm_worst10_nonapproved_pick_v2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `config/azure_openai_medrag.yaml`
+  - `config/default.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `results/exp_mnm2_anatomy_llm_two_case_hardened_pick_v2_20260222/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_anatomy_llm_two_case_hardened_pick_v2_20260222/repair/repair_summary_metrics.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 当前硬化达成了“宁可不改坏也不接受退化”的保守目标；但要实现稳定增益，仍需把 LLM 建议空间约束到更结构对齐的可执行操作（尤其 septal 分离与 ring closure 的专用 op）。
+
+### Session: 2026-02-23 01:20 CST
+- Current goal:
+  - 将 `kernel_size` 做成可传递字段，并打通 `diagnosis -> planner -> executor`，确保执行端对支持的算子真正按该参数执行。
+- Done:
+  - `DiagnosisAgent` 增加 `kernel_size` 字段与清洗逻辑：
+    - `SpatialDiagnosis` 新增 `kernel_size`。
+    - 新增 `normalize_kernel_size_hint()`，将输入规范化为 `[1,15]` 的奇数核。
+    - LLM/VLM 解析时读取 `kernel_size`（兼容 `kernel` 别名）并写入诊断对象。
+    - 输出到 `ctx.diagnoses` 时携带 `kernel_size`。
+  - `PlannerAgent` 支持透传与补全：
+    - 引入 `normalize_kernel_size_hint()` 对计划中的 `kernel_size` 做标准化。
+    - `_sanitize_plan()` 中保留合法 `kernel_size`；若 plan 未给出，则尝试从匹配 diagnosis 回填。
+    - `_fallback_plan()` 与 executor 失败回退构造 plan 时也会携带 diagnosis 的 `kernel_size`。
+  - `ExecutorAgent` 执行端落地：
+    - 新增 `_normalize_kernel_size()`、`_supports_kernel_override()`、`_apply_op_with_kernel_override()`。
+    - 每个 step 读取 `kernel_size`：
+      - 支持的算子使用 kernel override 执行（`1/2/3_dilate*`, `1/2/3_erode*`, `rv_erode*`, `smooth_morph*`）。
+      - 不支持的算子记录“ignored (unsupported op)”日志，避免静默失效。
+    - `step_record` 增加 `kernel_size` 便于审计。
+  - Prompt 契约更新：
+    - `prompts/diagnosis_prompt.txt`
+    - `prompts/diagnosis_system.txt`
+    - `prompts/planner_system.txt`
+    都已明确 `kernel_size` 为可选字段、范围为奇数 `[1,15]`。
+  - 验证通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/diagnosis_agent.py cardiac_agent_postproc/agents/planner_agent.py cardiac_agent_postproc/agents/executor.py`
+    - 小脚本验证 override 行为：`2_dilate/smooth_morph` 可按指定 kernel 执行，`myo_bridge` 不支持并会被判定为 unsupported。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_passthrough_smoke --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `prompts/diagnosis_prompt.txt`
+  - `prompts/diagnosis_system.txt`
+  - `prompts/planner_system.txt`
+  - `WORKLOG.md`
+- Notes:
+  - 当前 kernel override 仅对 kernel-based 操作生效；结构类操作（如 `myo_bridge`, `rv_lv_barrier`）继续使用其专属参数逻辑（bridge thickness / barrier iters），不会被 `kernel_size` 误改。
+
+### Session: 2026-02-23 01:45 CST
+- Current goal:
+  - 验证新引入的 `kernel_size` 透传是否在真实 pipeline 和执行层面“有效”。
+- Done:
+  - 运行 1-case 冒烟实验：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_passthrough_smoke_20260223 --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+  - 读取结果：
+    - `repair/need_fix_diagnosis_repair_results.csv` 显示该 case 各 diagnosis 的 `kernel_size` 均为 `null`，`OpsCount=0`，`DiceDelta_Mean=0.0`。
+    - 运行日志未出现 `using kernel_size override=...`，说明真实链路中本次未触发该参数（LLM未给值）。
+  - 执行层定向对照测试（同一 case，同一 op 改 kernel）：
+    - 使用 `_apply_op_with_kernel_override()` 对 `209_original_lax_4c_004` 做对照，证明 kernel 会显著改变输出和 Dice：
+      - `2_dilate`: k=3 → ΔDice `+0.0092`; k=5 → `-0.0525`; k=7 → `-0.1194`
+      - `smooth_morph`: k=3 → `-0.0014`; k=5 → `-0.0318`; k=7 → `-0.1720`
+    - 结论：`kernel_size` 在 executor 中是“真实生效”的，但真实 pipeline 目前尚未稳定产出该字段。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_forced_rule_smoke --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `results/exp_mnm2_kernel_passthrough_smoke_20260223/repair/need_fix_diagnosis_repair_results.csv`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `WORKLOG.md`
+- Notes:
+  - 下一步若要在真实多轮修复中观察收益，需要让 diagnosis/planner 更稳定地产生非空 `kernel_size`（或加规则回填），否则新机制虽然可用但触发率低。
+
+### Session: 2026-02-23 10:13 CST
+- Current goal:
+  - 将 `kernel_size` 改为“LLM优先 + 规则兜底”，在 LLM 未稳定输出时仍能让支持算子触发 kernel override。
+- Done:
+  - `DiagnosisAgent` 增加统一兜底函数：
+    - 新增 `supports_kernel_size_override()` 用于判定算子是否支持 kernel override。
+    - 新增 `infer_kernel_size_fallback()`，按 `op/strength/severity` 规则回填（保守策略：`mild/low -> 3`, `normal -> 5`, `strong|*_large -> 7`）。
+  - `DiagnosisAgent` 两个关键出口接入回填：
+    - LLM/VLM 解析后若 `kernel_size` 为空，则按规则补值。
+    - 写入 `ctx.diagnoses` 前再做一次回填，确保规则/解剖来源诊断也能得到 `kernel_size`。
+  - `PlannerAgent` `_sanitize_plan()` 接入兜底：
+    - 若 step 现有 `kernel_size` 对当前 op 不支持，自动移除（避免无效参数）。
+    - 若 step 缺失 `kernel_size`，基于匹配诊断（issue/severity）与 step strength 规则回填。
+  - 验证通过：
+    - `python -m py_compile cardiac_agent_postproc/agents/diagnosis_agent.py cardiac_agent_postproc/agents/planner_agent.py`
+    - 最小脚本验证：`2_dilate/smooth_morph/rv_erode` 可得到非空回填；不支持 op（如 `2_erode_expand_lv`）保持无 `kernel_size`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_fallback_smoke_20260223 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/agents/diagnosis_agent.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 该策略不会强行给所有 op 加 `kernel_size`；仅对 executor 支持 override 的算子补值，降低“填了但无效”的噪声。
+
+### Session: 2026-02-23 10:47 CST
+- Current goal:
+  - 直接跑 2-case 冒烟，验证 `kernel_size` 规则兜底在真实 pipeline 中的触发与执行情况。
+- Done:
+  - 运行命令：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_fallback_smoke_20260223_rerun1 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+  - 产物与指标：
+    - 输出目录：`results/exp_mnm2_kernel_fallback_smoke_20260223_rerun1`
+    - `repair/need_fix_diagnosis_repair_results.csv` 共 2 case，`OpsCount` 都为 0，最终均回退到原始/中间最优，`DiceDelta_Mean=0.0`。
+  - `kernel_size` 触发统计（基于结果 CSV 解析）：
+    - 诊断条目共 8 条，`kernel_size` 非空 2 条（均为 `smooth_morph`，值=3）。
+    - 执行落地条目中，`AppliedOps` 的 `kernel_size` 非空数为 0（两例均未落地到支持 override 的步骤）。
+  - 运行日志观察：
+    - 本次未出现 `using kernel_size override=...` 提示，说明 executor 端未实际触发 kernel override 路径。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_fallback_probe_kops_20260223 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `results/exp_mnm2_kernel_fallback_smoke_20260223_rerun1/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_kernel_fallback_smoke_20260223_rerun1/repair/repair_summary_metrics.csv`
+  - `results/exp_mnm2_kernel_fallback_smoke_20260223_rerun1/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 当前瓶颈不是“有无 kernel 字段”，而是 planner/executor 在该数据子集上大多选择了结构类与候选搜索分支（`myo_bridge`/`rv_lv_barrier`/candidate），导致 kernel-based op 进入主执行链路的机会仍低。
+
+### Session: 2026-02-23 11:08 CST
+- Current goal:
+  - 按用户要求在沙箱外运行 2-case 实验，验证 GPT-4o 调用与 `kernel_size` 触发表现。
+- Done:
+  - 以提权方式（sandbox outside）运行：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_fallback_smoke_20260223_escalated --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+  - 运行完成（exit code 0），输出目录：
+    - `results/exp_mnm2_kernel_fallback_smoke_20260223_escalated`
+  - 结果统计：
+    - case 数 2；`OpsCount==0` 为 2；`DiceDelta_Mean` 平均 `0.0`。
+    - 诊断项 `kernel_size` 非空 `2/8`，均为 `smooth_morph: 3`。
+    - `AppliedOps` 中 `kernel_size` 字段非空数为 0（本次仍未落地到 kernel-override 执行路径）。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_kernel_override_force_probe_20260223 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `results/exp_mnm2_kernel_fallback_smoke_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_kernel_fallback_smoke_20260223_escalated/repair/repair_summary_metrics.csv`
+  - `results/exp_mnm2_kernel_fallback_smoke_20260223_escalated/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 沙箱内/外都能发起 GPT-4o 请求；当前效果瓶颈仍是 plan/execute 主路径多落在结构类与候选分支，kernel-based op 实际落地率偏低。
+
+### Session: 2026-02-23 11:52 CST
+- Current goal:
+  - 针对 `209_original_lax_4c_004` 和 `209_original_lax_4c_022` 给出“值得执行”的具体操作建议（基于离线单步/两步真值评估）。
+- Done:
+  - 对两个 case 运行离线 op 扫描（global + local bbox），输出 CSV：
+    - `/tmp/209_original_lax_4c_004_op_scan.csv`
+    - `/tmp/209_original_lax_4c_022_op_scan.csv`
+  - 关键结论（按 Dice mean 增益）：
+    - `209_original_lax_4c_004`：
+      - 单步最佳：`smooth_contour`（+0.0253）、`1_dilate_strong`（+0.0211）。
+      - 两步最佳（测试集内）：`1_dilate_strong -> smooth_contour`（+0.0464）。
+      - `myo_bridge`/`rv_lv_barrier`/`topology_cleanup` 基本 no-op（改动像素≈0，增益≈0）。
+    - `209_original_lax_4c_022`：
+      - 单步最佳：`myo_bridge`（+0.0210，最佳厚度=2）、`2_dilate`（+0.0173）、`1_erode_expand_myo`（+0.0139）。
+      - 两步可行：`myo_bridge -> smooth_contour`（+0.0398）或 `myo_bridge -> 1_erode_expand_myo`（+0.0313）。
+      - `rv_lv_barrier` 参数扫（touch/barrier 迭代）均为 no-op（增益=0）。
+  - 参数敏感性补充：
+    - `myo_bridge`：`004` 对 thickness 1~7 全无变化；`022` 在 thickness=2 最优，过大（>=5）反而退化。
+    - `neighbor_shape_prior` 在这两个 case 上明显负收益（大幅过改）。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2_worst10_subset --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_case209_forced_sequence_probe_20260223 --limit 2 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode auto_skip --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `/tmp/209_original_lax_4c_004_op_scan.csv`
+  - `/tmp/209_original_lax_4c_022_op_scan.csv`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `cardiac_agent_postproc/ops.py`
+  - `WORKLOG.md`
+- Notes:
+  - 当前线上失败主因不是“无可用操作”，而是 planner/executor 实际走到的结构类路径常出现 no-op 或被严格门控回退；可通过 case-specific 强制序列验证上面高收益操作。
+
+### Session: 2026-02-23 12:36 CST
+- Current goal:
+  - 补齐动态 repair knowledge：Planner 不再依赖静态 `repair_kb.json`，改为读取数据集自构建的 `issue_op_stats.json`；并支持用 10 个 `0.7<dice<0.9` case 自动构建与跨数据集自动重建。
+- Done:
+  - `scripts/run_miccai_multiagent_experiment.py`：
+    - 新增 repair KB case 选择策略：优先 `needs_fix` 且 `0.7<dice<0.9`，默认 `--repair_kb_max_cases=10`。
+    - 新增参数：`--repair_kb_min_dice`（默认 0.70）、`--repair_kb_max_dice`（默认 0.90）。
+    - 在 KB 构建阶段（允许 GT）对每个候选 case 试多操作，聚合生成：
+      - `repair_kb/issue_op_stats.json`
+      - `repair_kb/issue_op_stats.csv`
+    - 增加 dataset signature 机制：
+      - 输出 `repair_kb/repair_kb_dataset_signature.json`
+      - `build_if_missing + auto_skip` 下若检测到新数据集（signature 不匹配）会自动重建，不再盲目复用旧 KB。
+  - `cardiac_agent_postproc/agents/planner_agent.py`：
+    - 删除静态 `repair_kb.json` 读取路径。
+    - 新增动态加载：从 `cfg.paths.repair_kb_dir/issue_op_stats.json` 按 mtime 缓存读取。
+    - 新增 issue+view 检索逻辑（exact -> partial -> global）并把结果写入 `proven_solutions` / `kb_evidence`。
+  - 验证：
+    - `python -m py_compile scripts/run_miccai_multiagent_experiment.py cardiac_agent_postproc/agents/planner_agent.py`
+    - smoke 构建（3 case, 6 ops）成功产出 `issue_op_stats.json/csv` 与 signature 文件。
+    - signature 复用检查通过：同数据集二次 `build_if_missing + skip_if_exists` 正确 `used_existing=True`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2 --target_dir /data484_5/xzhao14/cardiac_agent_postproc/results/exp_mnm2_dynamic_repairkb_20260223 --repair_kb_mode rebuild --repair_kb_max_cases 10 --repair_kb_min_dice 0.70 --repair_kb_max_dice 0.90 --atlas_mode local_per_sample --knowledge_mode custom --strict_no_gt_online true`
+- Key files:
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `cardiac_agent_postproc/agents/planner_agent.py`
+  - `WORKLOG.md`
+- Notes:
+  - 动态 KB 是按“问题→操作效果统计”聚合（可跨 case 复用），不是只记单个 case 的手工步骤；这更适合新数据集自动冷启动与持续更新。
+
+### Session: 2026-02-23 14:18 CST
+- Current goal:
+  - 复测历史 case（`209_original_lax_4c_004`、`209_original_lax_4c_022`），验证接入动态 repair knowledge 后是否带来 Dice 提升。
+- Done:
+  - 基线读取：`results/exp_mnm2_kernel_fallback_smoke_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`。
+  - 新版动态 KB 复测：
+    - `209...004`：`results/exp_mnm2_dynamic_kb_retest_209_004_20260223`
+    - `209...022`：`results/exp_mnm2_dynamic_kb_retest_209_022_20260223`
+  - 对比结果（最终保存 mask）：
+    - `209...004`: baseline `DiceDelta=0.0` → dynamic `0.0`（无提升）
+    - `209...022`: baseline `DiceDelta=0.0` → dynamic `0.0`（无提升）
+    - `delta_gain_vs_baseline` 两例均为 `0.0`
+  - 运行观察：两次复测均出现 Azure 401（`invalid subscription key or wrong API endpoint`），系统走了 fallback 路径；`209...022` 虽有中间操作尝试（`OpsCount=3`），但最终仍回退原始结果。
+- Blocked:
+  - Azure OpenAI 调用返回 401，无法验证“真实 GPT4o 在线推理”场景下的提升幅度。
+- Next command:
+  - `AZURE_OPENAI_API_KEY=<valid_key> python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_dynamic_kb_retest_case209_validkey --case_contains 209_original_lax_4c_022 --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode custom --repair_kb_mode reuse --repair_kb_dir results/exp_mnm2_dynamic_kb_retest_209_004_20260223/artifacts/repair_kb --strict_no_gt_online true`
+- Key files:
+  - `results/exp_mnm2_kernel_fallback_smoke_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_dynamic_kb_retest_209_004_20260223/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223/repair/need_fix_diagnosis_repair_results.csv`
+  - `WORKLOG.md`
+- Notes:
+  - 目前动态 KB 逻辑本身已生效（KB 复用+签名校验正常），但在线 LLM/VLM 401 会显著限制 planner/verifier 的真实能力上限。
+
+### Session: 2026-02-23 14:39 CST
+- Current goal:
+  - 按用户要求在沙箱外重跑 case，确认 401 是否由沙箱网络/权限引起。
+- Done:
+  - 提权（沙箱外）执行：
+    - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated --case_contains 209_original_lax_4c_022 --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode custom --repair_kb_mode reuse --repair_kb_dir results/exp_mnm2_dynamic_kb_retest_209_004_20260223/artifacts/repair_kb --strict_no_gt_online true --save_baseline_snapshot`
+  - 结果：沙箱外仍持续出现 Azure OpenAI `401`（invalid subscription key or wrong API endpoint）。
+  - 该 run 最终 `Repair mean Dice delta: +0.0000`，路径：
+    - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+- Blocked:
+  - Azure OpenAI 鉴权失败（key/endpoint 配置层面），非沙箱问题。
+- Next command:
+  - `python - <<'PY'\nimport os, requests\nbase='https://med-rag-openai.openai.azure.com/openai/v1/models'\nkey=os.getenv('AZURE_OPENAI_API_KEY','')\nprint('key_len', len(key))\nr=requests.get(base, headers={'api-key':key}, timeout=30)\nprint(r.status_code, r.text[:300])\nPY`
+- Key files:
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 已验证：401 在沙箱内外一致复现，说明需优先修正 Azure key/endpoint 对应关系。
+
+### Session: 2026-02-23 14:52 CST
+- Current goal:
+  - 按用户要求改用 OpenAI 官方接口（非 Azure）进行可用性验证，并判断失败是否来自沙箱。
+- Done:
+  - 检查配置：`config/openai.yaml` / `config/openai_official_gpt52_medrag.yaml` 均指向 `https://api.openai.com/v1`。
+  - 检查环境：沙箱内外 `OPENAI_API_KEY` 均为空。
+  - 在沙箱外使用用户历史提供的 key 对官方端点做最小探针：
+    - `GET https://api.openai.com/v1/models`
+    - 返回 `401 invalid_api_key`（Incorrect API key provided）。
+  - 结论：官方 OpenAI 侧 key 无效，不是沙箱问题。
+- Blocked:
+  - 缺少可用的官方 `OPENAI_API_KEY`（当前 key 在官方端点被明确判定为 invalid_api_key）。
+- Next command:
+  - `OPENAI_API_KEY=<valid_openai_key> python scripts/run_miccai_multiagent_experiment.py --config config/openai.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_openai_official_retest --case_contains 209_original_lax_4c_022 --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode custom --repair_kb_mode reuse --repair_kb_dir results/exp_mnm2_dynamic_kb_retest_209_004_20260223/artifacts/repair_kb --strict_no_gt_online true`
+- Key files:
+  - `config/openai.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 官方 OpenAI key 与 Azure key 不是同一套；需要 Platform API key（`sk-...`）才能在 `api.openai.com` 使用。
+
+### Session: 2026-02-23 14:29 CST
+- Current goal:
+  - 回答用户“上次 OpenAI key 测试是否通过”，并基于现有日志给出明确结论。
+- Done:
+  - 核对 `WORKLOG.md` 相关记录并确认：
+    - 最新一次官方 OpenAI key 测试（2026-02-23 14:52 CST）未通过，返回 `401 invalid_api_key`。
+    - 较早一次 Azure OpenAI API 连通性测试为 5/5 通过。
+- Blocked:
+  - None
+- Next command:
+  - `OPENAI_API_KEY=<valid_openai_key> python scripts/run_miccai_multiagent_experiment.py --config config/openai.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_openai_official_retest --case_contains 209_original_lax_4c_022 --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode custom --repair_kb_mode reuse --repair_kb_dir results/exp_mnm2_dynamic_kb_retest_209_004_20260223/artifacts/repair_kb --strict_no_gt_online true`
+- Key files:
+  - `WORKLOG.md`
+- Notes:
+  - 若“上次”按最新记录理解，则结论是失败；若指 Azure key 历史连通性测试，则结论为通过。
+
+### Session: 2026-02-23 14:36 CST
+- Current goal:
+  - 按用户要求使用 `.env` 中的 `AZURE_OPENAI_API_KEY` 复测 Azure OpenAI 连通性。
+- Done:
+  - 发现历史命令中的 `scripts/test_azure_openai_api.py` 当前仓库已不存在，改为等价在线探针测试。
+  - 读取 `config/azure_openai_medrag.yaml`：目标端点 `https://med-rag-openai.openai.azure.com/openai/v1`，模型 `gpt-4o`。
+  - 使用 `LLMSettings()` 成功读到 `.env` key（`key_len=32`，存在）。
+  - 连通性探针结果：
+    - 沙箱内：DNS 解析失败（`NameResolutionError`），无法代表真实外网结果。
+    - 沙箱外：`GET /models` 返回 `401`，`chat.completions.create` 同样 `401`（`AuthenticationError`）。
+  - 结论：网络可达时鉴权失败，属于 Azure key/endpoint 对应关系问题。
+- Blocked:
+  - Azure OpenAI 返回 `401`：`invalid subscription key or wrong API endpoint`。
+- Next command:
+  - `AZURE_OPENAI_API_KEY=<valid_key_for_resource> python - <<'PY' ... requests.get('<azure_base>/models') + OpenAI(base_url=<azure_base>).chat.completions.create(...) ... PY`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `cardiac_agent_postproc/settings.py`
+  - `WORKLOG.md`
+- Notes:
+  - 本次测试使用 `.env` 的 key，未在命令中明文输出 key 值。
+
+### Session: 2026-02-23 14:52 CST
+- Current goal:
+  - 使用用户提供的新 Azure key 复测 Azure OpenAI 连通性与鉴权状态。
+- Done:
+  - 未修改 `.env`，采用临时环境变量方式执行探针（避免持久化 key）。
+  - 使用 `config/azure_openai_medrag.yaml` 中配置：
+    - base URL: `https://med-rag-openai.openai.azure.com/openai/v1`
+    - model: `gpt-4o`
+  - 两项探针结果：
+    - `GET /models` -> `401`，错误为 `invalid subscription key or wrong API endpoint`。
+    - `chat.completions.create` -> `401 AuthenticationError`，同一错误信息。
+- Blocked:
+  - 新 key 与当前 Azure endpoint/resource 仍不匹配（或该资源无有效订阅/部署权限）。
+- Next command:
+  - `AZURE_OPENAI_API_KEY=<resource_matched_key> python - <<'PY' ... requests.get('<base>/models') + OpenAI(...).chat.completions.create(...) ... PY`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 本次日志未记录明文 key；仅记录连通性与状态码结论。
+
+### Session: 2026-02-23 15:38 CST
+- Current goal:
+  - 回答用户“为何沙箱外仍不能调用 Azure OpenAI”并给出根因判断。
+- Done:
+  - 基于同一 endpoint（`https://med-rag-openai.openai.azure.com/openai/v1`）在沙箱外复核两类请求结果：
+    - `GET /models` 返回 `401`；
+    - `chat.completions.create` 返回 `401 AuthenticationError`。
+  - 归因结论：
+    - 这是鉴权层失败（key/endpoint/resource 对不上），不是沙箱网络问题。
+    - 若是模型未部署或模型名错误，常见返回应为 `404/400`，而非当前 `401`。
+- Blocked:
+  - 仍缺少与当前 Azure OpenAI resource 完全匹配的可用 key，或当前 endpoint 非该 key 对应资源。
+- Next command:
+  - `AZURE_OPENAI_API_KEY=<key_from_same_resource_as_endpoint> python - <<'PY' ... probe /models and chat.completions ... PY`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 下一步应从 Azure 门户同一资源页（Keys and Endpoint）成对复制 endpoint + key 再测。
+
+### Session: 2026-02-23 15:56 CST
+- Current goal:
+  - 回答用户“multi-agent 系统中不同 agent 是否真的发挥作用”。
+- Done:
+  - 核对代码链路：
+    - `CoordinatorAgent.orchestrate_case()` 明确按 `Triage -> Diagnosis -> Planner -> Executor -> Verifier` 调度，并支持多轮重规划/重试。
+    - `scripts/run_miccai_multiagent_experiment.py` 实例化并注册全部 6 个 agent（含 coordinator）。
+  - 核对最近实跑结果（`exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated`）：
+    - 存在 triage 输出（`TriageCategory_FinalRun=needs_fix`）。
+    - `NumDiagnoses=4`（诊断产出问题清单）。
+    - `OpsCount=3`（执行器实际执行了候选操作）。
+    - `RoundsCompleted=2` 与 `Verify*` 字段非空（验证器实际参与裁决）。
+  - 同时确认该 run 的总体收益为 0（`n_gave_up=1`、`delta_dice_mean=0.0`）。
+- Blocked:
+  - Azure 在线调用持续 `401`，限制了 LLM/VLM 在 diagnosis/planner/verifier 阶段的真实能力上限。
+- Next command:
+  - `AZURE_OPENAI_API_KEY=<endpoint-matched-key> python - <<'PY' ... /models + chat.completions probe ... PY`
+- Key files:
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 结论应区分“流程是否运行”和“最终是否带来 Dice 改善”：前者已确认运行，后者当前样本未体现增益。
+
+### Session: 2026-02-23 16:00 CST
+- Current goal:
+  - 回答用户“为何仍报 401”并明确最可能根因。
+- Done:
+  - 基于已完成的沙箱外探针结果复核：
+    - `GET <azure_base>/models` 返回 `401`
+    - `chat.completions.create` 返回 `401 AuthenticationError`
+  - 归因判断：
+    - 401 发生在鉴权网关层，说明请求已到达 Azure 端点但凭证未通过。
+    - 这类错误最常见于：
+      1) key 与 endpoint 不属于同一 Azure OpenAI resource；
+      2) key 已轮换/失效；
+      3) resource 禁用了 local auth（仅允许 Entra ID）；
+      4) 订阅/资源访问状态异常。
+    - 并补充区分：模型/部署名错误通常更接近 `400/404`，非当前 `401` 主因。
+- Blocked:
+  - 尚未拿到“同一资源页面”成对匹配的 endpoint + key 或 local auth 状态确认。
+- Next command:
+  - `curl -i -H "api-key: <key>" "<endpoint>/openai/v1/models"`
+- Key files:
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 结论已排除“沙箱网络导致失败”的可能性。
+
+### Session: 2026-02-23 16:12 CST
+- Current goal:
+  - 解释用户“官方 OpenAI SDK 写法为何不工作”，并做最小复现实测。
+- Done:
+  - 环境核对：
+    - `openai` 版本为 `1.98.0`（支持 `client.responses.create`）。
+    - 直接 Python 进程中 `OPENAI_API_KEY` 未注入（未自动读取 `.env`）。
+  - 读取项目 `.env` 确认同时存在 `OPENAI_API_KEY` 与 `AZURE_OPENAI_API_KEY`。
+  - 在沙箱外执行用户给出的官方写法，先 `source .env` 再调用：
+    - `client.responses.create(model='gpt-5.2', input=...)` 返回成功并产出文本。
+  - 结论：
+    - 失败主因是运行时未加载 `.env` 到进程环境，而非 SDK 调用方式本身。
+- Blocked:
+  - None
+- Next command:
+  - `set -a; source .env; python your_script.py`
+- Key files:
+  - `.env`
+  - `WORKLOG.md`
+- Notes:
+  - `OpenAI()` 默认读取当前进程环境变量（`OPENAI_API_KEY`），不会自动解析项目 `.env` 文件。
+
+### Session: 2026-02-23 16:14 CST
+- Current goal:
+  - 按用户要求核对 `.env` 中是否存在 Azure/OpenAI key。
+- Done:
+  - 读取 `/data484_5/xzhao14/cardiac_agent_postproc/.env` 并脱敏确认：
+    - `AZURE_OPENAI_API_KEY` 存在（长度 32）。
+    - `OPENAI_API_KEY` 存在（长度 164，`sk-...`）。
+  - 说明：`.env` 中存在 key 不代表任意 Python 进程自动可见；需 `source .env` 或代码内 `load_dotenv()`。
+- Blocked:
+  - None
+- Next command:
+  - `set -a; source /data484_5/xzhao14/cardiac_agent_postproc/.env; set +a; python your_script.py`
+- Key files:
+  - `/data484_5/xzhao14/cardiac_agent_postproc/.env`
+  - `WORKLOG.md`
+- Notes:
+  - 本次核对仅输出脱敏片段，未回显完整密钥。
+
+### Session: 2026-02-23 16:22 CST
+- Current goal:
+  - 按用户要求复测历史 case `209_original_lax_4c_022`，验证在可用 OpenAI key 下是否有 Dice 提升。
+- Done:
+  - 先读取基线结果：
+    - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+    - 基线 `DiceDelta_Mean=0.0`，`FinalVerdict=gave_up`，`SavedMaskType=original`。
+  - 使用官方 OpenAI 配置进行单 case 复跑（沙箱外）：
+    - 首次命令（目标目录 `..._1615`）因 shell 变量提前展开，API key 未正确注入，出现 `You didn't provide an API key`。
+    - 修正后重跑（目标目录 `..._1620`）：
+      - `set -a; source .env; export AZURE_OPENAI_API_KEY=\"$OPENAI_API_KEY\"; ...`
+      - LLM/VLM 请求正常返回（不再 401/无 key 错误），完整跑完 2 轮。
+  - 对比结果（baseline vs `..._1620`）：
+    - `PreDice_Mean`: `0.7989674275665012` -> `0.7989674275665012`
+    - `PostDice_Mean`: `0.7989674275665012` -> `0.7989674275665012`
+    - `DiceDelta_Mean`: `0.0` -> `0.0`
+    - `FinalVerdict`: `gave_up` -> `gave_up`
+    - `SavedMaskType`: `original` -> `original`
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/openai_official_gpt52_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_openai_official_retest_worst10_batch --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode custom --repair_kb_mode reuse --repair_kb_dir results/exp_mnm2_dynamic_kb_retest_209_004_20260223/artifacts/repair_kb --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_openai_official_retest_209_022_20260223_1615/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_openai_official_retest_209_022_20260223_1620/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_openai_official_retest_209_022_20260223_1620/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 本次确认“key 可用 + LLM/VLM 正常调用”后，单 case 最终仍未超越基线，主要因 verifier/selection 最终未选择中间结果并回退原始 mask。
+
+### Session: 2026-02-23 16:27 CST
+- Current goal:
+  - 回答用户“为什么看起来更好的中间候选（如 `candidate_2_atlas_growprune_0_diff.png`）没有被最终应用”。
+- Done:
+  - 核对该 run 的结果与 payload：
+    - `AppliedOps` / `BestIntermediateOps` 均为 `candidate::3_dilate`，未出现 `atlas_growprune_0`。
+    - `FinalPickSource=original_nonapproved`，且 `FinalPickNonApprovedAnatomyGainOK=False`。
+    - verifier payload 显示最终比较 `compare_verdict=same`、`online_verdict=needs_more_work`、anatomy `delta=-0.648`。
+  - 核对代码门控链路：
+    - Candidate 图仅表示“被评估候选”，不是“已采纳操作”；候选按 proxy 预排序并仅采纳 final_score 最优者。
+    - 非 approved 情况下默认保守策略要求 best_intermediate 同时满足 online 与 anatomy 增益，否则回退 original。
+  - 结论：
+    - `candidate_2_atlas_growprune_0_diff.png` 是候选评估图，不等于已应用。
+    - 本案最终回退原图的直接触发条件是 anatomy 增益未达标（即使 online/blended 通过也不够）。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir <new_run> --case_contains 209_original_lax_4c_022 --limit 1 --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/debug_overlays/209_original_lax_4c_022_img_candidate_2_atlas_growprune_0_diff.png`
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/debug_overlays/209_original_lax_4c_022_img_verifier_payload.json`
+  - `cardiac_agent_postproc/agents/executor.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `WORKLOG.md`
+- Notes:
+  - 该行里 `ExecCandidateSearchUsed=False` 是“最后一次 executor 调用”的状态，不代表前几轮没用过 candidate search（字段在每次 `process_case` 开头会重置）。
+
+### Session: 2026-02-23 16:31 CST
+- Current goal:
+  - 回答用户“anatomy 为什么是负的、是如何计算的”。
+- Done:
+  - 核对 anatomy 打分代码路径并确认公式：
+    - `compute_anatomy_score()`：基于特征 z-score 的方向性惩罚 + hard violation penalty，输出分数范围 `[0,100]`。
+    - verifier 中 anatomy `delta = score_after - score_before`，并映射为 `score_100 = clip(50 + 2.5*delta, 0, 100)`。
+  - 核对该 case 实际值（`209_original_lax_4c_022`）：
+    - `score_before=47.0601`
+    - `score_after=46.4120`
+    - `delta=-0.6480`
+    - `score_100=48.3799`
+  - 核对 top anomalies 变化：
+    - `rv_lv_centroid_lateral`、`intensity_contrast`、`myo_lv_ratio` 等方向性异常变重（更负），导致总体 anatomy score 下降。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY' ... load verifier_payload and print anatomy baseline/latest anomalies ... PY`
+- Key files:
+  - `cardiac_agent_postproc/anatomy_score.py`
+  - `cardiac_agent_postproc/agents/verifier_agent.py`
+  - `results/exp_mnm2_dynamic_kb_retest_209_022_20260223_escalated/repair/debug_overlays/209_original_lax_4c_022_img_verifier_payload.json`
+  - `WORKLOG.md`
+- Notes:
+  - “负的”是 `delta`（相对基线下降），不是 anatomy score 本身为负；score 本身被裁剪在 `0~100`。
+
+### Session: 2026-02-23 16:39 CST
+- Current goal:
+  - 按用户要求提高“myo 完整性优先 + 类别完整性约束”在打分与决策中的权重。
+- Done:
+  - 调整 anatomy 评分权重（代码）：
+    - 提高 `myo_enclosure_ratio`、`myo_lv_ratio`、`myo_solidity` 及 `boundary_gradient_myo` 在 2C/3C/4C 下的权重。
+    - 提高类缺失硬惩罚：`lv_absent`、`myo_absent`、`rv_absent_3ch`、`rv_absent_4ch`。
+    - 新增 myo 环完整性硬惩罚：`myo_enclosure_critical` / `myo_enclosure_low`。
+  - 调整三份配置（`default`、`azure_openai_medrag`、`openai_official_gpt52_medrag`）：
+    - `approved_pick_anatomy_weight` 上调到 `0.55`，`approved_pick_llm_weight` 下调到 `0.45`。
+    - `nonapproved_pick_min_anatomy_gain` 上调到 `0.25`。
+    - 执行门控更严格：`gate_optional_disappear_min_area_px=80`、`gate_lv_myo_min_coverage=0.76`、`gate_lv_myo_allow_drop=0.02`。
+  - 校验通过：
+    - `python -m py_compile cardiac_agent_postproc/anatomy_score.py`
+    - 三份 YAML `yaml.safe_load` 解析成功。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/azure_openai_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_myo_priority_retest_20260223 --case_contains 209_original_lax_4c_022 --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode custom --repair_kb_mode reuse --repair_kb_dir results/exp_mnm2_dynamic_kb_retest_209_004_20260223/artifacts/repair_kb --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/anatomy_score.py`
+  - `config/default.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 当前改动会影响后续基于新统计权重构建的 anatomy 分数与门控决策；建议用同一 case 做 A/B 复跑验证收益。
+
+### Session: 2026-02-23 16:55 CST
+- Current goal:
+  - 按用户“直接跑”要求，使用最新 myo 优先策略与 OpenAI 官方接口对 `209_original_lax_4c_022` 做单 case 真实连通复跑。
+- Done:
+  - 先在沙箱内执行同参数命令，确认会出现 `Connection refused`（网络受限导致非真实 API 结果）。
+  - 随后在沙箱外重跑同参数命令（映射 `AZURE_OPENAI_API_KEY=$OPENAI_API_KEY`），确认 LLM/VLM 调用恢复正常，无 401/拒连。
+  - 复跑输出目录：
+    - `results/exp_mnm2_myo_priority_retest_209_022_20260223_rerun_escalated`
+  - 关键结果：
+    - `FinalVerdict=gave_up`
+    - `SavedMaskType=original`
+    - `PreDice_Mean=0.7989674275665012`
+    - `PostDice_Mean=0.7989674275665012`
+    - `DiceDelta_Mean=0.0`
+    - `FinalPickSource=original_nonapproved`
+    - `FinalPickNonApprovedOnlineGainOK=True`
+    - `FinalPickNonApprovedAnatomyGainOK=False`
+  - 观察到中间步骤 `myo_bridge_strong` 可显著提高 anatomy（verifier payload: `44.665 -> 55.921`, `Δ=+11.256`），但最终综合未达保留条件并回退 original。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport csv\nrow=next(csv.DictReader(open('results/exp_mnm2_myo_priority_retest_209_022_20260223_rerun_escalated/repair/need_fix_diagnosis_repair_results.csv', newline='', encoding='utf-8')))\nprint(row['FinalPickNonApprovedAnatomyGainOK'], row['FinalPickBestAnatomyScore'], row['FinalPickCurrentAnatomyScore'])\nPY`
+- Key files:
+  - `results/exp_mnm2_myo_priority_retest_209_022_20260223_rerun_escalated/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_myo_priority_retest_209_022_20260223_rerun_escalated/repair/debug_overlays/209_original_lax_4c_022_img_verifier_payload.json`
+  - `results/exp_mnm2_myo_priority_retest_209_022_20260223_rerun_escalated/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - 本次已验证“连通性正常 + agent 流程真实执行”；当前未提升 Dice 的直接门控原因是 nonapproved 分支下 anatomy 增益条件未满足。
+
+### Session: 2026-02-23 17:08 CST
+- Current goal:
+  - 按用户要求将 `nonapproved` 终选策略改为“优先保 anatomy 提升最大的中间结果”。
+- Done:
+  - 在 `CaseContext` 新增 anatomy-priority 缓存字段（`best_anatomy_intermediate_*`），用于独立跟踪“anatomy 最高”的中间快照。
+  - 在 `CoordinatorAgent` 中新增 `_maybe_update_best_anatomy_intermediate()`，每轮 verifier 后基于 `anatomy_signal.score_after` 更新 anatomy-best 快照。
+  - 在 `scripts/run_miccai_multiagent_experiment.py` 中重写 `_select_nonapproved_final_mask()`：
+    - 非通过结论下优先读取 `best_anatomy_intermediate_mask`。
+    - 只要满足 anatomy 增益条件（`nonapproved_pick_min_anatomy_gain`），即优先保存该中间结果。
+    - 不再以 online/blended 增益作为硬门控（仍保留对应观测字段）。
+  - 在 `_reset_case_for_repair()` 中补齐 anatomy-best 缓存初始化。
+  - 增加输出列 `FinalPickNonApprovedPolicy`，标记当前策略（`anatomy_priority`）。
+  - 校验：
+    - `python -m py_compile cardiac_agent_postproc/agents/message_bus.py cardiac_agent_postproc/agents/coordinator.py scripts/run_miccai_multiagent_experiment.py`
+    - 最小 mock 验证 `_select_nonapproved_final_mask`：即便 `online_gain_ok=False`，只要 anatomy 增益达标仍会选择 `best_anatomy_intermediate`。
+- Blocked:
+  - None
+- Next command:
+  - `python scripts/run_miccai_multiagent_experiment.py --config config/openai_official_gpt52_medrag.yaml --source_root results/Input_MnM2_worst10_subset --target_dir results/exp_mnm2_myo_priority_retest_209_022_20260223_anatomy_priority_pick --case_contains 209_original_lax_4c_022 --limit 1 --repair_subset worst_cases --atlas_mode local_per_sample --knowledge_mode custom --repair_kb_mode reuse --repair_kb_dir results/exp_mnm2_dynamic_kb_retest_209_004_20260223/artifacts/repair_kb --strict_no_gt_online true --save_baseline_snapshot`
+- Key files:
+  - `cardiac_agent_postproc/agents/message_bus.py`
+  - `cardiac_agent_postproc/agents/coordinator.py`
+  - `scripts/run_miccai_multiagent_experiment.py`
+  - `WORKLOG.md`
+- Notes:
+  - 该改动只影响 nonapproved 最终落盘选择；approved 路径仍保持原 blended 选择策略。
+
+### Session: 2026-02-23 17:12 CST
+- Current goal:
+  - 验证新 anatomy-priority nonapproved 策略在 `209_original_lax_4c_022` 上是否选中了 anatomy 升幅最大的中间结果。
+- Done:
+  - 运行 `scripts/run_miccai_multiagent_experiment.py`（`config/openai_official_gpt52_medrag.yaml`）并设定 `results/exp_mnm2_myo_priority_retest_209_022_20260223_anatomy_priority_pick` 作为输出。
+  - LLM/VLM 调用全程成功（沙箱外），最终 Verifier 仍然返回 `needs_more_work`；Round 2 引入 `myo_bridge_strong` 后 anatomy 由 `44.7` 提升到 `55.9`, Δ=+11.3，得到了 `best_anatomy_intermediate` 快照。
+  - 终结阶段使用新 `nonapproved` 策略：`FinalPickSource=best_anatomy_intermediate_nonapproved_anatomy_priority`，`FinalPickNonApprovedPolicy=anatomy_priority`，虽然 online gain 为 False，但 anatomy 条件达标因此保存了 anatomy-best 中间 mask。
+- Blocked:
+  - None
+- Next command:
+  - `python - <<'PY'\nimport json\nfrom pathlib import Path\nsummary = json.load(open('results/exp_mnm2_myo_priority_retest_209_022_20260223_anatomy_priority_pick/summary/experiment_summary.json', encoding='utf-8'))\nprint('repair_mean_dice_delta', summary.get('repair_outputs', {}).get('metrics', {}).get('delta_dice_mean'))\nPY`
+- Key files:
+  - `results/exp_mnm2_myo_priority_retest_209_022_20260223_anatomy_priority_pick/repair/need_fix_diagnosis_repair_results.csv`
+  - `results/exp_mnm2_myo_priority_retest_209_022_20260223_anatomy_priority_pick/repair/debug_overlays/209_original_lax_4c_022_img_verifier_payload.json`
+  - `results/exp_mnm2_myo_priority_retest_209_022_20260223_anatomy_priority_pick/summary/experiment_summary.json`
+  - `WORKLOG.md`
+- Notes:
+  - `FinalPickNonApprovedAnatomyGainOK=True` whereas `FinalPickNonApprovedOnlineGainOK=False` confirms anatomy-first policy is active; final CSV 显示 `DiceDelta_Mean=-0.0422`（负值因为 `myo_bridge_strong` 加入了 extra pixels but post-Dice worsened slightly）。
+
+### Session: 2026-02-23 17:21 CST
+- Current goal:
+  - 清理多 agent 配置中不再生效的 `multi_agent` 参数，降低维护负担。
+- Done:
+  - 从 `config/default.yaml`、`config/openai_official_gpt52_medrag.yaml`、`config/azure_openai_medrag.yaml` 中移除 `nonapproved_pick_require_both_signals`、`nonapproved_pick_min_margin`、`nonapproved_pick_min_online_gain`——当前 nonapproved 策略只依赖 `nonapproved_pick_min_anatomy_gain`，前几个字段已无使用场景。
+- Blocked:
+  - None
+- Next command:
+  - `git status -sb`
+- Key files:
+  - `config/default.yaml`
+  - `config/openai_official_gpt52_medrag.yaml`
+  - `config/azure_openai_medrag.yaml`
+  - `WORKLOG.md`
+- Notes:
+  - 这些字段的备注也同步删去，避免未来混淆。EOF
+
+### Session: 2026-02-23 20:35 CST
+- Current goal:
+  - 按用户请求读取并回顾上次 `WORKLOG.md` 记录。
+- Done:
+  - 读取 `WORKLOG.md` 并定位到最新会话记录（`2026-02-23 17:21 CST`）。
+  - 提取并准备向用户反馈“上次记录”的关键信息（目标、已完成项、后续命令）。
+- Blocked:
+  - None
+- Next command:
+  - `tail -n 80 WORKLOG.md`
+- Key files:
+  - `WORKLOG.md`
+- Notes:
+  - 最新一条记录聚焦于清理已失效的 `multi_agent` 配置参数，涉及三份配置文件同步删项。
+
+### Session: 2026-02-23 20:44 CST
+- Current goal:
+  - 按用户要求将当前代码上传到 GitHub，作为 `V3` 版本，并确保 `.env`（API key 文件）不上传。
+- Done:
+  - 检查仓库状态与远程：当前分支 `V2`，远程 `origin` 可用。
+  - 验证 `.env` 安全性：`.gitignore` 已忽略 `.env`，且 `git ls-files` 仅跟踪 `.env.example`。
+  - 整理发布暂存范围：纳入代码/配置相关变更，排除运行产物（如 `batch_eval_results/`、`.claude/`、`run_miccai.pid` 等）。
+- Blocked:
+  - None
+- Next command:
+  - `git switch -c V3 && git commit -m "release: V3 current code snapshot" && git push -u origin V3`
+- Key files:
+  - `WORKLOG.md`
+  - `.gitignore`
+- Notes:
+  - 发布前会再次检查 `git diff --cached --name-only`，确认无 `.env` 被提交。

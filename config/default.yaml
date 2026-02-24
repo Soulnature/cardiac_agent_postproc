@@ -4,6 +4,9 @@ paths:
   runs_subdir: "run_v31_coupled_erosion"
   atlas_path: "shape_atlas.pkl"
 
+# No-GT anatomy score: pre-fitted source distribution for view-aware quality scoring
+anatomy_stats_path: "anatomy_stats_v2.pkl"
+
 solver:
   max_outer: 10
   topk_frac: 0.25
@@ -14,12 +17,10 @@ solver:
   min_quality_delta: 0.01
   patience: 10
   stop_min_rqs: 90.0
-  stop_min_rqs_delta: 0.2
   stop_min_rqs_stagnant_rounds: 2
 
   # Conditional Optimization
   skip_good_rqs_threshold: 75.0
-  atlas_builder_min_rqs: 80.0
 
 triage:
   enabled: true
@@ -72,9 +73,25 @@ ops:
 
   erosion_iterations: 1
   dilation_iterations: 1
+  coupled_erosion_min_iters: 1
   max_erosion_loss: 0.25
 
   morph_kernel3: 3
+  morph_close_large_kernel: 5
+  gap_close_small_kernel: 3
+  gap_close_large_kernel: 9
+  gap_close_open_between: true
+  gap_close_max_myo_growth_ratio: 0.12
+  bridge_thickness: 2
+  bridge_thickness_mild: 1
+  bridge_thickness_strong: 3
+  rv_lv_barrier_touch_iters: 3
+  rv_lv_barrier_barrier_iters: 1
+  rv_lv_barrier_touch_iters_mild: 2
+  rv_lv_barrier_barrier_iters_mild: 1
+  rv_lv_barrier_touch_iters_strong: 4
+  rv_lv_barrier_barrier_iters_strong: 2
+  rv_lv_barrier_max_new_myo_ratio: 0.04
   smooth:
     contour_epsilon: 1.5
     gaussian_sigma: 1.0
@@ -129,13 +146,21 @@ multi_agent:
   agent_temperature: 0.2      # LLM temperature for agent reasoning
   enable_negotiation: true     # allow agents to challenge each other
   batch_summary: true          # cross-case learning after each batch
+  strict_no_gt_online: false   # when true, online decisions cannot consume GT-derived values
+  anatomy_llm_enable: true     # allow LLM to consume structured anatomy summaries
+  anatomy_llm_top_k: 5         # number of top anatomy anomalies exposed to LLM
+  anatomy_llm_scope: ["diagnosis", "planner", "verifier"]  # where anatomy summaries are injected
+  approved_pick_llm_weight: 0.45      # approved-case final mask selection: online score weight
+  approved_pick_anatomy_weight: 0.55  # approved-case final mask selection: anatomy score weight
+  approved_pick_min_margin: 0.000001  # choose best_intermediate only if blended score exceeds current by margin
+  nonapproved_pick_min_anatomy_gain: 0.25      # minimum anatomy-score gain vs original
   in_round_replan_on_failure: true   # executor gate失败时，同轮触发一次重规划重试
   max_replan_attempts_per_round: 1
 
 # ── Executor Safety Gates ──
 executor:
-  max_high_impact_change_ratio: 0.08  # cap for atlas/neighbor/large/global ops
-  max_step_change_ratio: 0.10         # cap for normal per-step edits
+  max_high_impact_change_ratio: 0.07  # cap for atlas/neighbor/large/global ops
+  max_step_change_ratio: 0.08         # cap for normal per-step edits
   same_verdict_max_change_ratio: 0.03 # if VLM says "same", only allow small low-impact edits
   same_verdict_min_compare_confidence: 0.70
   allow_borderline_on_same: true
@@ -143,7 +168,7 @@ executor:
   vlm_score_tolerance: 0.3             # used only when strict_monotonic_mode=false
   vlm_score_min_confidence: 0.4        # base confidence threshold
   strict_monotonic_mode: true          # each accepted step/round must be confidently improved
-  strict_min_score_delta: 0.05         # step gate: new_score >= prev_score + delta
+  strict_min_score_delta: 0.0          # step gate: new_score >= prev_score + delta (0.0: allow same score, since ministral-3:14b quantizes in 0.5 steps)
   strict_step_min_confidence: 0.55     # stricter confidence threshold for step-level score gates
   strict_reject_low_confidence: true   # reject low-confidence per-step score in strict mode
   strict_require_baseline_score: false # allow progress when numeric baseline missing; round gate still enforces improved
@@ -152,8 +177,8 @@ executor:
   high_risk_unlock_enable: true
   high_risk_unlock_score_threshold: 0.62
   high_risk_unlock_bad_prob_threshold: 0.80
-  high_risk_unlock_change_ratio_scale: 1.35
-  high_risk_unlock_max_ratio_cap: 0.24
+  high_risk_unlock_change_ratio_scale: 1.20
+  high_risk_unlock_max_ratio_cap: 0.18
   high_risk_unlock_nontarget_min_ratio: 0.55
   high_risk_unlock_nontarget_max_ratio: 1.85
   high_risk_unlock_vlm_conf_floor: 0.48
@@ -161,10 +186,10 @@ executor:
   candidate_search_when_no_step_applied: true
   candidate_search_max_candidates: 12
   candidate_search_topk_vlm: 3
-  candidate_search_max_change_ratio: 0.14
+  candidate_search_max_change_ratio: 0.10
   candidate_search_proxy_weight: 0.65
   candidate_search_vlm_weight: 1.00
-  candidate_search_accept_score: 0.10
+  candidate_search_accept_score: 0.14
   proxy_consensus_enable: true
   proxy_consensus_cmp_weight: 1.00
   proxy_consensus_proxy_weight: 1.00
@@ -178,11 +203,11 @@ executor:
   split_relabel_require_bbox: true     # lv_split_to_rv / rv_split_to_lv must have bbox
   split_relabel_topology_gate: true    # relabel must reduce source-class fragmentation
   split_relabel_max_change_ratio: 0.06 # cap relabel footprint to avoid global relabel accidents
-  gate_optional_disappear_min_area_px: 120 # optional class disappearance is blocked if area is large
+  gate_optional_disappear_min_area_px: 80  # optional class disappearance is blocked if area is large
   gate_lv_myo_enable: true             # enforce LV boundary covered by Myo (valve region exempt)
   gate_valve_exempt_margin_px: 6       # top valve-plane margin exempt from LV-Myo coverage check
-  gate_lv_myo_min_coverage: 0.70       # minimum LV-edge coverage by Myo outside valve region
-  gate_lv_myo_allow_drop: 0.03         # reject when coverage drops more than this and below min
+  gate_lv_myo_min_coverage: 0.76       # minimum LV-edge coverage by Myo outside valve region
+  gate_lv_myo_allow_drop: 0.02         # reject when coverage drops more than this and below min
   gate_rv_lv_contact_enable: true      # non-barrier ops cannot increase RV-LV direct contact
   gate_rv_lv_contact_allow_increase_px: 2
   gate_interslice_enable: true         # enforce inter-slice continuity vs neighbors
@@ -193,6 +218,24 @@ executor:
   gate_interslice_centroid_worsen_tol_px: 5.0
   gate_interslice_cc_max_dev: 2.0      # max allowed deviation from neighbor mean cc count
   gate_interslice_cc_worsen_tol: 1.0
+  anatomy_gate_enabled: true           # reject steps that significantly drop anatomy score
+  anatomy_gate_drop_threshold: -8.0    # anatomy score drop (0-100 scale) that triggers rejection
+  anatomy_gate_monotonic: true         # require per-step anatomy score to be non-degrading
+  anatomy_gate_step_drop_tolerance: 1.5  # allowed per-step anatomy drop before rejection (raised: anatomy score has ~±1 noise; 0.5 too strict for candidate search)
+
+# ── Verifier Threshold Policy ──
+verifier:
+  knowledge_top_k: 2
+  anatomy_hard_violation_reject: true  # deterministic reject when hard anatomy violations worsen
+  anatomy_delta_reject_enable: true    # deterministic reject when anatomy score drops too much
+  anatomy_delta_reject_threshold: -1.0 # reject when (after-before) < this threshold
+  thresholds:
+    reject: 45.0
+    approve: 65.0
+    per_view:
+      2CH: {reject: 43.0, approve: 63.0}
+      3CH: {reject: 45.0, approve: 65.0}
+      4CH: {reject: 47.0, approve: 67.0}
 
 
 # ---- Agent-specific overrides ----
@@ -211,6 +254,7 @@ agents:
     vlm_good_min_conf: 0.90          # require high confidence for VLM-good path
     borderline_auto_good_max_severity: 0.0   # never auto-good on borderline; always go to LLM
     score_good_floor: 0.80          # composite score floor (was 0.72, too permissive)
+    anatomy_prob_weight: 0.25       # weight of anatomy score in triage blending (0=disable)
     quality_model:
       enabled: true
       path: "quality_model.pkl"

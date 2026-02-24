@@ -1,0 +1,221 @@
+paths:
+  source_dir: /data484_5/xzhao14/cardiac_agent_postproc/results/Input_MnM2/all_frames_export
+  target_dir: /data484_5/xzhao14/cardiac_agent_postproc/results/outputs
+  runs_subdir: run_v31_azure_openai_medrag
+  atlas_path: shape_atlas.pkl
+solver:
+  max_outer: 10
+  topk_frac: 0.25
+  topk_min: 20
+  topk_max: 200
+  max_inner: 15
+  min_delta: 0.5
+  min_quality_delta: 0.01
+  patience: 10
+  stop_min_rqs: 90.0
+  stop_min_rqs_stagnant_rounds: 2
+  skip_good_rqs_threshold: 85.0
+view_inference:
+  rv_ratio_2ch_threshold: 0.02
+  rv_ratio_rv_optional_threshold: 0.005
+edge:
+  sobel_percentile: 85
+  overlap_target: 0.55
+shape_atlas:
+  enabled: true
+  target_diag: 128
+  kmeans_max: 4
+  kmeans_min: 2
+  per_view_divisor: 15
+  min_samples_for_clustering: 5
+reward_weights:
+  use_surrogate: false
+  surrogate_path: surrogate_model.pkl
+  P_touch: 50.0
+  P_edge_misalignment: 4.0
+  P_components: 18.0
+  P_islands: 20.0
+  P_valve_leak: 5.0
+  P_double_cavity: 30.0
+  P_holes: 10.0
+  P_size_drift: 2.0
+  P_atlas_mismatch: 20.0
+  P_atlas_lv_mismatch: 8.0
+  P_lv_shape: 8.0
+  P_shape_prior: 1.0
+  P_slice_consistency: 5.0
+  R_enclosure: 5.0
+  R_shape_match: 15.0
+ops:
+  small_component_floor: 20
+  small_component_frac: 0.002
+  island_frac: 0.02
+  erosion_iterations: 1
+  dilation_iterations: 1
+  coupled_erosion_min_iters: 1
+  max_erosion_loss: 0.25
+  morph_kernel3: 3
+  morph_close_large_kernel: 5
+  gap_close_small_kernel: 3
+  gap_close_large_kernel: 5
+  gap_close_open_between: true
+  gap_close_max_myo_growth_ratio: 0.12
+  bridge_thickness: 2
+  bridge_thickness_mild: 1
+  bridge_thickness_strong: 3
+  rv_lv_barrier_touch_iters: 3
+  rv_lv_barrier_barrier_iters: 1
+  rv_lv_barrier_touch_iters_mild: 2
+  rv_lv_barrier_barrier_iters_mild: 1
+  rv_lv_barrier_touch_iters_strong: 4
+  rv_lv_barrier_barrier_iters_strong: 2
+  rv_lv_barrier_max_new_myo_ratio: 0.04
+  smooth:
+    contour_epsilon: 1.5
+    gaussian_sigma: 1.0
+    morph_r: 1
+revision:
+  enabled: false
+  max_revisions: 30
+  stop_min_dice: 0.9
+  stop_max_hd95: 4.0
+  stall_rounds: 5
+  stall_min_dice_delta: 0.001
+  stall_max_hd95_delta: 0.1
+llm:
+  enabled: true
+  provider: ollama
+  base_url: https://med-rag-openai.openai.azure.com/openai/v1
+  model: gpt-4o
+  temperature: 0.15
+  max_tokens: 8192
+vision_guardrail:
+  enabled: true
+  provider: ollama
+  base_url: https://med-rag-openai.openai.azure.com/openai/v1
+  model: gpt-4o
+  threshold: 40
+quality_model:
+  enabled: true
+  path: quality_model.pkl
+  blend_mode: replace
+  blend_alpha: 0.5
+  bad_threshold: 0.93
+  log_features: false
+diagnosis:
+  vlm_enabled: true
+  max_suggestions: 4
+multi_agent:
+  max_rounds_per_case: 2
+  fast_path_threshold: 0.925
+  agent_temperature: 0.2
+  enable_negotiation: true
+  batch_summary: true
+  strict_no_gt_online: false
+  in_round_replan_on_failure: true
+  max_replan_attempts_per_round: 1
+executor:
+  max_high_impact_change_ratio: 0.07
+  max_step_change_ratio: 0.08
+  same_verdict_max_change_ratio: 0.03
+  same_verdict_min_compare_confidence: 0.7
+  allow_borderline_on_same: true
+  vlm_per_step_scoring: true
+  vlm_score_tolerance: 0.3
+  vlm_score_min_confidence: 0.4
+  strict_monotonic_mode: true
+  strict_min_score_delta: 0.05
+  strict_step_min_confidence: 0.55
+  strict_reject_low_confidence: true
+  strict_require_baseline_score: false
+  strict_round_min_compare_confidence: 0.6
+  strict_round_score_delta: 0.001
+  high_risk_unlock_enable: true
+  high_risk_unlock_score_threshold: 0.62
+  high_risk_unlock_bad_prob_threshold: 0.8
+  high_risk_unlock_change_ratio_scale: 1.2
+  high_risk_unlock_max_ratio_cap: 0.18
+  high_risk_unlock_nontarget_min_ratio: 0.55
+  high_risk_unlock_nontarget_max_ratio: 1.85
+  high_risk_unlock_vlm_conf_floor: 0.48
+  candidate_search_enable: true
+  candidate_search_when_no_step_applied: true
+  candidate_search_max_candidates: 12
+  candidate_search_topk_vlm: 3
+  candidate_search_max_change_ratio: 0.1
+  candidate_search_proxy_weight: 0.65
+  candidate_search_vlm_weight: 1.0
+  candidate_search_accept_score: 0.14
+  proxy_consensus_enable: true
+  proxy_consensus_cmp_weight: 1.0
+  proxy_consensus_proxy_weight: 1.0
+  proxy_consensus_quality_weight: 0.35
+  proxy_consensus_positive_threshold: 0.65
+  proxy_consensus_negative_threshold: -0.65
+  proxy_consensus_min_change_px: 24
+  proxy_consensus_unlock_on_high_risk: true
+  proxy_consensus_unlock_min_score: -0.15
+  enforce_directional_execution: true
+  split_relabel_require_bbox: true
+  split_relabel_topology_gate: true
+  split_relabel_max_change_ratio: 0.06
+  gate_optional_disappear_min_area_px: 120
+  gate_lv_myo_enable: true
+  gate_valve_exempt_margin_px: 6
+  gate_lv_myo_min_coverage: 0.7
+  gate_lv_myo_allow_drop: 0.03
+  gate_rv_lv_contact_enable: true
+  gate_rv_lv_contact_allow_increase_px: 2
+  gate_interslice_enable: true
+  gate_interslice_min_neighbor_area_px: 25
+  gate_interslice_area_dev_max: 1.2
+  gate_interslice_area_dev_worsen_tol: 0.12
+  gate_interslice_centroid_max_shift_px: 35.0
+  gate_interslice_centroid_worsen_tol_px: 5.0
+  gate_interslice_cc_max_dev: 2.0
+  gate_interslice_cc_worsen_tol: 1.0
+verifier:
+  knowledge_top_k: 2
+  thresholds:
+    reject: 45.0
+    approve: 65.0
+    per_view:
+      2CH:
+        reject: 43.0
+        approve: 63.0
+      3CH:
+        reject: 45.0
+        approve: 65.0
+      4CH:
+        reject: 47.0
+        approve: 67.0
+agents:
+  triage:
+    provider: ollama
+    base_url: https://med-rag-openai.openai.azure.com/openai/v1
+    model: gpt-4o
+    image_detail: auto
+    vlm_n_refs: 2
+    vlm_ref_match_view: true
+    vlm_good_prob_weight: 0.6
+    qm_good_prob_weight: 0.4
+    score_good_floor: 0.72
+    score_bad_ceiling: 0.6
+    quality_model:
+      enabled: true
+      path: quality_model.pkl
+  diagnosis:
+    provider: ollama
+    base_url: https://med-rag-openai.openai.azure.com/openai/v1
+    model: gpt-4o
+    image_detail: auto
+  planner:
+    provider: ollama
+    base_url: https://med-rag-openai.openai.azure.com/openai/v1
+    model: gpt-4o
+    chain_of_thought: true
+  verifier:
+    provider: ollama
+    base_url: https://med-rag-openai.openai.azure.com/openai/v1
+    model: gpt-4o
+    image_detail: auto

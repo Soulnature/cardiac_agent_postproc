@@ -14,10 +14,8 @@ solver:
   min_quality_delta: 0.01
   patience: 10
   stop_min_rqs: 90.0
-  stop_min_rqs_delta: 0.2
   stop_min_rqs_stagnant_rounds: 2
   skip_good_rqs_threshold: 75.0
-  atlas_builder_min_rqs: 80.0
 
 triage:
   enabled: true

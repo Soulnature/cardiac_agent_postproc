@@ -20,6 +20,19 @@ from .base_agent import BaseAgent
 from .message_bus import CaseContext, MessageBus, MessageType
 from .visual_knowledge import VisualKnowledgeBase
 
+_CANONICAL_REMAINING_ISSUES = {
+    "disconnected_myo",
+    "rv_lv_touching",
+    "fragmented_lv",
+    "fragmented_rv",
+    "holes",
+    "valve_leak",
+    "myo_thickness_var",
+    "missing_myo",
+    "missing_lv",
+    "missing_rv",
+}
+
 
 class VerifierAgent(BaseAgent):
     """
@@ -43,7 +56,7 @@ class VerifierAgent(BaseAgent):
             "Your role is to critically evaluate whether a repair actually improved the mask.\n"
             "You receive:\n"
             "1. VLM visual comparison of before vs after overlays (PRIMARY signal)\n"
-            "2. Optionally, before/after Dice scores (if GT available)\n"
+            "2. Structured Top-K retrieved knowledge evidence IDs and metadata\n"
             "3. Summary of operations applied\n\n"
             "You must decide:\n"
             "- APPROVE: the fix improved the mask (or at least didn't worsen it)\n"
@@ -55,10 +68,7 @@ class VerifierAgent(BaseAgent):
             '"confidence": 0.0-1.0, "reasoning": "...", '
             '"remaining_issues": [...]}'
         )
-        prompt = self._prompt_with_fallback("verifier_system.txt", fallback)
-        if self.visual_kb:
-            prompt += "\n\n" + self.visual_kb.build_knowledge_prompt()
-        return prompt
+        return self._prompt_with_fallback("verifier_system.txt", fallback)
 
     def process_case(self, ctx: CaseContext) -> None:
         """
@@ -75,13 +85,14 @@ class VerifierAgent(BaseAgent):
         strict_round_min_compare_conf = float(
             ex_cfg.get("strict_round_min_compare_confidence", 0.60)
         )
+        strict_no_gt_online = self._strict_no_gt_online()
 
-        vlm_comparison = {}
+        vlm_comparison: Dict[str, Any] = {}
         before_overlay = ""
         after_overlay = ""
         comparison_reference = "original"
 
-        if ctx.img_path and ctx.original_mask is not None and self.visual_kb:
+        if ctx.img_path and ctx.original_mask is not None:
             (
                 vlm_comparison,
                 before_overlay,
@@ -90,9 +101,14 @@ class VerifierAgent(BaseAgent):
             ) = self._vlm_compare(ctx)
 
         # Step 2: VLM quality judgment on the AFTER image
-        vlm_quality = {}
+        vlm_quality: Dict[str, Any] = {}
         if after_overlay and self.visual_kb:
-            vlm_quality = self.judge_visual_quality(after_overlay)
+            vlm_quality = self.judge_visual_quality(
+                overlay_path=after_overlay,
+                n_refs=1,
+                view_type=ctx.view_type,
+                seed=f"verify:{ctx.stem}",
+            )
 
         # Step 3: Optional GT metrics (for reporting, not decision driving)
         metrics = self._compute_metrics(ctx)
@@ -104,7 +120,19 @@ class VerifierAgent(BaseAgent):
             ex_cfg=ex_cfg,
         )
 
-        # Step 4: LLM reasoning — synthesize all signals
+        # Step 3b: Anatomy score signal (no-GT, view-specific area/shape improvement proxy)
+        anatomy_signal = self._compute_anatomy_signal(ctx)
+        anatomy_llm_payload: Dict[str, Any] = {}
+        if self._anatomy_llm_scope_enabled("verifier"):
+            anatomy_llm_payload = {
+                "baseline": dict(getattr(ctx, "anatomy_baseline_summary", {}) or {}),
+                "latest": dict(getattr(ctx, "anatomy_latest_summary", {}) or {}),
+            }
+            if isinstance(anatomy_signal, dict) and anatomy_signal.get("enabled"):
+                anatomy_llm_payload["current_signal"] = dict(anatomy_signal)
+            anatomy_llm_payload = {k: v for k, v in anatomy_llm_payload.items() if v}
+
+        # Step 4: LLM reasoning text (reason only); final verdict is score-thresholded.
         prompt = (
             f"Verify the repair of case {ctx.stem} (view: {ctx.view_type}).\n\n"
             f"**Operations applied**: {json.dumps([op['name'] for op in ctx.applied_ops])}\n"
@@ -124,8 +152,24 @@ class VerifierAgent(BaseAgent):
             prompt += (
                 f"**Proxy consensus**: {json.dumps(proxy_consensus, ensure_ascii=False)}\n"
             )
+        if anatomy_signal.get("enabled"):
+            prompt += (
+                f"**Anatomy score (no-GT)**: before={anatomy_signal['score_before']:.1f} "
+                f"after={anatomy_signal['score_after']:.1f} "
+                f"Δ={anatomy_signal['delta']:+.1f}/100\n"
+            )
+            if anatomy_signal.get("violations_after"):
+                prompt += (
+                    f"**Anatomy violations after repair**: "
+                    f"{anatomy_signal['violations_after']}\n"
+                )
+        if anatomy_llm_payload:
+            prompt += (
+                f"**Anatomy structured summary**: "
+                f"{json.dumps(anatomy_llm_payload, ensure_ascii=False)}\n"
+            )
 
-        if metrics.get("dice_before") is not None:
+        if (not strict_no_gt_online) and metrics.get("dice_before") is not None:
             prompt += (
                 f"**Dice change**: {metrics['dice_before']:.4f} → "
                 f"{metrics['dice_after']:.4f} (Δ={metrics['dice_delta']:+.4f})\n"
@@ -139,113 +183,44 @@ class VerifierAgent(BaseAgent):
         )
 
         result = self.think_json(prompt)
-        verdict = str(result.get("verdict", "approve")).lower()
-        if verdict not in ("approve", "reject", "needs_more_work"):
-            verdict = "needs_more_work"
-        confidence = float(result.get("confidence", 0.5))
-        reasoning = result.get("reasoning", "")
-        remaining = result.get("remaining_issues", [])
-        if not isinstance(remaining, list):
-            remaining = [str(remaining)]
+        llm_reasoning = str(
+            result.get("reasoning", result.get("reason", ""))
+        ).strip()
+        llm_remaining = result.get("remaining_issues", [])
+        if not isinstance(llm_remaining, list):
+            llm_remaining = [str(llm_remaining)]
+        llm_remaining = self._normalize_remaining_issues(llm_remaining)
 
-        # Apply fallback logic if LLM fails
-        if not result:
-            # Fallback: use VLM comparison verdict
-            cmp_v = str(vlm_comparison.get("verdict", "")).lower()
-            if cmp_v == "improved":
-                verdict = "approve"
-                reasoning = "Fallback: VLM says improved"
-            elif cmp_v == "worse":
-                verdict = "reject"
-                reasoning = "Fallback: VLM says worse"
-            elif cmp_v == "same":
-                verdict = "needs_more_work"
-                reasoning = "Fallback: VLM says same; continue refining"
-                remaining = ["no_clear_visual_improvement"]
-            else:
-                verdict = "reject"
-                reasoning = "Fallback: uncertain, conservative reject"
-
-        # Policy: if VLM comparison says "same", do not hard reject.
-        cmp_v = str(vlm_comparison.get("verdict", "")).lower()
-        if cmp_v == "same" and verdict == "reject":
-            self.log("  → Policy: VLM comparison='same', downgrade reject -> needs_more_work")
-            verdict = "needs_more_work"
-            if not remaining:
-                remaining = ["no_clear_visual_improvement"]
-            reasoning = (
-                f"{reasoning} "
-                "(Policy: VLM says same, continue another refinement round instead of hard reject.)"
-            ).strip()
-
-        # Override: for severely degraded cases where the VLM comparison
-        # confirms improvement, accept the repair even if absolute quality
-        # is still "bad".  The absolute VLM quality will always be "bad" for
-        # these cases (Dice < 0.5) because the starting point is so poor.
-        initial_is_bad = getattr(ctx, "triage_category", "needs_fix") != "good"
-        vlm_improved = (
-            vlm_comparison.get("verdict") == "improved"
-            and vlm_comparison.get("confidence", 0) >= 0.7
+        online_score = self._compute_online_score(
+            vlm_comparison=vlm_comparison,
+            vlm_quality=vlm_quality,
+            proxy_consensus=proxy_consensus,
+            anatomy_signal=anatomy_signal,
         )
-        ops_applied = len(ctx.applied_ops) > 0
-        
-        # New Relaxation: If verdict is "needs_more_work" but VLM says improved, APPROVE it.
-        # This allows incremental progress to be saved.
-        if verdict == "needs_more_work" and vlm_improved:
-             self.log(f"  → Override: upgrading 'needs_more_work' to 'approve' because VLM=improved")
-             verdict = "approve"
-             reasoning += " (Upgraded from needs_more_work due to VLM improvement)"
+        reject_th, approve_th = self._resolve_score_thresholds(ctx.view_type)
+        verdict = self._map_score_to_verdict(online_score, reject_th, approve_th)
+        remaining = list(llm_remaining if verdict == "needs_more_work" else [])
+        confidence = max(
+            self._clip01(result.get("confidence", 0.0), default=0.0),
+            self._clip01(vlm_comparison.get("confidence", 0.0), default=0.0),
+        )
+        if confidence <= 0.0:
+            confidence = self._clip01(vlm_quality.get("confidence", 0.0), default=0.0)
 
-        # RELAXATION: Quantitative Override for Worst Cases
-        # DISABLED per user request (Reference-Free Repair only)
-        # dice_delta = metrics.get("dice_delta", 0.0)
-        # if (cmp_v in ("same", "neutral") or verdict == "needs_more_work") and dice_delta > 0.015:
-        #      self.log(f"  → Override: upgrading '{verdict}' to 'approve' because Dice improved (+{dice_delta:.4f}) despite VLM neutral")
-        #      verdict = "approve"
-        #      reasoning += f" (Quantitative Override: Dice +{dice_delta:.4f} > 0.015)"
-
-        if initial_is_bad and vlm_improved and ops_applied and verdict != "approve":
-            self.log(f"  → Override: VLM comparison=improved, accepting repair for bad case")
-            verdict = "approve"
-            reasoning = (
-                f"Override: VLM comparison confirmed improvement "
-                f"(conf={vlm_comparison.get('confidence', 0):.2f}), "
-                f"{len(ctx.applied_ops)} ops applied. "
-                f"Original: {reasoning}"
-            )
-
-        if proxy_consensus.get("enabled", False):
-            consensus_v = str(proxy_consensus.get("consensus_verdict", "")).lower()
-            consensus_score = self._safe_float(
-                proxy_consensus.get("consensus_score", 0.0), default=0.0
-            )
-            if consensus_v == "reject" and verdict == "approve":
-                verdict = "needs_more_work"
-                if not remaining:
-                    remaining = ["proxy_consensus_detected_regression"]
-                reasoning = (
-                    f"{reasoning} "
-                    f"(Proxy consensus downgraded approve due to regression risk, score={consensus_score:+.3f})"
-                ).strip()
-            elif (
-                consensus_v == "approve"
-                and verdict == "reject"
-                and bool(proxy_consensus.get("unlock_applied", False))
-            ):
-                verdict = "needs_more_work"
-                if not remaining:
-                    remaining = ["high_risk_unlock_retry"]
-                reasoning = (
-                    f"{reasoning} "
-                    "(High-risk unlock: proxy consensus keeps candidate for another round.)"
-                ).strip()
+        reasoning = llm_reasoning or "Threshold decision from calibrated online score."
+        reasoning = (
+            f"{reasoning} "
+            f"(Score policy: score={online_score:.1f}, "
+            f"reject<{reject_th:.1f}, approve>={approve_th:.1f})"
+        ).strip()
 
         if strict_monotonic_mode:
             cmp_v = str(vlm_comparison.get("verdict", "")).lower()
             cmp_conf = float(vlm_comparison.get("confidence", 0.0) or 0.0)
+            strict_reason = ""
             if not vlm_comparison:
                 verdict = "reject"
-                reasoning = (
+                strict_reason = (
                     "Strict monotonic mode: missing VLM comparison signal; "
                     "rejecting round for safety."
                 )
@@ -254,26 +229,39 @@ class VerifierAgent(BaseAgent):
                     verdict = "needs_more_work"
                     if not remaining:
                         remaining = ["strict_proxy_override_retry"]
-                    reasoning = (
+                    strict_reason = (
                         "Strict monotonic mode: comparison not improved, "
                         "but high-risk proxy consensus allows one more refinement round."
                     )
                 else:
                     verdict = "reject"
-                    reasoning = (
+                    strict_reason = (
                         f"Strict monotonic mode: comparison vs {comparison_reference} "
                         f"is '{cmp_v or 'unknown'}' (must be 'improved')."
                     )
             elif cmp_conf < strict_round_min_compare_conf:
                 verdict = "reject"
-                reasoning = (
+                strict_reason = (
                     "Strict monotonic mode: improvement confidence too low "
                     f"({cmp_conf:.2f} < {strict_round_min_compare_conf:.2f})."
                 )
+            if strict_reason:
+                reasoning = f"{reasoning} ({strict_reason})".strip()
+
+        verdict, reasoning, remaining = self._apply_anatomy_violation_policy(
+            ctx=ctx,
+            verdict=verdict,
+            reasoning=reasoning,
+            remaining=remaining,
+            anatomy_signal=anatomy_signal,
+            vlm_comparison=vlm_comparison,
+        )
 
         confidence = max(0.0, min(1.0, confidence))
         if verdict == "needs_more_work" and not remaining:
             remaining = ["residual_issue_needs_refinement"]
+
+        matched_example_ids = self._collect_matched_example_ids(vlm_comparison, vlm_quality)
 
         # Update context
         ctx.verified = True
@@ -281,17 +269,47 @@ class VerifierAgent(BaseAgent):
         ctx.verifier_feedback = reasoning
         ctx.last_verify_result = {
             "verdict": verdict,
+            "score": online_score,
             "confidence": confidence,
             "reasoning": reasoning,
+            "reason": reasoning,
             "remaining_issues": list(remaining),
             "metrics": dict(metrics),
+            "offline_oracle_metrics": dict(metrics),
             "vlm_comparison": dict(vlm_comparison),
             "vlm_quality": dict(vlm_quality),
             "comparison_reference": comparison_reference,
             "proxy_consensus": dict(proxy_consensus),
+            "anatomy_signal": dict(anatomy_signal),
+            "online_verdict": verdict,
+            "online_score": float(online_score),
+            "online_threshold_reject": float(reject_th),
+            "online_threshold_approve": float(approve_th),
+            "online_matched_example_ids": list(matched_example_ids),
+            "strict_no_gt_online": bool(strict_no_gt_online),
         }
 
-        self.log(f"  → Verdict: {verdict} (confidence={confidence:.2f})")
+        self._write_verifier_payload(
+            ctx=ctx,
+            online_prompt=prompt,
+            online_data={
+                "vlm_comparison": dict(vlm_comparison),
+                "vlm_quality": dict(vlm_quality),
+                "proxy_consensus": dict(proxy_consensus),
+                "anatomy_signal": dict(anatomy_signal),
+                "online_score": float(online_score),
+                "online_threshold_reject": float(reject_th),
+                "online_threshold_approve": float(approve_th),
+                "online_verdict": verdict,
+                "online_matched_example_ids": list(matched_example_ids),
+            },
+            offline_oracle_metrics=dict(metrics),
+        )
+
+        self.log(
+            f"  → Verdict: {verdict} "
+            f"(score={online_score:.1f}, confidence={confidence:.2f})"
+        )
         self.log(f"  → Reasoning: {reasoning[:100]}")
 
         # Send result to bus
@@ -300,14 +318,23 @@ class VerifierAgent(BaseAgent):
             msg_type=MessageType.VERIFY_RESULT,
             content={
                 "verdict": verdict,
+                "score": online_score,
                 "confidence": confidence,
                 "reasoning": reasoning,
+                "reason": reasoning,
                 "remaining_issues": remaining,
                 "metrics": metrics,
+                "offline_oracle_metrics": metrics,
                 "vlm_comparison": vlm_comparison,
                 "vlm_quality": vlm_quality,
                 "comparison_reference": comparison_reference,
                 "proxy_consensus": proxy_consensus,
+                "anatomy_signal": dict(anatomy_signal),
+                "online_verdict": verdict,
+                "online_score": float(online_score),
+                "online_threshold_reject": float(reject_th),
+                "online_threshold_approve": float(approve_th),
+                "online_matched_example_ids": list(matched_example_ids),
             },
             case_id=ctx.case_id,
         )
@@ -325,6 +352,57 @@ class VerifierAgent(BaseAgent):
             )
 
     @staticmethod
+    def _normalize_remaining_issue(issue: Any) -> Optional[str]:
+        if issue is None:
+            return None
+        if isinstance(issue, dict):
+            issue = issue.get("issue", issue.get("name", issue.get("label", "")))
+        text = str(issue).strip().lower()
+        if not text:
+            return None
+        compact = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+        if not compact:
+            return None
+        for canon in sorted(_CANONICAL_REMAINING_ISSUES):
+            if (
+                compact == canon
+                or compact.startswith(f"{canon}_")
+                or compact.endswith(f"_{canon}")
+                or f"_{canon}_" in f"_{compact}_"
+            ):
+                return canon
+        if ("touch" in compact or "contact" in compact) and "rv" in compact and "lv" in compact:
+            return "rv_lv_touching"
+        if any(tok in compact for tok in ("discmyo", "ring_break", "myo_gap", "broken_ring")):
+            return "disconnected_myo"
+        if "hole" in compact:
+            return "holes"
+        if "valve" in compact and "leak" in compact:
+            return "valve_leak"
+        if "missing" in compact and "myo" in compact:
+            return "missing_myo"
+        if "missing" in compact and "lv" in compact:
+            return "missing_lv"
+        if "missing" in compact and "rv" in compact:
+            return "missing_rv"
+        if "fragment" in compact and "lv" in compact:
+            return "fragmented_lv"
+        if "fragment" in compact and "rv" in compact:
+            return "fragmented_rv"
+        if "thickness" in compact and "myo" in compact:
+            return "myo_thickness_var"
+        return None
+
+    @classmethod
+    def _normalize_remaining_issues(cls, items: List[Any]) -> List[str]:
+        out: List[str] = []
+        for raw in items:
+            canon = cls._normalize_remaining_issue(raw)
+            if canon and canon not in out:
+                out.append(canon)
+        return out
+
+    @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
@@ -339,6 +417,349 @@ class VerifierAgent(BaseAgent):
         if x > 1.0:
             return 1.0
         return x
+
+    def _strict_no_gt_online(self) -> bool:
+        ma_cfg = self.cfg.get("multi_agent", {}) or {}
+        return bool(ma_cfg.get("strict_no_gt_online", False))
+
+    def _anatomy_llm_scope_enabled(self, scope_name: str) -> bool:
+        ma_cfg = self.cfg.get("multi_agent", {}) or {}
+        if not bool(ma_cfg.get("anatomy_llm_enable", True)):
+            return False
+        scope_raw = ma_cfg.get(
+            "anatomy_llm_scope", ["diagnosis", "planner", "verifier"]
+        )
+        if isinstance(scope_raw, list):
+            scope_set = {str(x).strip().lower() for x in scope_raw}
+        elif isinstance(scope_raw, str):
+            scope_set = {
+                str(tok).strip().lower()
+                for tok in re.split(r"[,\s]+", scope_raw)
+                if str(tok).strip()
+            }
+        else:
+            scope_set = {"diagnosis", "planner", "verifier"}
+        return str(scope_name).strip().lower() in scope_set
+
+    def _apply_anatomy_violation_policy(
+        self,
+        ctx: CaseContext,
+        verdict: str,
+        reasoning: str,
+        remaining: List[str],
+        anatomy_signal: Dict[str, Any],
+        vlm_comparison: Dict[str, Any],
+    ) -> tuple[str, str, List[str]]:
+        """
+        Deterministic safety policy:
+        if post-repair hard anatomy violations increase and VLM does not show
+        strong confident improvement, downgrade to reject/needs_more_work.
+        """
+        verifier_cfg = self.cfg.get("verifier", {}) or {}
+        policy_enabled = bool(verifier_cfg.get("anatomy_hard_violation_reject", True))
+        if not policy_enabled:
+            return verdict, reasoning, remaining
+        if not isinstance(anatomy_signal, dict) or not anatomy_signal.get("enabled"):
+            return verdict, reasoning, remaining
+
+        def _norm_view_token(v: Any) -> str:
+            tok = re.sub(r"[^a-z0-9]", "", str(v or "").strip().lower())
+            if tok in {"2c", "2ch"}:
+                return "2ch"
+            if tok in {"3c", "3ch"}:
+                return "3ch"
+            if tok in {"4c", "4ch"}:
+                return "4ch"
+            return tok
+
+        baseline_summary = dict(getattr(ctx, "anatomy_baseline_summary", {}) or {})
+        view_token = _norm_view_token(ctx.view_type)
+        base_view_token = _norm_view_token(baseline_summary.get("view", ""))
+        if base_view_token and view_token and base_view_token != view_token:
+            return verdict, reasoning, remaining
+
+        # Delta-based hard downgrade:
+        # even without hard-violation tags, reject when anatomy score regresses
+        # beyond threshold.
+        delta_gate_enabled = bool(verifier_cfg.get("anatomy_delta_reject_enable", True))
+        delta_reject_th = self._safe_float(
+            verifier_cfg.get("anatomy_delta_reject_threshold", -1.0),
+            -1.0,
+        )
+        delta_v = self._safe_float(anatomy_signal.get("delta", 0.0), 0.0)
+        if delta_gate_enabled and np.isfinite(delta_v) and delta_v < delta_reject_th:
+            if verdict in ("approve", "needs_more_work"):
+                verdict = "reject"
+            if not remaining:
+                remaining = ["anatomy_score_regression"]
+            delta_reason = (
+                "Anatomy delta policy triggered: "
+                f"delta={delta_v:+.2f} < threshold={delta_reject_th:+.2f}."
+            )
+            reasoning = f"{reasoning} ({delta_reason})".strip()
+
+        before_v = {
+            str(x).strip().lower()
+            for x in (baseline_summary.get("hard_violations") or [])
+            if str(x).strip()
+        }
+        after_v = {
+            str(x).strip().lower()
+            for x in (anatomy_signal.get("violations_after") or [])
+            if str(x).strip()
+        }
+        if not after_v:
+            return verdict, reasoning, remaining
+
+        added = sorted(x for x in after_v if x not in before_v)
+        count_increased = len(after_v) > len(before_v)
+        if not added and not count_increased:
+            return verdict, reasoning, remaining
+
+        cmp_v = str(vlm_comparison.get("verdict", "")).lower()
+        cmp_conf = self._safe_float(vlm_comparison.get("confidence", 0.0), 0.0)
+        cmp_score = self._safe_float(vlm_comparison.get("score", 50.0), 50.0)
+        strong_improve = (
+            cmp_v == "improved"
+            and cmp_conf >= 0.80
+            and cmp_score >= 70.0
+        )
+        if strong_improve:
+            return verdict, reasoning, remaining
+
+        if verdict == "approve":
+            verdict = "reject"
+        elif verdict == "needs_more_work":
+            verdict = "reject"
+        if not remaining:
+            remaining = ["anatomy_hard_violation_regression"]
+
+        anatomy_reason = (
+            "Anatomy hard-violation policy triggered: post-repair violations "
+            f"increased (before={sorted(before_v)}, after={sorted(after_v)}, added={added}) "
+            "without strong confident visual improvement."
+        )
+        reasoning = f"{reasoning} ({anatomy_reason})".strip()
+        return verdict, reasoning, remaining
+
+    @staticmethod
+    def _normalize_view_key(view_type: Optional[str]) -> str:
+        token = re.sub(r"[^a-z0-9]", "", str(view_type or "").strip().lower())
+        if token in {"2c", "2ch"}:
+            return "2CH"
+        if token in {"3c", "3ch"}:
+            return "3CH"
+        if token in {"4c", "4ch"}:
+            return "4CH"
+        return token.upper() if token else "ANY"
+
+    def _resolve_score_thresholds(self, view_type: Optional[str]) -> tuple[float, float]:
+        base_cfg = self.cfg.get("verifier", {}) or {}
+        ag_cfg = (
+            (self.cfg.get("agents", {}) or {}).get("verifier", {}) or {}
+        )
+        base_thr = base_cfg.get("thresholds", {}) if isinstance(base_cfg, dict) else {}
+        ag_thr = ag_cfg.get("thresholds", {}) if isinstance(ag_cfg, dict) else {}
+
+        reject_th = float(base_thr.get("reject", 45.0))
+        approve_th = float(base_thr.get("approve", 65.0))
+        if isinstance(ag_thr, dict):
+            if "reject" in ag_thr:
+                reject_th = float(ag_thr.get("reject"))
+            if "approve" in ag_thr:
+                approve_th = float(ag_thr.get("approve"))
+
+        view_key = self._normalize_view_key(view_type)
+        per_view_base = base_thr.get("per_view", {}) if isinstance(base_thr, dict) else {}
+        per_view_ag = ag_thr.get("per_view", {}) if isinstance(ag_thr, dict) else {}
+        view_cfg = {}
+        if isinstance(per_view_base, dict):
+            view_cfg.update(per_view_base.get(view_key, {}) or {})
+            view_cfg.update(per_view_base.get(view_key.lower(), {}) or {})
+        if isinstance(per_view_ag, dict):
+            view_cfg.update(per_view_ag.get(view_key, {}) or {})
+            view_cfg.update(per_view_ag.get(view_key.lower(), {}) or {})
+        if "reject" in view_cfg:
+            reject_th = float(view_cfg["reject"])
+        if "approve" in view_cfg:
+            approve_th = float(view_cfg["approve"])
+        if approve_th < reject_th:
+            approve_th = reject_th
+        return float(reject_th), float(approve_th)
+
+    @staticmethod
+    def _map_score_to_verdict(score: float, reject_th: float, approve_th: float) -> str:
+        if score < reject_th:
+            return "reject"
+        if score < approve_th:
+            return "needs_more_work"
+        return "approve"
+
+    def _compute_anatomy_signal(self, ctx: "CaseContext") -> Dict[str, Any]:
+        """
+        Compute anatomy score for the current (post-repair) mask and compare
+        it to the baseline score stored in ctx.anatomy_score_before.
+
+        Returns a dict with enabled=True and score_100 (0-100) if available,
+        or enabled=False when anatomy stats are missing / computation fails.
+        """
+        if (
+            getattr(ctx, "anatomy_stats", None) is None
+            or getattr(ctx, "anatomy_score_before", -1.0) < 0
+            or ctx.current_mask is None
+            or ctx.image is None
+        ):
+            return {"enabled": False}
+        try:
+            from ..anatomy_score import (
+                compute_anatomy_score,
+                build_anatomy_llm_summary,
+                _normalize_view,
+            )
+            view = _normalize_view(ctx.view_type or "")
+            stats = ctx.anatomy_stats.get(view)
+            if stats is None:
+                return {"enabled": False}
+            score_after, detail = compute_anatomy_score(ctx.current_mask, ctx.image, view, stats)
+            ma_cfg = self.cfg.get("multi_agent", {}) or {}
+            top_k = int(ma_cfg.get("anatomy_llm_top_k", 5))
+            summary_after = build_anatomy_llm_summary(
+                score=score_after,
+                detail=detail,
+                view_type=view,
+                top_k=max(1, top_k),
+            )
+            ctx.anatomy_latest_summary = dict(summary_after)
+            delta = float(score_after) - float(ctx.anatomy_score_before)
+            # Map delta to 0-100 signal: delta=0 → 50, ±20pts → 0/100 (clipped)
+            anatomy_score_100 = max(0.0, min(100.0, 50.0 + delta * 2.5))
+            violations_after = detail.get("hard_violations", [])
+            self.log(
+                f"  Anatomy: before={ctx.anatomy_score_before:.1f} "
+                f"after={score_after:.1f} Δ={delta:+.1f} → {anatomy_score_100:.0f}/100"
+            )
+            return {
+                "enabled": True,
+                "score_before": float(ctx.anatomy_score_before),
+                "score_after": float(score_after),
+                "delta": float(delta),
+                "score_100": float(anatomy_score_100),
+                "violations_after": violations_after,
+                "summary_after": summary_after,
+            }
+        except Exception as e:
+            self.log(f"  Anatomy signal error: {e}")
+            return {"enabled": False}
+
+    def _compute_online_score(
+        self,
+        vlm_comparison: Dict[str, Any],
+        vlm_quality: Dict[str, Any],
+        proxy_consensus: Dict[str, Any],
+        anatomy_signal: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        cmp_score = self._safe_float(vlm_comparison.get("score", 50.0), 50.0)
+        cmp_conf = self._clip01(vlm_comparison.get("confidence", 0.0), default=0.0)
+        cmp_v = str(vlm_comparison.get("verdict", "")).lower()
+        if not np.isfinite(cmp_score):
+            cmp_map = {"improved": 80.0, "same": 50.0, "neutral": 50.0, "worse": 20.0, "degraded": 20.0}
+            cmp_score = cmp_map.get(cmp_v, 50.0)
+
+        quality_score = self._safe_float(vlm_quality.get("score", 5.0), 5.0) * 10.0
+        quality_score = max(0.0, min(100.0, quality_score))
+        quality_conf = self._clip01(vlm_quality.get("confidence", 0.0), default=0.0)
+
+        proxy_score = self._safe_float(proxy_consensus.get("proxy_score", 0.0), 0.0)
+        proxy_score_100 = max(0.0, min(100.0, 50.0 + 50.0 * proxy_score))
+        proxy_conf = self._clip01(proxy_consensus.get("proxy_confidence", 0.0), default=0.0)
+
+        # Base weights
+        w_cmp = 0.70 + 0.10 * cmp_conf
+        w_quality = 0.15 + 0.05 * quality_conf
+        w_proxy = 0.15 + 0.05 * proxy_conf
+
+        # Anatomy signal: no-GT area/shape quality delta (most reliable proxy for Dice)
+        w_anatomy = 0.0
+        anatomy_score_100 = 50.0
+        if anatomy_signal and anatomy_signal.get("enabled"):
+            anatomy_score_100 = float(anatomy_signal.get("score_100", 50.0))
+            w_anatomy = 0.20  # fixed weight — anatomy is our best GT-free Dice proxy
+
+        w_sum = max(1e-6, w_cmp + w_quality + w_proxy + w_anatomy)
+        score = (
+            w_cmp * cmp_score
+            + w_quality * quality_score
+            + w_proxy * proxy_score_100
+            + w_anatomy * anatomy_score_100
+        ) / w_sum
+        return float(max(0.0, min(100.0, score)))
+
+    @staticmethod
+    def _collect_matched_example_ids(
+        vlm_comparison: Dict[str, Any],
+        vlm_quality: Dict[str, Any],
+    ) -> List[str]:
+        out: List[str] = []
+        for obj in (vlm_comparison, vlm_quality):
+            ids = obj.get("matched_example_ids", [])
+            if not isinstance(ids, list):
+                continue
+            for eid in ids:
+                eid_s = str(eid).strip()
+                if eid_s and eid_s not in out:
+                    out.append(eid_s)
+        return out
+
+    def _write_verifier_payload(
+        self,
+        ctx: CaseContext,
+        online_prompt: str,
+        online_data: Dict[str, Any],
+        offline_oracle_metrics: Dict[str, Any],
+    ) -> None:
+        payload = {
+            "case_id": ctx.case_id,
+            "stem": ctx.stem,
+            "strict_no_gt_online": bool(self._strict_no_gt_online()),
+            "anatomy_baseline_summary": dict(getattr(ctx, "anatomy_baseline_summary", {}) or {}),
+            "anatomy_latest_summary": dict(getattr(ctx, "anatomy_latest_summary", {}) or {}),
+            "online_prompt": online_prompt,
+            "online_data": online_data,
+            "offline_oracle_metrics": offline_oracle_metrics,
+        }
+        out_path = ctx.debug_img_path("_verifier_payload.json")
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.log(f"Failed to write verifier payload: {e}")
+
+    @staticmethod
+    def _normalize_defect_tag(tag: Any) -> str:
+        txt = re.sub(r"[^a-z0-9]+", "_", str(tag or "").strip().lower())
+        txt = re.sub(r"_+", "_", txt).strip("_")
+        return txt
+
+    def _collect_defect_tags(self, ctx: CaseContext) -> List[str]:
+        tags: List[str] = []
+        for issue in (ctx.triage_issues or []):
+            t = self._normalize_defect_tag(issue)
+            if t and t not in tags:
+                tags.append(t)
+        for diag in (ctx.diagnoses or []):
+            if not isinstance(diag, dict):
+                continue
+            for key in ("issue", "issue_type", "label", "name"):
+                if key not in diag:
+                    continue
+                t = self._normalize_defect_tag(diag.get(key))
+                if t and t not in tags:
+                    tags.append(t)
+        for op in (ctx.applied_ops or []):
+            t = self._normalize_defect_tag(op.get("name", ""))
+            if t and t not in tags:
+                tags.append(t)
+        return tags
 
     @staticmethod
     def _diff_stats_from_masks(mask_before: np.ndarray, mask_after: np.ndarray) -> Dict[str, int]:
@@ -484,9 +905,10 @@ class VerifierAgent(BaseAgent):
         w_quality = float(ex_cfg.get("proxy_consensus_quality_weight", 0.35))
         consensus_score = float(w_cmp * cmp_vote + w_proxy * proxy_vote + w_quality * quality_vote)
 
-        dice_delta = self._safe_float(metrics.get("dice_delta", 0.0), default=0.0)
-        if dice_delta > 0.0:
-            consensus_score += min(0.25, dice_delta * 3.0)
+        if not self._strict_no_gt_online():
+            dice_delta = self._safe_float(metrics.get("dice_delta", 0.0), default=0.0)
+            if dice_delta > 0.0:
+                consensus_score += min(0.25, dice_delta * 3.0)
 
         pos_th = float(ex_cfg.get("proxy_consensus_positive_threshold", 0.65))
         neg_th = float(ex_cfg.get("proxy_consensus_negative_threshold", -0.65))
@@ -600,22 +1022,61 @@ class VerifierAgent(BaseAgent):
                     diff_path,
                     stats=diff_stats,
                 )
+                verifier_cfg = self.cfg.get("verifier", {}) or {}
+                agent_verifier_cfg = (
+                    (self.cfg.get("agents", {}) or {}).get("verifier", {}) or {}
+                )
+                knowledge_top_k = int(
+                    agent_verifier_cfg.get(
+                        "knowledge_top_k",
+                        verifier_cfg.get("knowledge_top_k", 2),
+                    )
+                )
+                defect_tags = self._collect_defect_tags(ctx)
+                strict_no_gt_online = self._strict_no_gt_online()
                 result = self.judge_repair_comparison(
-                    diff_path, 
-                    applied_ops=[op["name"] for op in ctx.applied_ops]
+                    diff_path,
+                    applied_ops=[op["name"] for op in ctx.applied_ops],
+                    view_type=ctx.view_type,
+                    defect_tags=defect_tags,
+                    top_k_refs=max(1, knowledge_top_k),
+                    use_confidence_prior=(not strict_no_gt_online),
                 )
                 # Map verdict to old format for backward compat
                 v = result.get("verdict", "neutral")
                 mapped = {"improved": "improved", "degraded": "worse", "neutral": "same"}
+                result["raw_verdict"] = v
                 result["verdict"] = mapped.get(v, "same")
+                if "score" not in result:
+                    cmp_conf = self._safe_float(result.get("confidence", 0.0), 0.0)
+                    if result["verdict"] == "improved":
+                        result["score"] = 50.0 + 50.0 * max(0.0, min(1.0, cmp_conf))
+                    elif result["verdict"] in ("worse", "degraded"):
+                        result["score"] = 50.0 - 50.0 * max(0.0, min(1.0, cmp_conf))
+                    else:
+                        result["score"] = 50.0
                 result["reference"] = reference_tag
                 result["diff_stats_numeric"] = diff_stats
+                matched_ids = result.get("matched_example_ids", [])
+                if not isinstance(matched_ids, list):
+                    matched_ids = []
+                trace_item = {
+                    "stage": "repair_verification",
+                    "comparison_reference": reference_tag,
+                    "matched_example_ids": [str(x) for x in matched_ids],
+                    "defect_tags": defect_tags,
+                }
+                if not hasattr(ctx, "knowledge_trace") or not isinstance(ctx.knowledge_trace, list):
+                    ctx.knowledge_trace = []
+                ctx.knowledge_trace.append(trace_item)
                 return result, before_overlay, after_overlay, reference_tag
 
             # Fallback: old approach
             result = self.judge_visual_comparison(before_overlay, after_overlay)
             result["reference"] = reference_tag
             result["diff_stats_numeric"] = diff_stats
+            if "matched_example_ids" not in result:
+                result["matched_example_ids"] = []
             return result, before_overlay, after_overlay, reference_tag
 
         except Exception as e:

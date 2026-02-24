@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+import re
 from scipy import ndimage as ndi
 
 from ..quality_model import extract_quality_features
@@ -65,6 +66,37 @@ ISSUE_OPS_MAP: Dict[str, List[str]] = {
 
 _CLASS_LABEL = {"rv": 1, "myo": 2, "lv": 3}
 
+# Anatomy-score tag → (issue_key, affected_class, direction)
+# These map anatomy_score.diagnose_from_score() tags into the ISSUE_OPS_MAP vocabulary.
+_ANATOMY_TO_ISSUE: Dict[str, tuple] = {
+    "rv_too_small":              ("rv_too_small",       "rv",  "global"),
+    "rv_too_large":              ("rv_too_large",       "rv",  "global"),
+    "rv_present_in_2ch":        ("noise_island",        "rv",  "global"),
+    "myo_insufficient_enclosure":("broken_ring",        "myo", "global"),
+    "myo_too_thin":              ("myo_too_thin",        "myo", "global"),
+    "myo_too_thick":             ("myo_too_thick",       "myo", "global"),
+    "lv_too_small":              ("lv_too_small",        "lv",  "global"),
+    "lv_too_large":              ("lv_too_large",        "lv",  "global"),
+    "poor_boundary_rv":          ("boundary_error",      "rv",  "global"),
+    "poor_boundary_lv":          ("boundary_error",      "lv",  "global"),
+    "poor_boundary_myo":         ("jagged_boundary",     "myo", "global"),
+    "rv_not_lateral":            ("severe_misplacement", "rv",  "lateral"),
+    "rv_lv_vertical_misalign":   ("severe_misplacement", "rv",  "global"),
+    "lv_not_elongated":          ("boundary_error",      "lv",  "global"),
+    "rv_not_crescent":           ("boundary_error",      "rv",  "global"),
+    "poor_intensity_separation": ("boundary_error",      "myo", "global"),
+    "lv_absent":                 ("massive_missing",     "lv",  "global"),
+    "myo_absent":                ("massive_missing",     "myo", "global"),
+    "rv_absent_4ch":             ("massive_missing",     "rv",  "global"),
+    "rv_absent_3ch":             ("massive_missing",     "rv",  "global"),
+    "rv_in_2ch":                 ("noise_island",        "rv",  "global"),
+    "rv_dominant_3ch":           ("rv_too_large",        "rv",  "global"),
+    "rv_critically_small_4ch":   ("massive_missing",     "rv",  "global"),
+    "rv_critically_large_4ch":   ("rv_too_large",        "rv",  "global"),
+    "rv_lv_not_lateral_4ch":     ("severe_misplacement", "rv",  "lateral"),
+    "lv_not_elongated_2ch":      ("boundary_error",      "lv",  "global"),
+}
+
 
 @dataclass
 class SpatialDiagnosis:
@@ -78,6 +110,7 @@ class SpatialDiagnosis:
     confidence: float = 0.8
     source: str = "rules"  # "rules", "vlm", "llm"
     bbox: Optional[List[int]] = None  # [ymin, xmin, ymax, xmax] in pixels
+    kernel_size: Optional[int] = None  # optional kernel hint for morph ops
 
 
 def normalize_direction_hint(direction: str, description: str = "") -> str:
@@ -132,6 +165,97 @@ def normalize_direction_hint(direction: str, description: str = "") -> str:
             return "lateral"
 
     return "global"
+
+
+def normalize_kernel_size_hint(
+    value: Any,
+    min_size: int = 1,
+    max_size: int = 15,
+) -> Optional[int]:
+    """
+    Normalize optional kernel-size hints.
+    Keeps odd kernel sizes in [min_size, max_size], otherwise returns None.
+    """
+    if value is None:
+        return None
+    try:
+        kernel = int(round(float(value)))
+    except Exception:
+        return None
+    if kernel < int(min_size) or kernel > int(max_size):
+        return None
+    if kernel % 2 == 0:
+        kernel += 1
+        if kernel > int(max_size):
+            kernel -= 2
+    if kernel < int(min_size):
+        return None
+    return int(kernel)
+
+
+def _normalize_strength_hint(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if token in {"mild", "normal", "strong"}:
+        return token
+    return "normal"
+
+
+def _split_operation_strength_hint(op_name: str) -> tuple[str, str]:
+    raw = str(op_name or "").strip()
+    if not raw:
+        return "", "normal"
+    lowered = raw.lower()
+    if lowered.endswith("_mild"):
+        return lowered[:-5], "mild"
+    if lowered.endswith("_strong"):
+        return lowered[:-7], "strong"
+    return lowered, "normal"
+
+
+def supports_kernel_size_override(op_name: Any) -> bool:
+    """Return True if the operation accepts executor kernel override."""
+    base, _ = _split_operation_strength_hint(str(op_name or ""))
+    if not base:
+        return False
+    if base in {"smooth_morph", "smooth_morph_k5", "rv_erode", "rv_erode_large"}:
+        return True
+    return bool(re.match(r"^[123]_(dilate|erode|dilate_large|erode_large)$", base))
+
+
+def infer_kernel_size_fallback(
+    issue: Any,
+    operation: Any,
+    severity: Any = "medium",
+    strength: Any = "normal",
+) -> Optional[int]:
+    """
+    Deterministic kernel fallback used when LLM/planner leaves kernel_size empty.
+    Policy is conservative: mild/low -> 3, normal -> 5, strong/large -> 7.
+    """
+    base_op, suffix_strength = _split_operation_strength_hint(str(operation or ""))
+    if not supports_kernel_size_override(base_op):
+        return None
+
+    sev = str(severity or "medium").strip().lower()
+    if sev not in {"critical", "high", "medium", "low"}:
+        sev = "medium"
+    req_strength = _normalize_strength_hint(strength)
+    eff_strength = suffix_strength if suffix_strength != "normal" else req_strength
+    issue_text = str(issue or "").strip().lower()
+
+    if base_op.endswith("_large") or eff_strength == "strong":
+        return 7
+    if eff_strength == "mild":
+        return 3
+
+    # For RV/LV touching, keep erosion conservative unless severity is high.
+    if base_op.startswith("rv_erode") and ("touch" in issue_text or "rv_lv" in issue_text):
+        return 5 if sev in {"critical", "high"} else 3
+
+    if base_op in {"smooth_morph", "smooth_morph_k5"}:
+        return 5 if sev in {"critical", "high", "medium"} else 3
+
+    return 5 if sev in {"critical", "high", "medium"} else 3
 
 
 def compute_region_mask(
@@ -224,6 +348,7 @@ class DiagnosisAgent(BaseAgent):
             "- direction: 'septal', 'lateral', 'apical', 'basal', or 'global'\n"
             "- severity: 'high', 'medium', or 'low'\n"
             "- operation: the SINGLE best repair operation\n"
+            "- kernel_size: optional odd integer kernel hint (e.g. 3, 5, 7) for kernel-based morph ops\n"
             "- description: brief SPATIAL description (e.g. 'Myo too thin at lateral wall')\n\n"
             "CRITICAL: BE CONSERVATIVE. But do use intensity-guided operations (expand_myo_intensity) "
             "if the myocardium is significantly thin or has gaps that simple closing cannot fix. "
@@ -242,6 +367,7 @@ class DiagnosisAgent(BaseAgent):
             '{"diagnoses": ['
             '  {"issue": "broken_ring", "affected_class": "myo", "direction": "septal", '
             '   "severity": "high", "operation": "convex_hull_fill", "confidence": 0.95, '
+            '   "kernel_size": 5, '
             '   "description": "Gap in septal myocardium", '
             '   "bbox_2d": [120, 140, 160, 180]}, '
             '  {"issue": "touching", "affected_class": "rv", "direction": "global", '
@@ -252,7 +378,8 @@ class DiagnosisAgent(BaseAgent):
             "IMPORTANT: For spatial defects (broken_ring, holes, extra blobs), YOU MUST PROVIDE "
             "'bbox_2d' [ymin, xmin, ymax, xmax] (0-1000 scale). "
             "If location is uncertain, set bbox_2d=null; NEVER output placeholder boxes "
-            "like [0,0,10,10]."
+            "like [0,0,10,10]. If operation is kernel-based and confidence is high, provide "
+            "kernel_size."
         )
         return self._prompt_with_fallback("diagnosis_system.txt", fallback)
 
@@ -273,12 +400,41 @@ class DiagnosisAgent(BaseAgent):
             neighbor_masks=ctx.neighbor_masks,
         )
 
+        # Step 1b: Anatomy-score driven diagnoses (no-GT, view-aware)
+        anatomy_diagnoses = self._diagnose_anatomy(ctx)
+        if anatomy_diagnoses:
+            self.log(
+                f"  Anatomy diagnoses: {[d.issue for d in anatomy_diagnoses]}"
+            )
+
         # Step 2: VLM analysis (if enabled)
         vlm_diagnoses = []
         if self._diag_vlm_enabled and self._vlm_enabled() and ctx.img_path:
             vlm_diagnoses = self._diagnose_vlm(ctx)
 
         # Step 3: LLM synthesis — combine all signals
+        ma_cfg = self.cfg.get("multi_agent", {}) or {}
+        anatomy_llm_enable = bool(ma_cfg.get("anatomy_llm_enable", True))
+        scope_raw = ma_cfg.get(
+            "anatomy_llm_scope", ["diagnosis", "planner", "verifier"]
+        )
+        if isinstance(scope_raw, list):
+            anatomy_scope = {str(x).strip().lower() for x in scope_raw}
+        elif isinstance(scope_raw, str):
+            anatomy_scope = {
+                str(tok).strip().lower()
+                for tok in re.split(r"[,\s]+", scope_raw)
+                if str(tok).strip()
+            }
+        else:
+            anatomy_scope = {"diagnosis", "planner", "verifier"}
+        anatomy_summary_payload: Dict[str, Any] = {}
+        if anatomy_llm_enable and "diagnosis" in anatomy_scope:
+            anatomy_summary_payload = dict(
+                getattr(ctx, "anatomy_latest_summary", {})
+                or getattr(ctx, "anatomy_baseline_summary", {})
+            )
+
         all_signals = {
             "stem": ctx.stem,
             "view_type": ctx.view_type,
@@ -286,14 +442,22 @@ class DiagnosisAgent(BaseAgent):
             "rule_diagnoses": [
                 {"issue": d.issue, "affected_class": d.affected_class,
                  "direction": d.direction, "severity": d.severity,
-                 "operation": d.operation, "confidence": d.confidence}
+                 "operation": d.operation, "confidence": d.confidence,
+                 "kernel_size": d.kernel_size}
                 for d in rule_diagnoses
+            ],
+            "anatomy_diagnoses": [
+                {"issue": d.issue, "affected_class": d.affected_class,
+                 "direction": d.direction, "severity": d.severity,
+                 "operation": d.operation, "confidence": d.confidence,
+                 "description": d.description, "kernel_size": d.kernel_size}
+                for d in anatomy_diagnoses
             ],
             "vlm_diagnoses": [
                 {"issue": d.issue, "affected_class": d.affected_class,
                  "direction": d.direction, "severity": d.severity,
                  "operation": d.operation, "confidence": d.confidence,
-                 "description": d.description}
+                 "description": d.description, "kernel_size": d.kernel_size}
                 for d in vlm_diagnoses
             ],
             "key_features": {
@@ -307,14 +471,18 @@ class DiagnosisAgent(BaseAgent):
             },
             "verifier_feedback": ctx.verifier_feedback,  # Inject feedback from previous rounds
         }
+        if anatomy_summary_payload:
+            all_signals["anatomy_summary"] = anatomy_summary_payload
 
         prompt = (
             f"Analyze the following signals for case {ctx.stem} and produce a "
             f"final prioritized diagnosis (max {self._max_suggestions} items).\n\n"
             f"Signals:\n{_format_dict(all_signals)}\n\n"
-            f"Synthesize rule-based and VLM findings. Remove duplicates, "
-            f"resolve conflicts, and rank by severity. For each diagnosis, "
-            f"choose the single best operation.\n\n"
+            f"Synthesize rule-based, anatomy-score, and VLM findings. Remove duplicates, "
+            f"resolve conflicts, and rank by severity. Anatomy-score diagnoses are derived "
+            f"from learned source distributions (reliable for area/ratio issues such as "
+            f"rv_too_small, myo_too_thick, lv_too_small) — trust them for such issues. "
+            f"For each diagnosis, choose the single best operation.\n\n"
             f"CONTEXTUAL HINTS:\n"
             f"- Thickness CV is {feats.get('thickness_cv', 0):.3f}. "
             f"If > 0.5, 'myo_too_thin' is likely a False Positive artifact. "
@@ -323,12 +491,21 @@ class DiagnosisAgent(BaseAgent):
 
         result = self.think_json(prompt)
         llm_diagnoses = self._parse_llm_diagnoses(result, source="llm", img_shape=ctx.mask.shape)
-        # Merge: prefer LLM synthesis, but append critical/high-confidence rules
-        # that are truly missing. Keep LLM items at the front to avoid losing
-        # their spatial hints due max_suggestions truncation.
+
+        # Merge: anatomy diagnoses with high severity get priority (they are reliable for
+        # area/ratio issues that LLM tends to hallucinate). Rule-based critical issues
+        # are preserved. LLM synthesis fills in spatial details.
         if llm_diagnoses:
             final_diagnoses = list(llm_diagnoses)
             existing_issues = {(d.issue, d.affected_class) for d in final_diagnoses}
+
+            # Insert anatomy high-severity diagnoses at front if LLM missed them
+            for ad in anatomy_diagnoses:
+                if ad.severity in ("high", "critical"):
+                    if (ad.issue, ad.affected_class) not in existing_issues:
+                        final_diagnoses.insert(0, ad)
+                        existing_issues.add((ad.issue, ad.affected_class))
+
             for rd in rule_diagnoses:
                 if rd.severity in ("critical", "high") or rd.issue in (
                     "massive_missing",
@@ -341,7 +518,17 @@ class DiagnosisAgent(BaseAgent):
                         final_diagnoses.append(rd)
                         existing_issues.add((rd.issue, rd.affected_class))
         else:
-            final_diagnoses = rule_diagnoses
+            # No LLM diagnoses: use anatomy + rule-based diagnoses directly
+            final_diagnoses = list(anatomy_diagnoses) + rule_diagnoses
+            # Deduplicate by (issue, affected_class)
+            seen: set = set()
+            deduped: List[SpatialDiagnosis] = []
+            for d in final_diagnoses:
+                key = (d.issue, d.affected_class)
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(d)
+            final_diagnoses = deduped
 
         final_diagnoses = final_diagnoses[:self._max_suggestions]
 
@@ -368,6 +555,13 @@ class DiagnosisAgent(BaseAgent):
                     bbox = self._infer_secondary_component_bbox(
                         ctx.mask, d.affected_class
                     )
+            kernel_size = normalize_kernel_size_hint(d.kernel_size)
+            if kernel_size is None:
+                kernel_size = infer_kernel_size_fallback(
+                    issue=d.issue,
+                    operation=d.operation,
+                    severity=d.severity,
+                )
             ctx.diagnoses.append(
                 {
                     "issue": d.issue,
@@ -379,6 +573,7 @@ class DiagnosisAgent(BaseAgent):
                     "confidence": d.confidence,
                     "source": d.source,
                     "bbox": bbox,
+                    "kernel_size": kernel_size,
                 }
             )
 
@@ -549,6 +744,82 @@ class DiagnosisAgent(BaseAgent):
         except Exception:
             return None
 
+    def _diagnose_anatomy(self, ctx: "CaseContext") -> List[SpatialDiagnosis]:
+        """
+        Anatomy-score driven diagnosis: no-GT, view-aware area/shape analysis.
+
+        Reads anatomy_stats from ctx (loaded by Coordinator), computes features on
+        ctx.mask, runs diagnose_from_score(), and maps each tag to a SpatialDiagnosis.
+        Returns up to 4 diagnoses sorted by severity.
+        """
+        if (
+            getattr(ctx, "anatomy_stats", None) is None
+            or ctx.mask is None
+            or ctx.image is None
+        ):
+            return []
+        try:
+            from ..anatomy_score import (
+                compute_anatomy_score,
+                diagnose_from_score,
+                build_anatomy_llm_summary,
+                _normalize_view,
+            )
+            view = _normalize_view(ctx.view_type or "")
+            stats = ctx.anatomy_stats.get(view)
+            if stats is None:
+                return []
+
+            score, detail = compute_anatomy_score(ctx.mask, ctx.image, view, stats)
+            ma_cfg = self.cfg.get("multi_agent", {}) or {}
+            summary_top_k = int(ma_cfg.get("anatomy_llm_top_k", 5))
+            ctx.anatomy_latest_summary = build_anatomy_llm_summary(
+                score=score,
+                detail=detail,
+                view_type=view,
+                top_k=max(1, summary_top_k),
+            )
+            tags = diagnose_from_score(detail, view, top_k=4)
+            if not tags:
+                return []
+
+            # Score → severity
+            if score < 35:
+                sev = "high"
+            elif score < 60:
+                sev = "medium"
+            else:
+                sev = "low"
+
+            diagnoses: List[SpatialDiagnosis] = []
+            seen_issues: set = set()
+            for tag in tags:
+                mapped = _ANATOMY_TO_ISSUE.get(tag)
+                if mapped is None:
+                    continue
+                issue, affected_class, direction = mapped
+                if issue in seen_issues:
+                    continue
+                seen_issues.add(issue)
+                ops = ISSUE_OPS_MAP.get(issue, [])
+                operation = ops[0] if ops else "topology_cleanup"
+                diagnoses.append(SpatialDiagnosis(
+                    issue=issue,
+                    affected_class=affected_class,
+                    direction=direction,
+                    severity=sev,
+                    operation=operation,
+                    confidence=0.82,
+                    description=(
+                        f"[Anatomy score {score:.0f}/100] {tag}"
+                    ),
+                    source="anatomy",
+                ))
+            return diagnoses
+        except Exception as e:
+            self.log(f"  Anatomy diagnosis failed: {e}")
+            return []
+
     def _diagnose_rules(
         self,
         mask: np.ndarray,
@@ -636,7 +907,7 @@ class DiagnosisAgent(BaseAgent):
         # RV-LV touching
         touch_ratio = float(feats.get("touch_ratio", 0))
         touch_len = self._rv_lv_contact_len(mask)
-        if touch_len >= 8 or touch_ratio > 0.03:
+        if touch_len >= 20 and touch_ratio > 0.05:
             diagnoses.append(SpatialDiagnosis(
                 issue="touching", affected_class="rv",
                 direction="septal", severity="high",
@@ -963,6 +1234,9 @@ class DiagnosisAgent(BaseAgent):
                 severity = "medium"
             operation = str(item.get("operation", ""))
             confidence = float(item.get("confidence", 0.7))
+            kernel_size = normalize_kernel_size_hint(
+                item.get("kernel_size", item.get("kernel", None))
+            )
 
             bbox_2d = item.get("bbox_2d", None)
             bbox = None
@@ -1072,6 +1346,12 @@ class DiagnosisAgent(BaseAgent):
             if operation == "topology_cleanup" and severity not in ("critical", "high"):
                 severity = "low"
             confidence = max(0.0, min(1.0, confidence))
+            if kernel_size is None:
+                kernel_size = infer_kernel_size_fallback(
+                    issue=issue,
+                    operation=operation,
+                    severity=severity,
+                )
 
             diagnoses.append(SpatialDiagnosis(
                 issue=issue,
@@ -1083,6 +1363,7 @@ class DiagnosisAgent(BaseAgent):
                 confidence=confidence,
                 source=source,
                 bbox=bbox,
+                kernel_size=kernel_size,
             ))
 
         return diagnoses
@@ -1159,7 +1440,7 @@ class DiagnosisAgent(BaseAgent):
         lv = (mask == 3).astype(np.uint8)
         if rv.sum() == 0 or lv.sum() == 0:
             return 0
-        ker = np.ones((3, 3), np.uint8)
+        ker = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
         rv_edge = rv - cv2.erode(rv, ker, iterations=1)
         lv_dil = cv2.dilate(lv, ker, iterations=1)
         return int(np.count_nonzero((rv_edge > 0) & (lv_dil > 0)))

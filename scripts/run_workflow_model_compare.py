@@ -150,8 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm_enabled", type=str, default=None)
     parser.add_argument("--vision_enabled", type=str, default=None)
     parser.add_argument("--triage_n_refs", type=int, default=None)
-    parser.add_argument("--triage_four_way_refs", type=str, default=None)
-    parser.add_argument("--triage_ref_categories", type=str, default=None)
+    parser.add_argument("--strict_no_gt_online", type=str, default=None)
     parser.add_argument("--top_improved_k", type=int, default=8)
     parser.add_argument("--top_improved_min_delta", type=float, default=0.0)
     parser.add_argument(
@@ -317,8 +316,7 @@ def _build_run_cmd(
     add_opt("--llm_enabled", args.llm_enabled)
     add_opt("--vision_enabled", args.vision_enabled)
     add_opt("--triage_n_refs", args.triage_n_refs)
-    add_opt("--triage_four_way_refs", args.triage_four_way_refs)
-    add_opt("--triage_ref_categories", args.triage_ref_categories)
+    add_opt("--strict_no_gt_online", args.strict_no_gt_online)
     cmd.extend(runner_extra)
     return cmd
 

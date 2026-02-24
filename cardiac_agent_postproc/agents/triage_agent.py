@@ -78,9 +78,31 @@ def _canonicalize_issue(issue: Any) -> Optional[str]:
     """Normalize noisy VLM/LLM issue strings to canonical triage issue labels."""
     if issue is None:
         return None
-    text = str(issue).strip().lower()
+    raw = str(issue).strip().lower()
+    text = raw
     if not text:
         return None
+
+    compact = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    if compact:
+        # Accept spatially-tagged variants, e.g. disconnected_myo_at_lateral.
+        for canon in ISSUE_SEVERITY:
+            if (
+                compact == canon
+                or compact.startswith(f"{canon}_")
+                or compact.endswith(f"_{canon}")
+                or f"_{canon}_" in f"_{compact}_"
+            ):
+                return canon
+        if any(tok in compact for tok in ("myo_gap", "ring_break", "broken_ring", "discmyo")):
+            return "disconnected_myo"
+        if (
+            ("touch" in compact or "contact" in compact or "merge" in compact or "overlap" in compact)
+            and "lv" in compact
+            and "rv" in compact
+        ):
+            return "rv_lv_touching"
+
     text = re.sub(r"[_\-]+", " ", text)
     text = re.sub(r"\s+", " ", text)
 
@@ -193,6 +215,20 @@ class TriageAgent(BaseAgent):
 
         super().__init__(cfg, bus, visual_kb=visual_kb)
 
+        # Load anatomy stats for anatomy-aware triage scoring.
+        self._anatomy_stats: Optional[Dict] = None
+        _anatomy_path = cfg.get("anatomy_stats_path", "")
+        if _anatomy_path and os.path.exists(str(_anatomy_path)):
+            try:
+                from ..anatomy_score import load_stats as _load_anatomy_stats
+                self._anatomy_stats = _load_anatomy_stats(str(_anatomy_path))
+                print(
+                    f"[triage] Loaded anatomy stats ({len(self._anatomy_stats)} views)"
+                    f" from {_anatomy_path}"
+                )
+            except Exception as _e:
+                print(f"[triage] Failed to load anatomy stats: {_e}")
+
     @property
     def name(self) -> str:
         return "triage"
@@ -233,16 +269,6 @@ class TriageAgent(BaseAgent):
         agent_cfg = self._agent_cfg()
         vlm_n_refs = max(1, int(agent_cfg.get("vlm_n_refs", 2)))
         vlm_match_view = bool(agent_cfg.get("vlm_ref_match_view", True))
-        vlm_four_way_refs = bool(agent_cfg.get("vlm_four_way_refs", False))
-        raw_ref_categories = agent_cfg.get(
-            "vlm_ref_categories",
-            ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"],
-        )
-        vlm_ref_categories = (
-            list(raw_ref_categories)
-            if isinstance(raw_ref_categories, list)
-            else ["01_good", "02_good_low_dice", "03_bad_high_dice", "04_bad"]
-        )
         vlm_ref_seed = f"triage:{ctx.stem}"
 
         # Step 2: Optional fast classifier
@@ -255,6 +281,21 @@ class TriageAgent(BaseAgent):
                 classifier_score = 1.0 - bad_prob
             except Exception as e:
                 self.log(f"Classifier failed: {e}")
+
+        # Step 2.5: Anatomy score (no-GT, view-aware quality proxy)
+        anatomy_score_raw: Optional[float] = None
+        if self._anatomy_stats is not None and ctx.image is not None:
+            try:
+                from ..anatomy_score import compute_anatomy_score, _normalize_view
+                _anat_view = _normalize_view(ctx.view_type or "")
+                _anat_stats = self._anatomy_stats.get(_anat_view)
+                if _anat_stats is not None:
+                    anatomy_score_raw, _ = compute_anatomy_score(
+                        ctx.mask, ctx.image, _anat_view, _anat_stats
+                    )
+                    self.log(f"  Anatomy score: {anatomy_score_raw:.1f}")
+            except Exception as _e:
+                self.log(f"Anatomy score failed (triage): {_e}")
 
         # Step 3: VLM visual judgment (primary decision signal)
         vlm_verdict = {}
@@ -269,9 +310,6 @@ class TriageAgent(BaseAgent):
                         n_refs=vlm_n_refs,
                         view_type=ctx.view_type if vlm_match_view else None,
                         seed=vlm_ref_seed,
-                        four_way_categories=(
-                            vlm_ref_categories if vlm_four_way_refs else None
-                        ),
                     )
             except Exception as e:
                 self.log(f"VLM triage failed: {e}")
@@ -346,9 +384,12 @@ class TriageAgent(BaseAgent):
         severity = max(severity, _issue_severity(issues))
 
         # Calibrated triage score as "probability of being good" for fast-path gating.
-        # Blend VLM and quality-model signals to improve ranking stability (AUC).
+        # Blend VLM, quality-model, and anatomy signals to improve ranking stability (AUC).
         triage_score = classifier_score
         vlm_good_prob: Optional[float] = None
+        anatomy_good_prob: Optional[float] = (
+            float(anatomy_score_raw) / 100.0 if anatomy_score_raw is not None else None
+        )
         if vlm_verdict:
             vlm_score = float(vlm_verdict.get("score", 0))
             vlm_conf = float(vlm_verdict.get("confidence", 0.5))
@@ -363,8 +404,17 @@ class TriageAgent(BaseAgent):
             qm_w = float(agent_cfg.get("qm_good_prob_weight", 0.15 if self._scorer is not None else 0.0))
             if self._scorer is None:
                 qm_w = 0.0
-            denom = max(vlm_w + qm_w, 1e-6)
-            triage_score = (vlm_w * vlm_good_prob + qm_w * classifier_score) / denom
+            anat_w = float(agent_cfg.get("anatomy_prob_weight", 0.25)) if anatomy_good_prob is not None else 0.0
+            denom = max(vlm_w + qm_w + anat_w, 1e-6)
+            triage_score = (
+                vlm_w * vlm_good_prob
+                + qm_w * classifier_score
+                + (anat_w * anatomy_good_prob if anatomy_good_prob is not None else 0.0)
+            ) / denom
+        elif anatomy_good_prob is not None:
+            # No VLM available: blend classifier with anatomy score.
+            anat_w = float(agent_cfg.get("anatomy_prob_weight", 0.25))
+            triage_score = (1.0 - anat_w) * classifier_score + anat_w * anatomy_good_prob
 
         # Penalize high-severity anatomical defects so score is safer for fast-path gating.
         severity_penalty = min(0.25, 0.04 * severity)

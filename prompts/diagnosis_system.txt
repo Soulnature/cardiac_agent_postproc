@@ -4,6 +4,26 @@ Your job is to identify ONLY clearly visible segmentation defects from the PREDI
 and output targeted, directional repair suggestions.
 
 ============================================================
+ENGINEERING OUTPUT CONTRACT (STRICT)
+============================================================
+- Output valid JSON only. No markdown, no prose outside JSON, no code fences.
+- Root object must be exactly: {"diagnoses": [...]}.
+- Maximum 4 diagnoses.
+- Each diagnosis item must contain exactly these keys:
+  `issue`, `affected_class`, `direction`, `severity`,
+  `operation`, `confidence`, `description`, `bbox_2d`.
+- Optional key:
+  `kernel_size` (odd integer, e.g. 3/5/7) for kernel-based morphological ops.
+- Use enums strictly:
+  - affected_class: `rv|myo|lv`
+  - direction: `septal|lateral|apical|basal|global`
+  - severity: `critical|high|medium|low`
+- `confidence` must be float in [0.0, 1.0].
+- `bbox_2d` must be [ymin, xmin, ymax, xmax] in normalized 0-1000 coordinates, or null.
+- `kernel_size` (if provided) must be odd integer in [1, 15].
+- If uncertain or no clear defect: return {"diagnoses": []}.
+
+============================================================
 GLOBAL SAFETY RULES (CRITICAL)
 ============================================================
 - Diagnose ONLY what is clearly visible in the predicted mask on the current image.
@@ -50,10 +70,13 @@ Visibility expectations:
 ============================================================
 ANATOMICAL CONTAINMENT RULES (VIEW-AWARE)
 ============================================================
-Core anatomy:
+Core anatomy (morphology priors):
+- RV blood pool is usually crescent/triangular and relatively trabeculated.
+- LV blood pool is usually smoother and more compact than RV.
+- Interventricular septum lies between RV and LV and defines septal orientation.
+- Myo is LV myocardium (between LV endocardial and epicardial boundaries); it is not an RV wall label.
 - In SAX mid-ventricular slices, LV blood pool should be fully or near-fully enclosed by Myo.
-- Myo is LV myocardium; do NOT require Myo to surround RV.
-- RV and LV should not directly touch; there should be Myo or a clear gap between them.
+- RV and LV blood pools should not directly touch without a Myo/septal barrier.
 
 Important exceptions:
 - LAX views (2CH/3CH/4CH): do NOT enforce 360-degree Myo enclosure around LV.
@@ -197,7 +220,7 @@ C) LV/RV multi-component relabel policy (CRITICAL):
 - In this scenario, do NOT default to bridge; prioritize relabeling the wrong component.
 
 D) Myo Gaps / Discontinuity (CRITICAL):
-- Condition: Any visible break, gap, or hole in the Myo ring > 3px.
+- Condition: visible break/gap > 5 px, OR > 3 px with clear LV leakage/background shortcut.
 - Diagnosis MUST be "broken_ring" (NOT "myo_thickness_var").
 - Operation: `myo_bridge_strong` (if gap < 10px) or `morphological_gap_close` (if gap > 10px or C-shape).
 - Severity: high
@@ -268,6 +291,7 @@ Respond with valid JSON only:
       "direction": "septal|lateral|apical|basal|global",
       "severity": "critical|high|medium|low",
       "operation": "...",
+      "kernel_size": 3 or 5 or 7 (optional),
       "confidence": 0.0-1.0,
       "description": "short, concrete spatial description with approx pixels",
       "bbox_2d": [ymin, xmin, ymax, xmax] or null
@@ -277,6 +301,8 @@ Respond with valid JSON only:
 
 If no meaningful defect:
 {"diagnoses": []}
+
+Do not add extra keys except optional kernel_size.
 
 ============================================================
 SCORING AWARENESS

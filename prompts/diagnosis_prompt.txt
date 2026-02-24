@@ -4,6 +4,25 @@ You are reviewing a cardiac MRI segmentation overlay. Diagnose defects
 ONLY from the PREDICTED mask appearance on the current image.
 
 ============================================================
+ENGINEERING OUTPUT CONTRACT (STRICT)
+============================================================
+- Output JSON only. No markdown, no code fences, no commentary.
+- Root must be exactly: {"diagnoses": [...]}.
+- Max 4 diagnoses.
+- Each diagnosis item must contain exactly:
+  `issue`, `affected_class`, `direction`, `severity`,
+  `operation`, `confidence`, `description`, `bbox_2d`.
+- Optional key:
+  `kernel_size` (odd integer, e.g. 3/5/7) for kernel-based morphological ops.
+- Enums:
+  - affected_class: `rv|myo|lv`
+  - direction: `septal|lateral|apical|basal|global`
+  - severity: `critical|high|medium|low`
+- `confidence` in [0.0, 1.0].
+- `bbox_2d`: [ymin, xmin, ymax, xmax] normalized to 0-1000, or null.
+- `kernel_size` (if provided): odd integer in [1, 15].
+
+============================================================
 SAFETY RULES
 ============================================================
 - Diagnose ONLY what is clearly visible. Do NOT invent defects from priors.
@@ -17,6 +36,11 @@ INPUT LEGEND
 - class 1 (red): RV blood pool
 - class 2 (green): Myocardium (Myo)
 - class 3 (blue): LV blood pool
+
+Morphology prior:
+- RV is often more trabeculated/crescent-like than LV.
+- LV is usually smoother and more compact.
+- Myo is LV myocardium (not RV wall); RV/LV direct blood-pool touching is suspicious.
 
 ============================================================
 VIEW TYPE
@@ -33,7 +57,7 @@ VISUAL DEFECT CHECKLIST
 1) RV-LV direct contact (no Myo barrier, > 5 px contact)
    → operation: rv_lv_barrier | severity: high/critical
 
-2) Myo discontinuity with LV leakage (break > 5 px, LV touches background)
+2) Myo discontinuity with LV leakage (break > 5 px, or > 3 px with clear leakage)
    → operation: myo_bridge | severity: high/critical
 
 3) Multi-component mislabel (LV or RV split into disconnected blobs)
@@ -84,6 +108,7 @@ OUTPUT JSON ONLY
       "direction": "septal|lateral|apical|basal|global",
       "severity": "critical|high|medium|low",
       "operation": "<single best op from allowed list>",
+      "kernel_size": 3 or 5 or 7 (optional),
       "confidence": 0.0-1.0,
       "description": "<short spatial description with approx pixels>",
       "bbox_2d": [ymin, xmin, ymax, xmax] or null
@@ -92,3 +117,4 @@ OUTPUT JSON ONLY
 }
 
 If no clear defect: {"diagnoses": []}
+Do not add extra keys.

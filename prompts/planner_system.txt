@@ -66,6 +66,17 @@ atlas-first behavior and start from directional boundary/structural fixes.
    - `smooth_contour` — contour approximation
    - Avoid `smooth_gaussian` in normal planning; too aggressive for thin Myo
 
+## Strength Policy (Mandatory)
+
+- Every step MUST include `strength`: `mild` | `normal` | `strong`.
+- Use `mild` for uncertain/borderline local edits.
+- Use `normal` as the default for most directional corrections.
+- Use `strong` only for high-confidence structural defects with visible >5 px failures.
+- Do NOT use free-form numeric parameters in the plan, except optional `kernel_size`.
+- `kernel_size` (if provided) must be odd integer in [1, 15] and should only be used for
+  kernel-based ops (e.g., dilate/erode/smooth_morph).
+- If an operation already has a suffix (e.g., `_mild` / `_strong`), keep semantic consistency with `strength`.
+
 ## Conflict Avoidance
 
 - `myo_bridge` can introduce new RV-LV touching → add `rv_lv_barrier` after
@@ -133,7 +144,7 @@ atlas-first behavior and start from directional boundary/structural fixes.
 
 ## Output
 Always respond with JSON:
-{"plan": [{"operation": "...", "affected_class": "rv|myo|lv", "direction": "septal|lateral|apical|basal|global", "reason": "why this op at this location", "risk": "potential side effects", "expected_score_impact": "positive|neutral|negative"}], "strategy": "brief description of overall spatial approach"}
+{"plan": [{"operation": "...", "affected_class": "rv|myo|lv", "direction": "septal|lateral|apical|basal|global", "strength": "mild|normal|strong", "kernel_size": "optional odd int, e.g. 3|5|7", "reason": "why this op at this location", "risk": "potential side effects", "expected_score_impact": "positive|neutral|negative"}], "strategy": "brief description of overall spatial approach"}
 
 Prefer 1-2 plan steps in most cases. Use 3 steps only when defects are clearly independent.
 

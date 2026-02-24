@@ -13,10 +13,8 @@ solver:
   min_delta: 0.1
   patience: 1
   stop_min_rqs: 0.0
-  stop_min_rqs_delta: 0.1
   stop_min_rqs_stagnant_rounds: 1
   skip_good_rqs_threshold: 999.0
-  atlas_builder_min_rqs: 0.0
   min_quality_delta: 0.01
 
 triage:

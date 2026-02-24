@@ -5,8 +5,12 @@ from scipy import ndimage as ndi
 def dice_per_class(pred: np.ndarray, gt: np.ndarray, c: int) -> float:
     P = (pred==c)
     G = (gt==c)
+    n_P = np.count_nonzero(P)
+    n_G = np.count_nonzero(G)
+    if n_P == 0 and n_G == 0:
+        return float("nan")  # class absent in both → exclude from mean
     inter = np.count_nonzero(P & G)
-    denom = np.count_nonzero(P) + np.count_nonzero(G) + 1e-8
+    denom = n_P + n_G + 1e-8
     return float(2.0*inter/denom)
 
 def boundary_4n(binary: np.ndarray) -> np.ndarray:
@@ -41,10 +45,17 @@ def dice_macro(pred: np.ndarray, gt: np.ndarray) -> tuple[float,float,float,floa
     d1 = dice_per_class(pred, gt, 1)
     d2 = dice_per_class(pred, gt, 2)
     d3 = dice_per_class(pred, gt, 3)
-    return float((d1+d2+d3)/3.0), d1, d2, d3
+    vals = [v for v in (d1, d2, d3) if not np.isnan(v)]
+    mean = float(np.mean(vals)) if vals else float("nan")
+    return mean, d1, d2, d3
 
 def hd95_macro(pred: np.ndarray, gt: np.ndarray) -> tuple[float,float,float,float]:
     h1 = hd95_per_class(pred, gt, 1)
     h2 = hd95_per_class(pred, gt, 2)
     h3 = hd95_per_class(pred, gt, 3)
-    return float((h1+h2+h3)/3.0), h1, h2, h3
+    # exclude classes absent in both pred and gt (both boundaries empty → hd95=0 but class doesn't exist)
+    def _absent(c: int) -> bool:
+        return np.count_nonzero(pred == c) == 0 and np.count_nonzero(gt == c) == 0
+    vals = [h for h, c in zip((h1, h2, h3), (1, 2, 3)) if not _absent(c)]
+    mean = float(np.mean(vals)) if vals else float("nan")
+    return mean, h1, h2, h3

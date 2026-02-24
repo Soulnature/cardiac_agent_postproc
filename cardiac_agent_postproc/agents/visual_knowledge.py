@@ -6,7 +6,6 @@ few-shot references and text summaries for VLM-based quality judgment.
 """
 from __future__ import annotations
 
-import csv
 import os
 import re
 import random
@@ -14,16 +13,117 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import ClassVar, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
 # ---------- Filename pattern ----------
-# e.g. "0.373_4C_LowDice_335_original_lax_4c_009.png"
-# e.g. "0.967_4C_Best_215_original_lax_4c_000.png"
+# MnM2: "0.373_4C_LowDice_335_original_lax_4c_009.png"
+# UKB:  "0.953_4C_Best_3834376_2_original_lax_4c_024.png"
+# Group 2 (view) and group 3 (issue) use [^_]+ to stop at the first underscore,
+# preventing the greedy \w+ from consuming underscores and misparsing UKB stems.
+# Group 4 (stem) uses \d+.*_original_lax_\w+_\d+ to tolerate extra _{scan_id}
+# segments present in UKB patient IDs.
 _FNAME_RE = re.compile(
-    r"^(\d+\.\d+)_(\w+)_(\w+)_(\d+_original_lax_\w+_\d+)\.png$"
+    r"^(\d+\.\d+)_([^_]+)_([^_]+)_(\d+.*_original_lax_\w+_\d+)\.png$"
 )
+
+
+@dataclass(frozen=True)
+class KnowledgeRecord:
+    """
+    Canonical typed knowledge item used for deterministic retrieval.
+    """
+
+    example_id: str
+    stage: str
+    view_type: str
+    defect_tags: Tuple[str, ...]
+    action_tags: Tuple[str, ...]
+    expected_outcome: str
+    confidence_prior: float
+    artifact_path: str
+    source: str
+
+    def compact(self) -> Dict[str, object]:
+        return {
+            "example_id": self.example_id,
+            "stage": self.stage,
+            "view_type": self.view_type,
+            "defect_tags": list(self.defect_tags),
+            "action_tags": list(self.action_tags),
+            "expected_outcome": self.expected_outcome,
+            "confidence_prior": float(self.confidence_prior),
+            "artifact_path": self.artifact_path,
+            "source": self.source,
+        }
+
+
+def _norm_view(view: Optional[str]) -> str:
+    if not view:
+        return "ANY"
+    token = re.sub(r"[^a-z0-9]", "", str(view).strip().lower())
+    if token in {"2c", "2ch"}:
+        return "2CH"
+    if token in {"3c", "3ch"}:
+        return "3CH"
+    if token in {"4c", "4ch"}:
+        return "4CH"
+    if "sax" in token:
+        return "SAX"
+    return token.upper() if token else "ANY"
+
+
+def _norm_tag(tag: str) -> str:
+    out = re.sub(r"[^a-z0-9]+", "_", str(tag).strip().lower())
+    out = re.sub(r"_+", "_", out).strip("_")
+    return out
+
+
+def _norm_tags(tags: Sequence[str]) -> Tuple[str, ...]:
+    uniq = sorted({_norm_tag(t) for t in tags if _norm_tag(t)})
+    return tuple(uniq)
+
+
+def _parse_view_from_stem(stem: str) -> str:
+    s = str(stem).lower()
+    if "_lax_2c_" in s:
+        return "2CH"
+    if "_lax_3c_" in s:
+        return "3CH"
+    if "_lax_4c_" in s:
+        return "4CH"
+    return "ANY"
+
+
+def _default_retrieval(
+    records: Sequence[KnowledgeRecord],
+    stage: str,
+    view_type: Optional[str],
+    defect_tags: Sequence[str],
+    top_k: int,
+    use_confidence_prior: bool = True,
+) -> List[KnowledgeRecord]:
+    stage_q = _norm_tag(stage) or "any_stage"
+    view_q = _norm_view(view_type)
+    defect_q = set(_norm_tags(defect_tags))
+
+    top_k = max(1, int(top_k))
+
+    stage_exact = [r for r in records if _norm_tag(r.stage) == stage_q]
+    pool = stage_exact if stage_exact else list(records)
+
+    scored: List[Tuple[float, int, int, str, KnowledgeRecord]] = []
+    for rec in pool:
+        rec_tags = set(rec.defect_tags)
+        overlap = len(defect_q.intersection(rec_tags))
+        view_match = int(view_q == "ANY" or rec.view_type == "ANY" or rec.view_type == view_q)
+        prior = float(rec.confidence_prior) if use_confidence_prior else 0.0
+        score = float(overlap) + prior
+        scored.append((-score, -overlap, -view_match, rec.example_id, rec))
+
+    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    return [item[-1] for item in scored[:top_k]]
 
 
 @dataclass
@@ -35,6 +135,7 @@ class VisualExample:
     issue_type: str    # "LowDice" | "DiscMyo" | "Best"
     stem: str          # case stem e.g. "335_original_lax_4c_009"
     category: str      # "good" | "bad"
+    example_id: str = ""
 
 
 @dataclass
@@ -48,12 +149,14 @@ class VisualKnowledgeBase:
     """
     good_examples: List[VisualExample] = field(default_factory=list)
     bad_examples: List[VisualExample] = field(default_factory=list)
-    four_way_examples: Dict[str, List[VisualExample]] = field(default_factory=dict)
 
     # Index by issue type for targeted lookups
     _by_issue: Dict[str, List[VisualExample]] = field(
         default_factory=dict, repr=False
     )
+    records: List[KnowledgeRecord] = field(default_factory=list)
+    _record_by_id: Dict[str, KnowledgeRecord] = field(default_factory=dict, repr=False)
+    _legacy_warned: ClassVar[bool] = False
 
     @classmethod
     def load(cls, results_dir: str) -> "VisualKnowledgeBase":
@@ -88,101 +191,88 @@ class VisualKnowledgeBase:
         # generate single-panel overlays (same style as runtime target overlay)
         # from all_frames_export/{stem}_img.png + {stem}_pred.png when available.
         kb._materialize_single_panel_references(results_dir)
-        kb._load_four_way_collections(results_dir)
+        kb._materialize_records()
 
         logger.info(
-            "VisualKnowledgeBase loaded: %d good, %d bad (%s); 4-way refs: %s",
+            "VisualKnowledgeBase loaded: %d good, %d bad (%s)",
             len(kb.good_examples),
             len(kb.bad_examples),
             ", ".join(f"{k}={len(v)}" for k, v in kb._by_issue.items()),
-            ", ".join(f"{k}={len(v)}" for k, v in sorted(kb.four_way_examples.items())) or "none",
         )
         return kb
 
+    def _materialize_records(self) -> None:
+        records: List[KnowledgeRecord] = []
+        rec_by_id: Dict[str, KnowledgeRecord] = {}
+        for ex in self.good_examples + self.bad_examples:
+            rec = self._record_from_example(ex)
+            ex.example_id = rec.example_id
+            records.append(rec)
+            rec_by_id[rec.example_id] = rec
+        self.records = records
+        self._record_by_id = rec_by_id
+
     @staticmethod
-    def _resolve_existing_path(path_value: str, results_dir: str) -> str:
-        """
-        Resolve a manifest path that may be absolute or workspace-relative.
-        Returns the first existing path candidate; otherwise returns cwd-relative.
-        """
-        raw = Path(path_value)
-        if raw.is_absolute():
-            return str(raw)
+    def _issue_tags(issue_type: str, category: str) -> Tuple[str, ...]:
+        issue = str(issue_type or "").strip().lower()
+        tags = [category]
+        if issue == "best":
+            tags.extend(["good_anatomy", "closed_ring", "clean_contour"])
+        elif issue == "discmyo":
+            tags.extend(["disconnected_myo", "myo_gap", "ring_break"])
+        elif issue == "lowdice":
+            tags.extend(["low_dice", "global_shape_error", "structure_misalignment"])
+        else:
+            tags.extend([issue, "quality_pattern"])
+        return _norm_tags(tags)
 
-        candidates = [
-            (Path.cwd() / raw),
-            (Path(results_dir) / raw),
-            (Path(results_dir).parent / raw),
-        ]
-        for cand in candidates:
-            if cand.exists():
-                return str(cand.resolve())
-        return str((Path.cwd() / raw).resolve())
+    @staticmethod
+    def _confidence_prior(dice: float, category: str) -> float:
+        d = max(0.0, min(1.0, float(dice)))
+        if category == "good":
+            return max(0.05, d)
+        return max(0.05, 1.0 - d)
 
-    def _load_four_way_collections(self, results_dir: str) -> None:
-        """
-        Load four-category reference pools from triage_4way_collections_gold manifest.
-
-        Expected manifest:
-          {results_dir}/triage_4way_collections_gold/triage_4way_manifest.csv
-        """
-        manifest_path = os.path.join(
-            results_dir, "triage_4way_collections_gold", "triage_4way_manifest.csv"
+    def _record_from_example(self, ex: VisualExample) -> KnowledgeRecord:
+        view = _norm_view(ex.view)
+        issue = _norm_tag(ex.issue_type or "unknown")
+        eid = f"vkb:{ex.category}:{view}:{issue}:{ex.stem}"
+        return KnowledgeRecord(
+            example_id=eid,
+            stage="quality_assessment",
+            view_type=view,
+            defect_tags=self._issue_tags(ex.issue_type, ex.category),
+            action_tags=("inspect_overlay",),
+            expected_outcome="good" if ex.category == "good" else "bad",
+            confidence_prior=self._confidence_prior(ex.dice, ex.category),
+            artifact_path=ex.path,
+            source=f"legacy_visual_kb:{ex.category}",
         )
-        if not os.path.exists(manifest_path):
-            logger.info("VisualKnowledgeBase 4-way manifest missing: %s", manifest_path)
-            return
 
-        loaded = 0
-        seen = set()
-        try:
-            with open(manifest_path, "r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    category = (row.get("category") or "").strip()
-                    stem = (row.get("stem") or "").strip()
-                    overlay_rel = (
-                        (row.get("category_overlay_path") or "")
-                        or (row.get("overlay_path") or "")
-                    ).strip()
-                    if not category or not stem or not overlay_rel:
-                        continue
+    def retrieve(
+        self,
+        stage: str,
+        view_type: Optional[str],
+        defect_tags: Sequence[str],
+        top_k: int = 4,
+        use_confidence_prior: bool = True,
+    ) -> List[KnowledgeRecord]:
+        """
+        Deterministic retrieval of typed knowledge examples.
 
-                    overlay_path = self._resolve_existing_path(overlay_rel, results_dir)
-                    if not os.path.exists(overlay_path):
-                        continue
-
-                    dedup_key = (category, stem, overlay_path)
-                    if dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
-
-                    try:
-                        dice = float((row.get("mean_dice") or "0").strip())
-                    except ValueError:
-                        dice = 0.0
-
-                    ex = VisualExample(
-                        path=overlay_path,
-                        dice=dice,
-                        view=(row.get("view") or "").strip(),
-                        issue_type=(row.get("issue_type") or "").strip(),
-                        stem=stem,
-                        category=category,
-                    )
-                    self.four_way_examples.setdefault(category, []).append(ex)
-                    loaded += 1
-        except Exception as e:
-            logger.warning("Failed loading 4-way references from %s: %s", manifest_path, e)
-            return
-
-        for examples in self.four_way_examples.values():
-            examples.sort(key=lambda ex: ex.stem)
-        logger.info(
-            "VisualKnowledgeBase 4-way refs loaded: %d examples across %d categories",
-            loaded,
-            len(self.four_way_examples),
+        Ranking: tag-overlap + confidence-prior, tie-break by example_id.
+        """
+        return _default_retrieval(
+            self.records,
+            stage=stage,
+            view_type=view_type,
+            defect_tags=defect_tags,
+            top_k=top_k,
+            use_confidence_prior=use_confidence_prior,
         )
+
+    def get_record(self, example_id: str) -> Optional[KnowledgeRecord]:
+        return self._record_by_id.get(example_id)
 
     def _materialize_single_panel_references(self, results_dir: str) -> None:
         """
@@ -252,6 +342,12 @@ class VisualKnowledgeBase:
         m = _FNAME_RE.match(fname)
         if not m:
             return None
+        if not VisualKnowledgeBase._legacy_warned:
+            logger.warning(
+                "VisualKnowledgeBase.load: detected legacy filename KB format; "
+                "auto-normalizing to typed records."
+            )
+            VisualKnowledgeBase._legacy_warned = True
         dice_str, view, issue_type, stem = m.groups()
         return VisualExample(
             path=os.path.join(directory, fname),
@@ -271,18 +367,8 @@ class VisualKnowledgeBase:
     @staticmethod
     def _normalize_view(view: Optional[str]) -> str:
         """Normalize raw view tags (e.g. 4c, 4ch, 4CH) to a canonical token."""
-        if not view:
-            return ""
-        token = re.sub(r"[^a-z0-9]", "", str(view).strip().lower())
-        if token in {"2c", "2ch"}:
-            return "2CH"
-        if token in {"3c", "3ch"}:
-            return "3CH"
-        if token in {"4c", "4ch"}:
-            return "4CH"
-        if "sax" in token:
-            return "SAX"
-        return token.upper()
+        out = _norm_view(view)
+        return "" if out == "ANY" else out
 
     @staticmethod
     def _select_examples(
@@ -392,38 +478,6 @@ class VisualKnowledgeBase:
             self.get_bad_examples(n=n_bad, view_type=view_type, seed=seed),
         )
 
-    def get_four_way_set(
-        self,
-        categories: List[str],
-        view_type: Optional[str] = None,
-        seed: Optional[str] = None,
-    ) -> List[VisualExample]:
-        """
-        Return exactly one reference per requested category when possible.
-        If view_type is set, prefer same-view references; otherwise fallback to any.
-        """
-        refs: List[VisualExample] = []
-        wanted = self._normalize_view(view_type) if view_type else ""
-        for category in categories:
-            pool = list(self.four_way_examples.get(category, []))
-            if not pool:
-                continue
-
-            selected_pool = pool
-            salt = f"four_way:{category}:any"
-            if wanted:
-                same_view = [
-                    ex for ex in pool if self._normalize_view(ex.view) == wanted
-                ]
-                if same_view:
-                    selected_pool = same_view
-                    salt = f"four_way:{category}:primary:{wanted}"
-                else:
-                    salt = f"four_way:{category}:fallback:{wanted}"
-
-            refs.extend(self._select_examples(selected_pool, 1, seed, salt=salt))
-        return refs
-
     @property
     def issue_types(self) -> List[str]:
         """All distinct issue types found in bad examples."""
@@ -460,9 +514,17 @@ class VisualKnowledgeBase:
             "- A TARGET matching reference quality → score 8.5-10.",
             "- Significant deviations lower the score proportionally.",
             "",
+            "### Anatomy Priors (evidence-backed, weak prior only)",
+            "- RV blood pool is typically crescent/triangular and more trabeculated than LV.",
+            "- LV blood pool is typically smoother and more compact than RV.",
+            "- Interventricular septum separates RV and LV; use it as septal orientation anchor.",
+            "- Myocardium label corresponds to LV myocardium (between LV endocardial/epicardial boundaries).",
+            "- SAX mid-slice: LV should be enclosed or near-enclosed by Myo.",
+            "- LAX (2CH/3CH/4CH), basal valve-plane, and extreme apical slices: do not force strict 360-degree Myo closure.",
+            "",
             "### Good Segmentation Characteristics",
-            "- Myocardium (green/yellow): forms a COMPLETE, CLOSED ring around LV",
-            "- LV (blue/red-brown): single solid region, fully enclosed by Myo ring",
+            "- Myocardium (green/yellow): SAX mid-slice should be complete/near-closed around LV; LAX focuses on plausible continuity",
+            "- LV (blue/red-brown): single solid region; in SAX usually enclosed by Myo, in LAX near-boundary alignment is the key check",
             "- RV (red/cyan): located adjacent to septum, separated from LV by Myo",
             "- All three structures present, no fragmentation",
             "- Boundaries are smooth and follow anatomical contours",
@@ -514,6 +576,12 @@ class RepairExample:
     op_name: str          # operation that was applied
     stem: str             # case stem
     category: str         # "improved" | "degraded" | "neutral"
+    example_id: str = ""
+    view_type: str = ""
+    defect_tags: Tuple[str, ...] = field(default_factory=tuple)
+    action_tags: Tuple[str, ...] = field(default_factory=tuple)
+    confidence_prior: float = 0.5
+    source: str = "legacy_repair_kb"
 
 
 class RepairComparisonKB:
@@ -531,6 +599,11 @@ class RepairComparisonKB:
         self.improved: List[RepairExample] = []
         self.degraded: List[RepairExample] = []
         self.neutral:  List[RepairExample] = []
+        self.records: List[KnowledgeRecord] = []
+        self._record_by_id: Dict[str, KnowledgeRecord] = {}
+        self._example_by_id: Dict[str, RepairExample] = {}
+
+    _legacy_warned: ClassVar[bool] = False
 
     @classmethod
     def load(cls, kb_dir: str) -> "RepairComparisonKB":
@@ -549,20 +622,126 @@ class RepairComparisonKB:
                 m = _REPAIR_FNAME_RE.match(fname)
                 if not m:
                     continue
+                if not cls._legacy_warned:
+                    logger.warning(
+                        "RepairComparisonKB.load: detected legacy filename KB format; "
+                        "auto-normalizing to typed records."
+                    )
+                    cls._legacy_warned = True
                 delta_str, op_name, stem = m.groups()
-                store.append(RepairExample(
+                ex = RepairExample(
                     path=os.path.join(cat_dir, fname),
                     dice_delta=float(delta_str),
                     op_name=op_name,
                     stem=stem,
                     category=cat,
-                ))
+                )
+                kb._fill_repair_schema(ex)
+                store.append(ex)
 
+        kb._materialize_records()
         logger.info(
             "RepairComparisonKB loaded: %d improved, %d degraded, %d neutral",
             len(kb.improved), len(kb.degraded), len(kb.neutral),
         )
         return kb
+
+    @staticmethod
+    def _op_tags(op_name: str) -> Tuple[str, ...]:
+        raw = str(op_name or "").strip().lower()
+        toks = [t for t in re.split(r"[^a-z0-9]+", raw) if t]
+        tags: List[str] = list(toks)
+        if "atlas" in toks:
+            tags.append("atlas_guided")
+        if "neighbor" in toks:
+            tags.append("neighbor_guided")
+        if "bridge" in toks:
+            tags.append("gap_repair")
+        if "fill" in toks:
+            tags.append("hole_repair")
+        for cls_tok in ("rv", "myo", "lv"):
+            if cls_tok in toks:
+                tags.append(f"target_{cls_tok}")
+        return _norm_tags(tags)
+
+    @staticmethod
+    def _defect_tags_from_repair(ex: RepairExample) -> Tuple[str, ...]:
+        tags: List[str] = [ex.category]
+        tags.extend(list(RepairComparisonKB._op_tags(ex.op_name)))
+        if ex.category == "improved":
+            tags.append("positive_repair")
+        elif ex.category == "degraded":
+            tags.append("regression_risk")
+        else:
+            tags.append("neutral_change")
+        return _norm_tags(tags)
+
+    @staticmethod
+    def _confidence_from_delta(delta: float, category: str) -> float:
+        mag = min(1.0, max(0.0, abs(float(delta)) / 0.10))
+        if category == "neutral":
+            return max(0.05, 0.20 * (1.0 - mag))
+        return max(0.05, 0.25 + 0.75 * mag)
+
+    def _fill_repair_schema(self, ex: RepairExample) -> None:
+        ex.view_type = _parse_view_from_stem(ex.stem)
+        ex.action_tags = self._op_tags(ex.op_name)
+        ex.defect_tags = self._defect_tags_from_repair(ex)
+        ex.confidence_prior = self._confidence_from_delta(ex.dice_delta, ex.category)
+        safe_op = _norm_tag(ex.op_name or "op")
+        ex.example_id = f"rkb:{ex.category}:{ex.view_type}:{safe_op}:{ex.stem}"
+        ex.source = f"legacy_repair_kb:{ex.category}"
+
+    def _materialize_records(self) -> None:
+        records: List[KnowledgeRecord] = []
+        by_id: Dict[str, KnowledgeRecord] = {}
+        ex_by_id: Dict[str, RepairExample] = {}
+        for ex in self.improved + self.degraded + self.neutral:
+            rec = KnowledgeRecord(
+                example_id=ex.example_id,
+                stage="repair_verification",
+                view_type=ex.view_type or "ANY",
+                defect_tags=tuple(ex.defect_tags),
+                action_tags=tuple(ex.action_tags),
+                expected_outcome=ex.category,
+                confidence_prior=float(ex.confidence_prior),
+                artifact_path=ex.path,
+                source=ex.source,
+            )
+            records.append(rec)
+            by_id[rec.example_id] = rec
+            ex_by_id[rec.example_id] = ex
+        self.records = records
+        self._record_by_id = by_id
+        self._example_by_id = ex_by_id
+
+    def retrieve(
+        self,
+        stage: str,
+        view_type: Optional[str],
+        defect_tags: Sequence[str],
+        top_k: int = 4,
+        use_confidence_prior: bool = True,
+    ) -> List[KnowledgeRecord]:
+        """
+        Deterministic retrieval for repair-verification evidence.
+        """
+        return _default_retrieval(
+            self.records,
+            stage=stage,
+            view_type=view_type,
+            defect_tags=defect_tags,
+            top_k=top_k,
+            use_confidence_prior=use_confidence_prior,
+        )
+
+    def get_examples_by_ids(self, example_ids: Sequence[str]) -> List[RepairExample]:
+        out: List[RepairExample] = []
+        for eid in example_ids:
+            ex = self._example_by_id.get(str(eid))
+            if ex is not None:
+                out.append(ex)
+        return out
 
     @property
     def total(self) -> int:

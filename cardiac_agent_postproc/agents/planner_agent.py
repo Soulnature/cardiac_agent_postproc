@@ -7,12 +7,41 @@ Receives diagnoses from DiagnosisAgent and produces an optimized repair plan
 from __future__ import annotations
 
 import json
-import os
+from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 from .base_agent import BaseAgent
 from .message_bus import CaseContext, MessageBus, MessageType
-from .diagnosis_agent import ISSUE_OPS_MAP, normalize_direction_hint
+from .diagnosis_agent import (
+    ISSUE_OPS_MAP,
+    infer_kernel_size_fallback,
+    normalize_direction_hint,
+    normalize_kernel_size_hint,
+    supports_kernel_size_override,
+)
+
+
+_ALLOWED_STRENGTHS = {"mild", "normal", "strong"}
+
+
+def _normalize_strength(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if token in _ALLOWED_STRENGTHS:
+        return token
+    return "normal"
+
+
+def _split_operation_strength(op_name: str) -> tuple[str, str]:
+    raw = str(op_name or "").strip()
+    if not raw:
+        return "", "normal"
+    lowered = raw.lower()
+    if lowered.endswith("_mild"):
+        return raw[:-5], "mild"
+    if lowered.endswith("_strong"):
+        return raw[:-7], "strong"
+    return raw, "normal"
 
 
 class PlannerAgent(BaseAgent):
@@ -24,6 +53,12 @@ class PlannerAgent(BaseAgent):
     - Risk of regression (e.g., myo_bridge may cause touching)
     - Which ops to combine vs. skip
     """
+
+    def __init__(self, cfg: dict, bus: MessageBus):
+        self._dynamic_issue_op_stats: Dict[str, Any] = {}
+        self._dynamic_issue_op_stats_path: str = ""
+        self._dynamic_issue_op_stats_mtime_ns: int = -1
+        super().__init__(cfg, bus)
 
     @property
     def name(self) -> str:
@@ -95,10 +130,278 @@ class PlannerAgent(BaseAgent):
             "Respond with JSON ONLY:\n"
             "{\"plan\": [{\"operation\": \"...\", \"affected_class\": \"rv|myo|lv\", "
             "\"direction\": \"septal|lateral|apical|basal|global\", "
+            "\"strength\": \"mild|normal|strong\", "
+            "\"kernel_size\": \"optional odd int, e.g. 3|5|7\", "
             "\"reason\": \"must cite a provided diagnosis\", \"risk\": \"low|medium|high\"}], "
             "\"strategy\": \"brief overall approach\"}\n"
         )
         return self._prompt_with_fallback("planner_system.txt", fallback)
+
+    def _anatomy_llm_scope_enabled(self, scope_name: str) -> bool:
+        ma_cfg = self.cfg.get("multi_agent", {}) or {}
+        if not bool(ma_cfg.get("anatomy_llm_enable", True)):
+            return False
+        scope_raw = ma_cfg.get(
+            "anatomy_llm_scope", ["diagnosis", "planner", "verifier"]
+        )
+        if isinstance(scope_raw, list):
+            scope_set = {str(x).strip().lower() for x in scope_raw}
+        elif isinstance(scope_raw, str):
+            scope_set = {
+                str(tok).strip().lower()
+                for tok in re.split(r"[,\s]+", scope_raw)
+                if str(tok).strip()
+            }
+        else:
+            scope_set = {"diagnosis", "planner", "verifier"}
+        return str(scope_name).strip().lower() in scope_set
+
+    @staticmethod
+    def _get_anatomy_guard_summary(ctx: CaseContext) -> Dict[str, Any]:
+        summary = dict(getattr(ctx, "anatomy_latest_summary", {}) or {})
+        if summary:
+            return summary
+        return dict(getattr(ctx, "anatomy_baseline_summary", {}) or {})
+
+    def _compose_anatomy_prompt_payload(self, ctx: CaseContext) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        baseline = dict(getattr(ctx, "anatomy_baseline_summary", {}) or {})
+        latest = dict(getattr(ctx, "anatomy_latest_summary", {}) or {})
+        if baseline:
+            payload["baseline"] = baseline
+        if latest:
+            payload["latest"] = latest
+
+        last_verify = getattr(ctx, "last_verify_result", {}) or {}
+        if isinstance(last_verify, dict):
+            anat_signal = last_verify.get("anatomy_signal", {})
+            if isinstance(anat_signal, dict) and anat_signal:
+                payload["last_verify_anatomy_signal"] = anat_signal
+
+        return payload
+
+    @staticmethod
+    def _normalize_view(view_type: str) -> str:
+        token = re.sub(r"[^a-z0-9]", "", str(view_type or "").strip().lower())
+        if token in {"2c", "2ch"}:
+            return "2ch"
+        if token in {"3c", "3ch"}:
+            return "3ch"
+        if token in {"4c", "4ch"}:
+            return "4ch"
+        return token
+
+    @staticmethod
+    def _normalize_issue_key(issue: Any) -> str:
+        token = re.sub(r"[^a-z0-9_]+", "_", str(issue or "").strip().lower())
+        token = re.sub(r"_+", "_", token).strip("_")
+        return token
+
+    def _dynamic_issue_op_stats_file(self) -> Optional[Path]:
+        paths_cfg = self.cfg.get("paths", {}) or {}
+        kb_dir = paths_cfg.get("repair_kb_dir", "")
+        if not kb_dir:
+            return None
+        return Path(str(kb_dir)).expanduser() / "issue_op_stats.json"
+
+    def _load_dynamic_issue_op_stats(self) -> Dict[str, Any]:
+        stats_path = self._dynamic_issue_op_stats_file()
+        if stats_path is None:
+            return {}
+        if not stats_path.exists():
+            return {}
+
+        try:
+            st = stats_path.stat()
+            mtime_ns = int(st.st_mtime_ns)
+        except Exception:
+            return {}
+
+        path_str = str(stats_path)
+        if (
+            path_str == self._dynamic_issue_op_stats_path
+            and mtime_ns == self._dynamic_issue_op_stats_mtime_ns
+            and isinstance(self._dynamic_issue_op_stats, dict)
+        ):
+            return self._dynamic_issue_op_stats
+
+        try:
+            with stats_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception as e:
+            self.log(f"Failed to load dynamic issue_op_stats: {e}")
+            return {}
+
+        self._dynamic_issue_op_stats = payload
+        self._dynamic_issue_op_stats_path = path_str
+        self._dynamic_issue_op_stats_mtime_ns = mtime_ns
+        return payload
+
+    @staticmethod
+    def _extract_ranked_ops(payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            rows = payload.get("ops", [])
+        elif isinstance(payload, list):
+            rows = payload
+        else:
+            rows = []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            op_name = str(row.get("op", "")).strip()
+            if not op_name:
+                continue
+            item = {"op": op_name}
+            for k in ("support", "mean_delta", "improved_rate", "degraded_rate"):
+                if k in row:
+                    item[k] = row[k]
+            out.append(item)
+        return out
+
+    def _lookup_dynamic_kb_ops(
+        self,
+        issue: Any,
+        view_type: str,
+        dynamic_kb: Dict[str, Any],
+        top_k: int = 4,
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(dynamic_kb, dict) or not dynamic_kb:
+            return []
+
+        issue_key = self._normalize_issue_key(issue)
+        if not issue_key:
+            issue_key = "generic_quality_issue"
+        view_key = self._normalize_view(view_type).upper()
+        issue_stats = dynamic_kb.get("issue_stats", {})
+        view_issue_stats = dynamic_kb.get("view_issue_stats", {})
+        global_ops = dynamic_kb.get("global_ops", [])
+
+        suggestions: List[Dict[str, Any]] = []
+        seen_ops = set()
+
+        def _append_rows(rows: List[Dict[str, Any]]) -> None:
+            for row in rows:
+                op_name = str(row.get("op", "")).strip()
+                if not op_name or op_name in seen_ops:
+                    continue
+                seen_ops.add(op_name)
+                suggestions.append(row)
+                if len(suggestions) >= max(1, int(top_k)):
+                    return
+
+        if isinstance(view_issue_stats, dict):
+            per_view = view_issue_stats.get(view_key, {})
+            if isinstance(per_view, dict) and issue_key in per_view:
+                _append_rows(self._extract_ranked_ops(per_view.get(issue_key, {})))
+        if len(suggestions) >= max(1, int(top_k)):
+            return suggestions[: max(1, int(top_k))]
+
+        if isinstance(issue_stats, dict) and issue_key in issue_stats:
+            _append_rows(self._extract_ranked_ops(issue_stats.get(issue_key, {})))
+        if len(suggestions) >= max(1, int(top_k)):
+            return suggestions[: max(1, int(top_k))]
+
+        if isinstance(view_issue_stats, dict):
+            per_view = view_issue_stats.get(view_key, {})
+            if isinstance(per_view, dict):
+                for known_issue, payload in per_view.items():
+                    k = self._normalize_issue_key(known_issue)
+                    if not k:
+                        continue
+                    if issue_key in k or k in issue_key:
+                        _append_rows(self._extract_ranked_ops(payload))
+                    if len(suggestions) >= max(1, int(top_k)):
+                        return suggestions[: max(1, int(top_k))]
+
+        if isinstance(issue_stats, dict):
+            for known_issue, payload in issue_stats.items():
+                k = self._normalize_issue_key(known_issue)
+                if not k:
+                    continue
+                if issue_key in k or k in issue_key:
+                    _append_rows(self._extract_ranked_ops(payload))
+                if len(suggestions) >= max(1, int(top_k)):
+                    return suggestions[: max(1, int(top_k))]
+
+        _append_rows(self._extract_ranked_ops(global_ops))
+        return suggestions[: max(1, int(top_k))]
+
+    def _step_conflicts_with_anatomy(
+        self,
+        step: Dict[str, Any],
+        anatomy_summary: Dict[str, Any],
+        view_type: str,
+    ) -> Optional[str]:
+        if not isinstance(anatomy_summary, dict) or not anatomy_summary:
+            return None
+
+        summary_view = self._normalize_view(str(anatomy_summary.get("view", "")))
+        current_view = self._normalize_view(view_type)
+        if summary_view and current_view and summary_view != current_view:
+            return None
+
+        hard_violations = {
+            str(x).strip().lower()
+            for x in (anatomy_summary.get("hard_violations") or [])
+            if str(x).strip()
+        }
+        action_tags = {
+            str(x).strip().lower()
+            for x in (anatomy_summary.get("action_tags") or [])
+            if str(x).strip()
+        }
+        if not hard_violations and not action_tags:
+            return None
+
+        op_name = str(step.get("operation", "")).strip().lower()
+        cls_name = str(step.get("affected_class", "")).strip().lower()
+        view = current_view
+
+        # 2CH: RV should be absent; block RV-increasing repairs.
+        has_rv_contam = (
+            "rv_in_2ch" in hard_violations
+            or "rv_present_in_2ch" in action_tags
+        )
+        if view == "2ch" and has_rv_contam:
+            rv_reduction_ops = {
+                "rv_erode",
+                "rv_erode_large",
+                "remove_islands",
+                "topology_cleanup",
+                "topology_cleanup_mild",
+                "topology_cleanup_strong",
+                "safe_topology_fix",
+            }
+            if cls_name == "rv" and op_name not in rv_reduction_ops:
+                return "2ch_rv_contamination_conflict"
+            if op_name in {
+                "neighbor_rv_repair",
+                "atlas_rv_repair",
+                "expand_rv_intensity",
+            }:
+                return "2ch_rv_contamination_conflict"
+
+        # RV already too small/absent: avoid further RV erosion.
+        if hard_violations & {"rv_absent_3ch", "rv_absent_4ch", "rv_critically_small_4ch"}:
+            if cls_name == "rv" and op_name in {"rv_erode", "rv_erode_large"}:
+                return "rv_absent_conflict"
+
+        if "lv_absent" in hard_violations:
+            if cls_name == "lv" and op_name in {"3_erode", "3_erode_expand_myo"}:
+                return "lv_absent_conflict"
+
+        if "myo_absent" in hard_violations:
+            if cls_name == "myo" and op_name in {
+                "2_erode",
+                "2_erode_expand_lv",
+                "2_erode_expand_rv",
+            }:
+                return "myo_absent_conflict"
+
+        return None
 
 
     def process_case(self, ctx: CaseContext) -> None:
@@ -125,36 +428,31 @@ class PlannerAgent(BaseAgent):
 
         self.log(f"Planning repair for {ctx.stem} ({len(ctx.diagnoses)} diagnoses)")
 
-        # Build the prompt with all available info
-        # Load Repair Knowledge Base
-        repair_kb = {}
-        try:
-            kb_path = "repair_kb.json"
-            if os.path.exists(kb_path):
-                with open(kb_path, "r") as f:
-                    repair_kb = json.load(f)
-        except Exception as e:
-            self.log(f"Failed to load repair_kb.json: {e}")
+        # Build the prompt with all available info.
+        dynamic_kb = self._load_dynamic_issue_op_stats()
+        planner_cfg = self.cfg.get("planner", {}) or {}
+        agent_cfg = (self.cfg.get("agents", {}) or {}).get("planner", {}) or {}
+        kb_top_k = int(agent_cfg.get("knowledge_top_k", planner_cfg.get("knowledge_top_k", 4)))
+        kb_top_k = max(1, kb_top_k)
+        if not dynamic_kb:
+            self.log("Dynamic repair KB unavailable (issue_op_stats.json missing or empty)")
 
         # Enrich diagnoses with KB suggestions
         rich_diagnoses = [dict(d) for d in ctx.diagnoses]
         for d in rich_diagnoses:
-            issue = d.get("issue", "")
-            # 1. Try exact match in KB
-            kb_suggestions = repair_kb.get(issue, [])
-            # 2. Try partial match in KB (e.g. "gap" -> "broken_ring")
-            if not kb_suggestions:
-                 for key, suggests in repair_kb.items():
-                     if key in issue.lower() or issue.lower() in key:
-                         kb_suggestions = suggests
-                         break
-            
-            # Format suggestions for the prompt
+            issue = str(d.get("issue", "")).strip()
+            kb_suggestions = self._lookup_dynamic_kb_ops(
+                issue=issue,
+                view_type=ctx.view_type,
+                dynamic_kb=dynamic_kb,
+                top_k=kb_top_k,
+            )
             if kb_suggestions:
-                best_ops = [s["op"] for s in kb_suggestions]
-                d["proven_solutions"] = f"Use {best_ops} (High Confidence)"
+                best_ops = [str(s.get("op", "")).strip() for s in kb_suggestions if str(s.get("op", "")).strip()]
+                d["proven_solutions"] = f"Use {best_ops} (Dynamic KB)"
+                d["kb_evidence"] = kb_suggestions
             else:
-                d["proven_solutions"] = "No specific history"
+                d["proven_solutions"] = "No specific history in dynamic KB"
 
             # Fallback to hardcoded map if KB empty
             valid_ops = ISSUE_OPS_MAP.get(issue)
@@ -170,6 +468,11 @@ class PlannerAgent(BaseAgent):
         for ops_list in ISSUE_OPS_MAP.values():
             all_ops.update(ops_list)
 
+        anatomy_prompt_payload: Dict[str, Any] = {}
+        if self._anatomy_llm_scope_enabled("planner"):
+            anatomy_prompt_payload = self._compose_anatomy_prompt_payload(ctx)
+        anatomy_guard_summary = self._get_anatomy_guard_summary(ctx)
+
         prompt = (
             f"Case: {ctx.stem} (view: {ctx.view_type})\n\n"
             f"Diagnoses (with Proven Solutions):\n{diag_summary}\n\n"
@@ -179,6 +482,12 @@ class PlannerAgent(BaseAgent):
             f"Create an optimized repair plan. **Prioritize 'Proven Solutions' if available.**\n"
             f"Order operations carefully. If a fix might cause a side effect, add a mitigation step."
         )
+        if anatomy_prompt_payload:
+            prompt += (
+                "\n\nAnatomy structured summary (no-GT):\n"
+                f"{json.dumps(anatomy_prompt_payload, ensure_ascii=False)}\n"
+                "Use this summary to avoid plans that worsen hard anatomical violations."
+            )
 
         result = self.think_json(prompt)
         plan = result.get("plan", [])
@@ -188,12 +497,22 @@ class PlannerAgent(BaseAgent):
         if not plan:
             plan = self._fallback_plan(ctx.diagnoses)
             strategy = "Fallback: operations from diagnoses in severity order"
-        plan = self._sanitize_plan(plan, ctx.diagnoses)
+        plan = self._sanitize_plan(
+            plan,
+            ctx.diagnoses,
+            anatomy_summary=anatomy_guard_summary,
+            view_type=ctx.view_type,
+        )
 
         atlas_applied_before = self._has_prior_atlas_class_repair(ctx)
         if atlas_applied_before and int(getattr(ctx, "rounds_completed", 0)) >= 1:
             post_plan = self._build_post_atlas_cleanup_plan(ctx.diagnoses)
-            plan = self._sanitize_plan(post_plan, ctx.diagnoses)
+            plan = self._sanitize_plan(
+                post_plan,
+                ctx.diagnoses,
+                anatomy_summary=anatomy_guard_summary,
+                view_type=ctx.view_type,
+            )
             strategy = (
                 "Policy override: atlas class replacement already applied in prior "
                 "round -> run post-processing cleanup in this round"
@@ -205,7 +524,12 @@ class PlannerAgent(BaseAgent):
         else:
             forced_atlas_plan = self._force_atlas_plan_if_needed(ctx, ctx.diagnoses)
             if forced_atlas_plan:
-                plan = self._sanitize_plan(forced_atlas_plan, ctx.diagnoses)
+                plan = self._sanitize_plan(
+                    forced_atlas_plan,
+                    ctx.diagnoses,
+                    anatomy_summary=anatomy_guard_summary,
+                    view_type=ctx.view_type,
+                )
                 strategy = (
                     "Policy override: low triage score with near-missing class -> "
                     "force atlas replacement"
@@ -239,8 +563,14 @@ class PlannerAgent(BaseAgent):
         Called when an op fails or the Verifier rejects the result.
         """
         self.log(f"Revising plan for {ctx.stem} based on feedback")
+        anatomy_guard_summary = self._get_anatomy_guard_summary(ctx)
+        anatomy_prompt_payload: Dict[str, Any] = {}
+        if self._anatomy_llm_scope_enabled("planner"):
+            anatomy_prompt_payload = self._compose_anatomy_prompt_payload(ctx)
 
-        suggested_plan = self._build_suggested_plan_from_feedback(feedback, ctx.diagnoses)
+        suggested_plan = self._build_suggested_plan_from_feedback(
+            feedback, ctx.diagnoses, ctx=ctx
+        )
         if suggested_plan:
             strategy = "Deterministic fallback from executor hard-gate suggested_ops"
             revision_content = {"plan": suggested_plan, "strategy": strategy}
@@ -265,11 +595,22 @@ class PlannerAgent(BaseAgent):
             f"Current diagnoses: {json.dumps(ctx.diagnoses, indent=2, default=str)}\n\n"
             f"What should we try differently? Consider alternative operations or sequences."
         )
+        if anatomy_prompt_payload:
+            prompt += (
+                "\n\nAnatomy structured summary (no-GT):\n"
+                f"{json.dumps(anatomy_prompt_payload, ensure_ascii=False)}\n"
+                "Avoid revisions that worsen hard anatomical violations."
+            )
 
         result = self.think_json(prompt)
         plan = result.get("plan", [])
         strategy = result.get("strategy", "Revised plan based on feedback")
-        plan = self._sanitize_plan(plan, ctx.diagnoses)
+        plan = self._sanitize_plan(
+            plan,
+            ctx.diagnoses,
+            anatomy_summary=anatomy_guard_summary,
+            view_type=ctx.view_type,
+        )
 
         revision_content = {"plan": plan, "strategy": strategy}
         self.send_message(
@@ -289,6 +630,7 @@ class PlannerAgent(BaseAgent):
         self,
         feedback: Dict[str, Any],
         diagnoses: List[Dict[str, Any]],
+        ctx: Optional[CaseContext] = None,
     ) -> List[Dict[str, Any]]:
         """
         Build a deterministic fallback plan from executor-provided suggested_ops
@@ -338,6 +680,7 @@ class PlannerAgent(BaseAgent):
             d_bbox = diag.get("bbox")
             if not (isinstance(d_bbox, list) and len(d_bbox) == 4):
                 d_bbox = None
+            d_kernel = normalize_kernel_size_hint(diag.get("kernel_size", None))
 
             for sop in suggested_ops:
                 op_name = str(sop).strip()
@@ -358,6 +701,8 @@ class PlannerAgent(BaseAgent):
                 }
                 if d_bbox is not None:
                     step["bbox"] = d_bbox
+                if d_kernel is not None:
+                    step["kernel_size"] = d_kernel
                 plan.append(step)
                 seen.add(key)
                 if len(plan) >= max_steps:
@@ -365,7 +710,13 @@ class PlannerAgent(BaseAgent):
             if len(plan) >= max_steps:
                 break
 
-        return self._sanitize_plan(plan, diagnoses)
+        anatomy_summary = self._get_anatomy_guard_summary(ctx) if ctx is not None else None
+        return self._sanitize_plan(
+            plan,
+            diagnoses,
+            anatomy_summary=anatomy_summary,
+            view_type=ctx.view_type if ctx is not None else "",
+        )
 
     def _fallback_plan(self, diagnoses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Create a simple plan from diagnoses when LLM fails."""
@@ -380,13 +731,18 @@ class PlannerAgent(BaseAgent):
         for d in sorted_diags:
             op = d.get("operation", "")
             if op and op not in seen_ops:
-                plan.append({
+                step = {
                     "operation": op,
                     "affected_class": d.get("affected_class", "myo"),
                     "direction": d.get("direction", "global"),
+                    "strength": "normal",
                     "reason": f"Fix {d.get('issue', 'unknown')}",
                     "risk": "unknown",
-                })
+                }
+                kernel_size = normalize_kernel_size_hint(d.get("kernel_size", None))
+                if kernel_size is not None:
+                    step["kernel_size"] = kernel_size
+                plan.append(step)
                 seen_ops.add(op)
 
         return plan
@@ -764,6 +1120,8 @@ class PlannerAgent(BaseAgent):
         self,
         raw_plan: List[Dict[str, Any]],
         diagnoses: List[Dict[str, Any]],
+        anatomy_summary: Optional[Dict[str, Any]] = None,
+        view_type: str = "",
     ) -> List[Dict[str, Any]]:
         """
         Enforce deterministic safeguards:
@@ -782,19 +1140,30 @@ class PlannerAgent(BaseAgent):
         for step in raw_steps:
             if not isinstance(step, dict):
                 continue
-            op = str(step.get("operation", "")).strip()
+            raw_op = str(step.get("operation", "")).strip()
+            op, op_strength = _split_operation_strength(raw_op)
+            op = str(op or "").strip().lower()
             if not op:
                 continue
             item = dict(step)
             item["operation"] = op
             item.setdefault("affected_class", "myo")
             item.setdefault("direction", "global")
+            if op_strength != "normal":
+                item["strength"] = op_strength
+            item["strength"] = _normalize_strength(item.get("strength", "normal"))
+            kernel_size = normalize_kernel_size_hint(item.get("kernel_size", None))
+            if kernel_size is None:
+                item.pop("kernel_size", None)
+            else:
+                item["kernel_size"] = kernel_size
             item.setdefault("reason", "")
             item.setdefault("risk", "unknown")
             step_key = (
                 item["operation"],
                 str(item["affected_class"]).strip().lower(),
                 str(item["direction"]).strip().lower(),
+                item.get("kernel_size", None),
             )
             if step_key in seen_steps:
                 continue
@@ -866,6 +1235,13 @@ class PlannerAgent(BaseAgent):
                 )
                 if diag_dir != "global" and step_dir != diag_dir:
                     step["direction"] = diag_dir
+                diag_kernel = normalize_kernel_size_hint(
+                    best_diag.get("kernel_size", None)
+                )
+                if ("kernel_size" not in step or step.get("kernel_size") is None) and (
+                    diag_kernel is not None
+                ):
+                    step["kernel_size"] = diag_kernel
 
             # Coupled-op policy:
             # Prefer operations that reassign vacated boundary pixels to the
@@ -894,6 +1270,24 @@ class PlannerAgent(BaseAgent):
                     step["reason"] = f"{step['reason']} [{note}]"
                 else:
                     step["reason"] = note
+
+            current_kernel = normalize_kernel_size_hint(step.get("kernel_size", None))
+            if current_kernel is not None and not supports_kernel_size_override(
+                step["operation"]
+            ):
+                step.pop("kernel_size", None)
+            elif current_kernel is not None:
+                step["kernel_size"] = current_kernel
+
+            if step.get("kernel_size", None) is None:
+                fallback_kernel = infer_kernel_size_fallback(
+                    issue=str(best_diag.get("issue", "") if best_diag else ""),
+                    operation=step["operation"],
+                    severity=str(best_diag.get("severity", "medium") if best_diag else "medium"),
+                    strength=step.get("strength", "normal"),
+                )
+                if fallback_kernel is not None:
+                    step["kernel_size"] = fallback_kernel
             
             # --- SAFETY CHECK REMOVED ---
             # ExecutorAgent now handles missing bboxes via "Smart Global" inference (computed from direction).
@@ -908,6 +1302,18 @@ class PlannerAgent(BaseAgent):
             if direction_lower == "basal" and any(x in op_name_lower for x in ["convex", "hull", "bridge", "close"]):
                  self.log(f"WARNING: Dropping anatomical violation '{step['operation']}' for basal/valve plane.")
                  continue
+
+            anatomy_conflict = self._step_conflicts_with_anatomy(
+                step=step,
+                anatomy_summary=(anatomy_summary or {}),
+                view_type=view_type,
+            )
+            if anatomy_conflict:
+                self.log(
+                    "WARNING: Dropping step due to anatomy summary conflict "
+                    f"({anatomy_conflict}): {step['operation']}"
+                )
+                continue
 
             enriched_plan.append(step)
 

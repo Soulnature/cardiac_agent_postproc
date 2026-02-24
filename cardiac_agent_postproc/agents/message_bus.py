@@ -96,6 +96,14 @@ class CaseContext:
     # Diagnosis
     diagnoses: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Anatomy score (no-GT quality proxy, view-aware)
+    anatomy_stats: Optional[Any] = None          # Dict[str, AnatomyStats] — loaded once per batch
+    anatomy_score_before: float = -1.0           # anatomy score of the original (pre-repair) mask
+    anatomy_score_current: float = -1.0          # current-step anatomy score reference for monotonic gating
+    anatomy_score_history: List[float] = field(default_factory=list)
+    anatomy_baseline_summary: Dict[str, Any] = field(default_factory=dict)  # structured baseline summary for LLM
+    anatomy_latest_summary: Dict[str, Any] = field(default_factory=dict)    # latest round summary for LLM
+
     # Execution
     applied_ops: List[Dict[str, Any]] = field(default_factory=list)
     rqs_history: List[float] = field(default_factory=list)
@@ -108,6 +116,7 @@ class CaseContext:
     verifier_approved: bool = False
     verifier_feedback: str = ""
     last_verify_result: Dict[str, Any] = field(default_factory=dict)
+    knowledge_trace: List[Dict[str, Any]] = field(default_factory=list)
 
     # Executor diagnostics / fallbacks
     executor_high_risk_unlock: bool = False
@@ -124,6 +133,18 @@ class CaseContext:
     best_intermediate_reason: str = ""
     best_intermediate_ops: List[Dict[str, Any]] = field(default_factory=list)
     best_intermediate_is_original: bool = True
+    best_intermediate_online_score: float = float("nan")
+    best_intermediate_anatomy_score: float = float("nan")
+    # Nonapproved final-pick policy cache: anatomy-priority best intermediate.
+    best_anatomy_intermediate_mask: Optional[np.ndarray] = None
+    best_anatomy_intermediate_score: float = float("nan")
+    best_anatomy_intermediate_delta: float = float("nan")
+    best_anatomy_intermediate_round: int = 0
+    best_anatomy_intermediate_verdict: str = "baseline_original"
+    best_anatomy_intermediate_reason: str = ""
+    best_anatomy_intermediate_ops: List[Dict[str, Any]] = field(default_factory=list)
+    best_anatomy_intermediate_is_original: bool = True
+    best_anatomy_intermediate_online_score: float = float("nan")
 
     # Metrics (populated during evaluation if GT available)
     dice_macro: float = -1.0
